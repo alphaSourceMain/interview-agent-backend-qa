@@ -19,6 +19,7 @@ const TRANSCRIPTS_BUCKET = process.env.SUPABASE_TRANSCRIPTS_BUCKET || 'transcrip
 
 const DAILY_ROOM_RE = /(^https?:\/\/)?([a-z0-9-]+\.)?(tavus\.daily\.co|c\.daily\.co)(\/|\?|$)/i;
 const ANALYSIS_TRIGGER_TTL_MS = 2 * 60 * 1000;
+const ENABLE_TAVUS_PERCEPTION_EVENTS = process.env.ENABLE_TAVUS_PERCEPTION_EVENTS === 'true';
 const analysisTriggerGuard = new Map();
 const roleJdCache = new Map();
 
@@ -107,6 +108,261 @@ function clampScore(value) {
   if (!Number.isFinite(n)) return null;
   if (n > 0 && n <= 1) return Math.round(n * 100);
   return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function safeTopKeys(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : [];
+}
+
+const PERCEPTION_EVENT_PAYLOAD_DROP_KEYS = new Set([
+  'image',
+  'images',
+  'frame',
+  'frames',
+  'screenshot',
+  'screenshots',
+  'base64',
+  'image_base64',
+  'media',
+  'binary',
+  'blob',
+  'data_url'
+]);
+
+function sanitizePerceptionEventPayload(value) {
+  if (Array.isArray(value)) return value.map((item) => sanitizePerceptionEventPayload(item));
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (PERCEPTION_EVENT_PAYLOAD_DROP_KEYS.has(String(key).toLowerCase())) continue;
+    out[key] = sanitizePerceptionEventPayload(item);
+  }
+  return out;
+}
+
+function normalizeOptionalTimestamp(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+function isDuplicateInsertError(error) {
+  const msg = String(error?.message || '');
+  return error?.code === '23505' || /duplicate key/i.test(msg);
+}
+
+function buildPerceptionEventNormalized(body, eventType, toolName) {
+  const properties = fromAny(body, 'properties') || fromAny(body, 'payload.properties') || {};
+  const seq = pickFirst(
+    fromAny(body, 'seq'),
+    fromAny(body, 'sequence'),
+    fromAny(body, 'properties.seq'),
+    fromAny(body, 'properties.sequence'),
+    fromAny(body, 'payload.seq'),
+    fromAny(body, 'payload.sequence'),
+    fromAny(body, 'payload.properties.seq'),
+    fromAny(body, 'payload.properties.sequence')
+  );
+  const turnIdx = pickFirst(
+    fromAny(body, 'turn_idx'),
+    fromAny(body, 'turnIndex'),
+    fromAny(body, 'turn.index'),
+    fromAny(body, 'properties.turn_idx'),
+    fromAny(body, 'properties.turnIndex'),
+    fromAny(body, 'payload.turn_idx'),
+    fromAny(body, 'payload.turnIndex'),
+    fromAny(body, 'payload.properties.turn_idx'),
+    fromAny(body, 'payload.properties.turnIndex')
+  );
+  const messageType = pickFirst(
+    fromAny(body, 'message_type'),
+    fromAny(body, 'messageType'),
+    fromAny(body, 'message.type'),
+    fromAny(body, 'properties.message_type'),
+    fromAny(body, 'properties.messageType'),
+    fromAny(body, 'payload.message_type'),
+    fromAny(body, 'payload.messageType'),
+    fromAny(body, 'payload.message.type')
+  );
+  const modalityRaw = pickFirst(
+    fromAny(body, 'modality'),
+    fromAny(body, 'properties.modality'),
+    fromAny(body, 'payload.modality'),
+    fromAny(body, 'payload.properties.modality')
+  );
+  const hasUserAudioAnalysis = !!pickFirst(
+    fromAny(body, 'user_audio_analysis'),
+    fromAny(body, 'userAudioAnalysis'),
+    fromAny(body, 'properties.user_audio_analysis'),
+    fromAny(body, 'properties.userAudioAnalysis'),
+    fromAny(body, 'payload.user_audio_analysis'),
+    fromAny(body, 'payload.userAudioAnalysis'),
+    fromAny(body, 'payload.properties.user_audio_analysis'),
+    fromAny(body, 'payload.properties.userAudioAnalysis')
+  );
+  const hasUserVisualAnalysis = !!pickFirst(
+    fromAny(body, 'user_visual_analysis'),
+    fromAny(body, 'userVisualAnalysis'),
+    fromAny(body, 'properties.user_visual_analysis'),
+    fromAny(body, 'properties.userVisualAnalysis'),
+    fromAny(body, 'payload.user_visual_analysis'),
+    fromAny(body, 'payload.userVisualAnalysis'),
+    fromAny(body, 'payload.properties.user_visual_analysis'),
+    fromAny(body, 'payload.properties.userVisualAnalysis')
+  );
+  const modality = modalityRaw
+    ? String(modalityRaw)
+    : hasUserAudioAnalysis && hasUserVisualAnalysis
+      ? 'audio_visual'
+      : hasUserAudioAnalysis
+        ? 'audio'
+        : hasUserVisualAnalysis
+          ? 'visual'
+          : null;
+
+  const normalized = {
+    event_type: eventType,
+    has_user_audio_analysis: hasUserAudioAnalysis,
+    has_user_visual_analysis: hasUserVisualAnalysis,
+    payload_top_keys: safeTopKeys(body),
+    properties_top_keys: safeTopKeys(properties)
+  };
+  if (messageType !== undefined && messageType !== null) normalized.message_type = String(messageType);
+  if (seq !== undefined && seq !== null) normalized.seq = seq;
+  if (turnIdx !== undefined && turnIdx !== null) normalized.turn_idx = turnIdx;
+  if (modality) normalized.modality = modality;
+  if (toolName) normalized.tool_name = toolName;
+  return normalized;
+}
+
+function getPerceptionEventIds(body, eventType, conversationId, eventReceivedAtIso) {
+  const eventId = pickFirst(
+    fromAny(body, 'event_id'),
+    fromAny(body, 'eventId'),
+    fromAny(body, 'event.id'),
+    fromAny(body, 'properties.event_id'),
+    fromAny(body, 'properties.eventId'),
+    fromAny(body, 'properties.event.id'),
+    fromAny(body, 'payload.event_id'),
+    fromAny(body, 'payload.eventId'),
+    fromAny(body, 'payload.event.id')
+  );
+  const tavusCreatedAt = normalizeOptionalTimestamp(pickFirst(
+    fromAny(body, 'tavus_created_at'),
+    fromAny(body, 'created_at'),
+    fromAny(body, 'createdAt'),
+    fromAny(body, 'timestamp'),
+    fromAny(body, 'event_created_at'),
+    fromAny(body, 'properties.tavus_created_at'),
+    fromAny(body, 'properties.created_at'),
+    fromAny(body, 'properties.createdAt'),
+    fromAny(body, 'properties.timestamp'),
+    fromAny(body, 'payload.tavus_created_at'),
+    fromAny(body, 'payload.created_at'),
+    fromAny(body, 'payload.createdAt'),
+    fromAny(body, 'payload.timestamp')
+  ));
+  const seq = pickFirst(
+    fromAny(body, 'seq'),
+    fromAny(body, 'sequence'),
+    fromAny(body, 'properties.seq'),
+    fromAny(body, 'properties.sequence'),
+    fromAny(body, 'payload.seq'),
+    fromAny(body, 'payload.sequence')
+  );
+  const turnIdx = pickFirst(
+    fromAny(body, 'turn_idx'),
+    fromAny(body, 'turnIndex'),
+    fromAny(body, 'properties.turn_idx'),
+    fromAny(body, 'properties.turnIndex'),
+    fromAny(body, 'payload.turn_idx'),
+    fromAny(body, 'payload.turnIndex')
+  );
+  const timestampForDedupe = tavusCreatedAt || eventReceivedAtIso;
+  const dedupeKey = eventId
+    ? null
+    : [eventType || 'unknown', conversationId || 'unknown', timestampForDedupe || 'unknown', seq ?? '', turnIdx ?? ''].join('|');
+  return {
+    event_id: eventId === undefined || eventId === null || String(eventId).trim() === '' ? null : String(eventId),
+    tavus_created_at: tavusCreatedAt,
+    dedupe_key: dedupeKey
+  };
+}
+
+async function ingestPerceptionEvent({ interview, body, eventType, requestId, conversationId, eventReceivedAtIso, toolName }) {
+  const eventIds = getPerceptionEventIds(body, eventType, conversationId, eventReceivedAtIso);
+  const normalized = buildPerceptionEventNormalized(body, eventType, toolName);
+  const logBase = {
+    request_id: requestId || null,
+    event_type: eventType || null,
+    interview_id: interview?.id || null,
+    conversation_id: conversationId || null,
+    event_id: eventIds.event_id,
+    dedupe_key: eventIds.dedupe_key,
+    payload_top_keys: normalized.payload_top_keys
+  };
+
+  try {
+    const { error } = await supabaseAdmin
+      .from('interview_perception_events')
+      .insert({
+        interview_id: interview.id,
+        client_id: interview.client_id || null,
+        conversation_id: conversationId || interview.tavus_application_id || interview.conversation_id || null,
+        event_type: eventType,
+        event_id: eventIds.event_id,
+        tavus_created_at: eventIds.tavus_created_at,
+        payload: sanitizePerceptionEventPayload(body || {}),
+        normalized,
+        dedupe_key: eventIds.dedupe_key
+      });
+    if (error) {
+      if (isDuplicateInsertError(error)) {
+        console.log('[webhook] perception_event skipped duplicate', logBase);
+        return { inserted: false, duplicate: true };
+      }
+      console.error('[webhook] perception_event insert failed', {
+        ...logBase,
+        error: error.message || error,
+        details: error.details || null,
+        hint: error.hint || null
+      });
+      Sentry.captureException(new Error(error.message || 'perception_event_insert_failed'), {
+        tags: {
+          route_name: 'tavus_webhook',
+          surface: 'backend',
+          event_type: eventType || undefined,
+          interview_id: interview?.id || undefined,
+          conversation_id: conversationId || undefined
+        },
+        extra: {
+          ...logBase,
+          error_code: error.code || null,
+          error_details: error.details || null,
+          error_hint: error.hint || null
+        }
+      });
+      return { inserted: false, error };
+    }
+    console.log('[webhook] perception_event inserted', logBase);
+    return { inserted: true };
+  } catch (err) {
+    console.error('[webhook] perception_event insert failed', {
+      ...logBase,
+      error: err?.message || err
+    });
+    Sentry.captureException(err, {
+      tags: {
+        route_name: 'tavus_webhook',
+        surface: 'backend',
+        event_type: eventType || undefined,
+        interview_id: interview?.id || undefined,
+        conversation_id: conversationId || undefined
+      },
+      extra: logBase
+    });
+    return { inserted: false, error: err };
+  }
 }
 
 function elapsedSecondsSince(isoLike, endAt) {
@@ -891,10 +1147,16 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
     const isPerceptionAnalysis =
       eventType === 'conversation.perception_analysis' ||
       eventType === 'application.perception_analysis';
+    const isPerceptionEventIngestion =
+      ENABLE_TAVUS_PERCEPTION_EVENTS &&
+      (
+        eventType === 'conversation.utterance' ||
+        eventType === 'conversation.perception_tool_call'
+      );
     const isToolCall = eventType === 'conversation.tool_call';
     const isReplicaJoined = eventType === 'system.replica_joined';
     const isShutdown = eventType === 'system.shutdown';
-    const isKnownEvent = isReplicaJoined || isShutdown || isTranscriptionReady || isRecordingReady || isPerceptionAnalysis || isToolCall;
+    const isKnownEvent = isReplicaJoined || isShutdown || isTranscriptionReady || isRecordingReady || isPerceptionAnalysis || isToolCall || isPerceptionEventIngestion;
 
     interviewId = pickFirst(
       fromAny(body, 'interview_id'),
@@ -1045,6 +1307,19 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
       fromAny(body, 'properties.tool.arguments')
     );
     const toolName = String(toolNameRaw || '').trim().toLowerCase();
+
+    if (isPerceptionEventIngestion) {
+      await ingestPerceptionEvent({
+        interview,
+        body,
+        eventType,
+        requestId,
+        conversationId,
+        eventReceivedAtIso,
+        toolName
+      });
+      return res.status(200).json({ ok: true });
+    }
 
     const updates = {};
     let transcriptNonEmpty = false;

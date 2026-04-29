@@ -6,6 +6,7 @@ const Sentry = require('@sentry/node');
 const router = express.Router();
 const { createClient } = require('@supabase/supabase-js');
 const { analyzeInterviewTranscriptById } = require('../scripts/backfillInterviews.js');
+const { generateInterviewAnalysisV2 } = require('../src/lib/interviewAnalysisV2');
 const { INSUFFICIENT_SUMMARY, isSubstantiveTranscript, scoreInterview } = require('../src/lib/interviewScoring');
 const { getRoleInterviewAvailability, syncRoleInterviewLimitNotification } = require('../src/lib/roleInterviewAvailability');
 
@@ -20,6 +21,7 @@ const TRANSCRIPTS_BUCKET = process.env.SUPABASE_TRANSCRIPTS_BUCKET || 'transcrip
 const DAILY_ROOM_RE = /(^https?:\/\/)?([a-z0-9-]+\.)?(tavus\.daily\.co|c\.daily\.co)(\/|\?|$)/i;
 const ANALYSIS_TRIGGER_TTL_MS = 2 * 60 * 1000;
 const ENABLE_TAVUS_PERCEPTION_EVENTS = process.env.ENABLE_TAVUS_PERCEPTION_EVENTS === 'true';
+const ENABLE_INTERVIEW_ANALYSIS_V2 = process.env.ENABLE_INTERVIEW_ANALYSIS_V2 === 'true';
 const analysisTriggerGuard = new Map();
 const roleJdCache = new Map();
 
@@ -581,6 +583,160 @@ function isTranscriptAnalysisCompleteForRow(row) {
     if (Number.isFinite(row.transcript_scores.overall)) return true;
   }
   return isTranscriptAnalysisComplete(row.analysis);
+}
+
+function hasNoSubstantiveInterviewSummary(summary) {
+  const lower = String(summary || '').toLowerCase();
+  return (
+    lower.includes('before any substantive responses were recorded') ||
+    lower.includes('before substantive responses were captured') ||
+    lower.includes('insufficient data')
+  );
+}
+
+function logInterviewAnalysisV2(level, event, details) {
+  const payload = {
+    request_id: details?.request_id || null,
+    interview_id: details?.interview_id || null,
+    candidate_id: details?.candidate_id || null,
+    role_id: details?.role_id || null,
+    reason: details?.reason || null
+  };
+  const message = `[interview-analysis-v2] ${event}`;
+  if (level === 'error') console.error(message, payload);
+  else if (level === 'warn') console.warn(message, payload);
+  else console.log(message, payload);
+}
+
+async function getRoleContextForInterviewAnalysisV2(roleId, requestId, interviewId, candidateId) {
+  if (!roleId) return null;
+  const { data, error } = await supabaseAdmin
+    .from('roles')
+    .select('id,title,description,job_description_text,job_description_url,rubric,rubric_questions,manual_questions')
+    .eq('id', roleId)
+    .maybeSingle();
+  if (error) {
+    logInterviewAnalysisV2('warn', 'skip', {
+      request_id: requestId || null,
+      interview_id: interviewId || null,
+      candidate_id: candidateId || null,
+      role_id: roleId || null,
+      reason: 'role_context_lookup_failed'
+    });
+    return null;
+  }
+  return data || null;
+}
+
+async function maybeGenerateInterviewAnalysisV2({ interview, requestId, conversationId }) {
+  const baseLog = {
+    request_id: requestId || null,
+    interview_id: interview?.id || null,
+    candidate_id: interview?.candidate_id || null,
+    role_id: interview?.role_id || null
+  };
+
+  if (!ENABLE_INTERVIEW_ANALYSIS_V2) {
+    logInterviewAnalysisV2('info', 'skip', { ...baseLog, reason: 'disabled' });
+    return;
+  }
+  if (!supabaseAdmin || !interview?.id) {
+    logInterviewAnalysisV2('warn', 'skip', { ...baseLog, reason: 'missing_db_or_interview_id' });
+    return;
+  }
+
+  try {
+    const { data: row, error } = await supabaseAdmin
+      .from('interviews')
+      .select('id,candidate_id,role_id,transcript,transcript_scores,perception_scores,perception_analysis_text,unanswered_candidate_questions,interview_summary,interview_analysis_v2')
+      .eq('id', interview.id)
+      .maybeSingle();
+    if (error || !row) {
+      logInterviewAnalysisV2('warn', 'skip', {
+        ...baseLog,
+        reason: error?.message || 'interview_not_found'
+      });
+      return;
+    }
+
+    const logBase = {
+      request_id: requestId || null,
+      interview_id: row.id,
+      candidate_id: row.candidate_id || null,
+      role_id: row.role_id || null
+    };
+    if (row.interview_analysis_v2 && typeof row.interview_analysis_v2 === 'object') {
+      logInterviewAnalysisV2('info', 'skip', { ...logBase, reason: 'already_exists' });
+      return;
+    }
+    if (!String(row.transcript || '').trim()) {
+      logInterviewAnalysisV2('info', 'skip', { ...logBase, reason: 'missing_transcript' });
+      return;
+    }
+    if (!row.transcript_scores || typeof row.transcript_scores !== 'object' || Array.isArray(row.transcript_scores) || !Object.keys(row.transcript_scores).length) {
+      logInterviewAnalysisV2('info', 'skip', { ...logBase, reason: 'missing_transcript_scores' });
+      return;
+    }
+    if (hasNoSubstantiveInterviewSummary(row.interview_summary)) {
+      logInterviewAnalysisV2('info', 'skip', { ...logBase, reason: 'no_substantive_responses' });
+      return;
+    }
+
+    logInterviewAnalysisV2('info', 'start', { ...logBase, reason: 'eligible' });
+    const roleContext = await getRoleContextForInterviewAnalysisV2(row.role_id, requestId, row.id, row.candidate_id);
+    const analysis = await generateInterviewAnalysisV2({
+      transcript: row.transcript,
+      transcript_scores: row.transcript_scores,
+      perception_scores: row.perception_scores,
+      perception_analysis_text: row.perception_analysis_text,
+      unanswered_candidate_questions: row.unanswered_candidate_questions,
+      interview_summary: row.interview_summary,
+      role_context: roleContext,
+      request_id: requestId || null,
+      conversation_id: conversationId || null
+    });
+
+    const { error: updateError } = await supabaseAdmin
+      .from('interviews')
+      .update({ interview_analysis_v2: analysis })
+      .eq('id', row.id);
+    if (updateError) throw updateError;
+    logInterviewAnalysisV2('info', 'success', { ...logBase, reason: 'stored' });
+  } catch (err) {
+    logInterviewAnalysisV2('error', 'failure', {
+      ...baseLog,
+      reason: err?.message || String(err || 'unknown_error')
+    });
+    Sentry.captureException(err, {
+      tags: {
+        route_name: 'tavus_webhook',
+        surface: 'backend',
+        task: 'interview_analysis_v2',
+        interview_id: interview?.id || undefined
+      },
+      extra: {
+        request_id: requestId || null,
+        interview_id: interview?.id || null,
+        candidate_id: interview?.candidate_id || null,
+        role_id: interview?.role_id || null,
+        conversation_id: conversationId || null
+      }
+    });
+  }
+}
+
+function queueInterviewAnalysisV2(input) {
+  setImmediate(() => {
+    maybeGenerateInterviewAnalysisV2(input).catch((err) => {
+      logInterviewAnalysisV2('error', 'failure', {
+        request_id: input?.requestId || null,
+        interview_id: input?.interview?.id || null,
+        candidate_id: input?.interview?.candidate_id || null,
+        role_id: input?.interview?.role_id || null,
+        reason: err?.message || String(err || 'unknown_error')
+      });
+    });
+  });
 }
 
 function extractAnswerScoresFromAnalysis(analysis) {
@@ -1741,7 +1897,7 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
             }
           }
 
-        console.log('[webhook] post-transcription status normalization', {
+          console.log('[webhook] post-transcription status normalization', {
             request_id: requestId || null,
             event_type: eventType || null,
             interview_id: interview.id,
@@ -1752,6 +1908,7 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
             status_to: statusTo,
             scoring_updated: scoringResult?.updated || false
           });
+          queueInterviewAnalysisV2({ interview, requestId, conversationId });
         }
       }
     }
@@ -1849,6 +2006,7 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
             requestId,
             conversationId
           });
+          queueInterviewAnalysisV2({ interview, requestId, conversationId });
 
               const allowed = [
                 'ReadyForAnalysis',

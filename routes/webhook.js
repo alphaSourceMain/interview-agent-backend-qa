@@ -598,6 +598,7 @@ function logInterviewAnalysisV2(level, event, details) {
   const payload = {
     request_id: details?.request_id || null,
     interview_id: details?.interview_id || null,
+    conversation_id: details?.conversation_id || null,
     candidate_id: details?.candidate_id || null,
     role_id: details?.role_id || null,
     reason: details?.reason || null
@@ -608,7 +609,7 @@ function logInterviewAnalysisV2(level, event, details) {
   else console.log(message, payload);
 }
 
-async function getRoleContextForInterviewAnalysisV2(roleId, requestId, interviewId, candidateId) {
+async function getRoleContextForInterviewAnalysisV2(roleId, requestId, interviewId, candidateId, conversationId) {
   if (!roleId) return null;
   const { data, error } = await supabaseAdmin
     .from('roles')
@@ -619,6 +620,7 @@ async function getRoleContextForInterviewAnalysisV2(roleId, requestId, interview
     logInterviewAnalysisV2('warn', 'skip', {
       request_id: requestId || null,
       interview_id: interviewId || null,
+      conversation_id: conversationId || null,
       candidate_id: candidateId || null,
       role_id: roleId || null,
       reason: 'role_context_lookup_failed'
@@ -628,10 +630,36 @@ async function getRoleContextForInterviewAnalysisV2(roleId, requestId, interview
   return data || null;
 }
 
-async function maybeGenerateInterviewAnalysisV2({ interview, requestId, conversationId }) {
+function hasInterviewAnalysisV2PerceptionInput(row) {
+  const hasText = typeof row?.perception_analysis_text === 'string' && row.perception_analysis_text.trim().length > 0;
+  const scores = row?.perception_scores;
+  const hasScores = scores && typeof scores === 'object' && !Array.isArray(scores) && Object.keys(scores).length > 0;
+  return hasText || hasScores;
+}
+
+function interviewAnalysisV2IndicatesMissingPerception(analysis) {
+  if (!analysis || typeof analysis !== 'object' || Array.isArray(analysis)) return false;
+  const parts = [];
+  const collect = (value) => {
+    if (typeof value === 'string') parts.push(value);
+    else if (Array.isArray(value)) value.forEach(collect);
+  };
+  collect(analysis.limitations);
+  collect(analysis.evidence);
+  collect(analysis.evidence_summary);
+  const text = parts.join(' ').toLowerCase();
+  return (
+    /no (?:supporting )?(?:tavus )?perception (?:data|context|analysis)/.test(text) ||
+    /perception (?:data|context|analysis) (?:was |is )?(?:not provided|not available|unavailable|missing)/.test(text) ||
+    /without (?:supporting )?(?:tavus )?perception/.test(text)
+  );
+}
+
+async function maybeGenerateInterviewAnalysisV2({ interview, requestId, conversationId, refreshOnMissingPerception = false }) {
   const baseLog = {
     request_id: requestId || null,
     interview_id: interview?.id || null,
+    conversation_id: conversationId || null,
     candidate_id: interview?.candidate_id || null,
     role_id: interview?.role_id || null
   };
@@ -662,11 +690,29 @@ async function maybeGenerateInterviewAnalysisV2({ interview, requestId, conversa
     const logBase = {
       request_id: requestId || null,
       interview_id: row.id,
+      conversation_id: conversationId || null,
       candidate_id: row.candidate_id || null,
       role_id: row.role_id || null
     };
+    let startReason = refreshOnMissingPerception ? 'perception_analysis_stored' : 'eligible';
     if (row.interview_analysis_v2 && typeof row.interview_analysis_v2 === 'object') {
-      logInterviewAnalysisV2('info', 'skip', { ...logBase, reason: 'already_exists' });
+      if (refreshOnMissingPerception) {
+        if (!hasInterviewAnalysisV2PerceptionInput(row)) {
+          logInterviewAnalysisV2('info', 'skip', { ...logBase, reason: 'missing_perception_context' });
+          return;
+        }
+        if (interviewAnalysisV2IndicatesMissingPerception(row.interview_analysis_v2)) {
+          startReason = 'refresh_missing_perception_context';
+        } else {
+          logInterviewAnalysisV2('info', 'skip', { ...logBase, reason: 'already_includes_perception_context' });
+          return;
+        }
+      } else {
+        logInterviewAnalysisV2('info', 'skip', { ...logBase, reason: 'already_exists' });
+        return;
+      }
+    } else if (refreshOnMissingPerception && !hasInterviewAnalysisV2PerceptionInput(row)) {
+      logInterviewAnalysisV2('info', 'skip', { ...logBase, reason: 'missing_perception_context' });
       return;
     }
     if (!String(row.transcript || '').trim()) {
@@ -682,8 +728,8 @@ async function maybeGenerateInterviewAnalysisV2({ interview, requestId, conversa
       return;
     }
 
-    logInterviewAnalysisV2('info', 'start', { ...logBase, reason: 'eligible' });
-    const roleContext = await getRoleContextForInterviewAnalysisV2(row.role_id, requestId, row.id, row.candidate_id);
+    logInterviewAnalysisV2('info', 'start', { ...logBase, reason: startReason });
+    const roleContext = await getRoleContextForInterviewAnalysisV2(row.role_id, requestId, row.id, row.candidate_id, conversationId);
     const analysis = await generateInterviewAnalysisV2({
       transcript: row.transcript,
       transcript_scores: row.transcript_scores,
@@ -701,7 +747,7 @@ async function maybeGenerateInterviewAnalysisV2({ interview, requestId, conversa
       .update({ interview_analysis_v2: analysis })
       .eq('id', row.id);
     if (updateError) throw updateError;
-    logInterviewAnalysisV2('info', 'success', { ...logBase, reason: 'stored' });
+    logInterviewAnalysisV2('info', 'success', { ...logBase, reason: refreshOnMissingPerception ? 'refreshed_with_perception' : 'stored' });
   } catch (err) {
     logInterviewAnalysisV2('error', 'failure', {
       ...baseLog,
@@ -731,6 +777,7 @@ function queueInterviewAnalysisV2(input) {
       logInterviewAnalysisV2('error', 'failure', {
         request_id: input?.requestId || null,
         interview_id: input?.interview?.id || null,
+        conversation_id: input?.conversationId || null,
         candidate_id: input?.interview?.candidate_id || null,
         role_id: input?.interview?.role_id || null,
         reason: err?.message || String(err || 'unknown_error')
@@ -1776,6 +1823,9 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
         }
       }
       const perceptionResult = await updatePerceptionAnalysis(interview, analysisText, requestId, perceptionScoreSources);
+      if (ENABLE_INTERVIEW_ANALYSIS_V2 && eventType === 'application.perception_analysis' && perceptionResult?.stored) {
+        queueInterviewAnalysisV2({ interview, requestId, conversationId, refreshOnMissingPerception: true });
+      }
       const extractedKeys = Object.keys(perceptionResult?.perception_scores || {});
       perceptionKeysCount = extractedKeys.length;
       if (extractedKeys.length) {

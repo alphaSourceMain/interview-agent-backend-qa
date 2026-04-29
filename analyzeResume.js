@@ -85,10 +85,13 @@ ${role?.description || '[none provided]'}
 Resume:
 ${resumeText || '[no extractable text]'}
 
-Score definitions:
-- skills_match_percent: match between resume skills, tools, domain knowledge, and role requirements.
-- experience_match_percent: match between work history, responsibilities, seniority, and role experience needs.
-- education_match_percent: match between education/certifications and role education requirements. If the role has no education requirement, score based on relevant credentials and explain uncertainty in summary.
+Score definitions and calibration:
+- Evaluate the candidate's capability to perform the posted duties, not exact industry, employer type, or title matching.
+- Hard requirements should matter strongly. Preferred or suggested qualifications, majors, interests, or nice-to-haves must not be treated as mandatory.
+- Direct same-role evidence scores highest. Adjacent transferable evidence can score moderate-to-high when duties clearly overlap. Weak or no related evidence should remain low.
+- skills_match_percent: match between resume skills, tools, domain knowledge, and role requirements. Credit transferable evidence tied to duties such as customer/patient service, phones, front desk, professionalism, confidentiality, data entry, scanning/linking, filing, scheduling, escalation/problem solving, and office systems.
+- experience_match_percent: match between work history, responsibilities, seniority, and role experience needs. Entry-level roles should not require exact same-title experience when transferable experience clearly maps to the duties. Note overqualification or role-level mismatch in the summary, and only modestly reduce fit if it creates a practical concern.
+- education_match_percent: match between education/certifications and role education requirements. If the JD has no hard education requirement, do not score education as 0 merely because the candidate lacks suggested majors or interests; score relevant credentials and business, HR, admin, or customer-service-related education where applicable, and explain uncertainty in summary.
 - resume_score: overall resume fit for the role, primarily weighted toward skills and experience.
 - overall_resume_match_percent: aggregate role match score; should generally align with resume_score unless there is a clear reason.
 

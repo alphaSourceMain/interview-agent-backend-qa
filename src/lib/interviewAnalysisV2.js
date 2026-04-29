@@ -59,7 +59,7 @@ function normalizeResult(parsed) {
 
   const rawConditions = toPlainObject(obj.conditions);
   const rawRisk = toPlainObject(obj.risk);
-  return {
+  const out = {
     version: 'path_a_v1',
     scores,
     conditions: {
@@ -76,6 +76,27 @@ function normalizeResult(parsed) {
     evidence: cleanStringArray(obj.evidence, 12, 260),
     limitations: cleanStringArray(obj.limitations, 8, 260)
   };
+  const hasAnyNumericScore = Object.values(out.scores).some((value) => Number.isFinite(value));
+  if (hasAnyNumericScore && (!out.evidence_summary || out.evidence.length === 0)) {
+    for (const key of SCORE_KEYS) out.scores[key] = null;
+    out.conditions = {
+      evaluation_conditions: 'unavailable',
+      audio_quality_issues: 'unavailable',
+      distraction_risk: 'unavailable',
+      signal_confidence: 'unavailable'
+    };
+    out.risk = {
+      integrity_risk: 'unavailable',
+      reason: 'Model did not provide evidence for scored analysis.'
+    };
+    out.evidence_summary = '';
+    out.evidence = [];
+    out.limitations = [
+      ...out.limitations,
+      'Model did not provide evidence for scored analysis.'
+    ].slice(0, 8);
+  }
+  return out;
 }
 
 function safeJson(value, fallback) {
@@ -137,12 +158,16 @@ Use exactly this JSON shape:
 Rules:
 - Use transcript/content evidence first.
 - Use final Tavus perception only as supporting context.
-- Do not infer honesty, truthfulness, deception, trustworthiness, personality, motivation, or likability.
+- Do not infer honesty, truthfulness, deception, trustworthiness, motivation, likability, personality, or personality judgments.
 - Do not infer from gaze, pauses, accent, nervousness, appearance, camera quality, lighting, disability-related behavior, or protected traits.
+- Do not include gaze inference, appearance commentary, protected-trait commentary, honesty claims, truthfulness claims, deception claims, trustworthiness claims, motivation judgments, likability judgments, or personality judgments.
 - integrity_risk means only observable content/process concerns such as highly generic answers, repeated evasiveness, inconsistent claims, or signs of scripted/read-aloud delivery already grounded in transcript evidence.
 - If evidence is insufficient, return null for numeric scores and "unavailable" for condition/risk enums, not 0.
 - Scores are 0-100 when there is sufficient transcript evidence.
+- If any numeric score is non-null, evidence_summary must be non-empty.
+- If any numeric score is non-null, evidence must contain 2-6 short transcript-grounded evidence items.
 - Evidence and limitations must cite observable transcript/content/process facts only.
+- If evidence cannot be provided, return null for numeric scores and "unavailable" for condition/risk enums.
 
 Context JSON:
 ${safeJson(payload, {})}

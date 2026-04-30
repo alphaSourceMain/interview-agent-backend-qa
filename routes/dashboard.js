@@ -8,6 +8,7 @@ const { requireAuth, withClientScope } = require('../src/middleware/auth');
 
 
 const router = express.Router();
+const EXPOSE_INTERVIEW_ANALYSIS_V2 = process.env.EXPOSE_INTERVIEW_ANALYSIS_V2 === 'true';
 
 function getRequestId(req) {
   return (
@@ -204,23 +205,26 @@ router.get('/rows', requireAuth, withClientScope, async (req, res) => {
     // 3) Latest interview per candidate (within same client)
     let latestInterviewByCand = {};
     if (candIds.length) {
+      const interviewSelect = [
+        'id',
+        'candidate_id',
+        'client_id',
+        'created_at',
+        'video_url',
+        'transcript_url',
+        'transcript',
+        'analysis_url',
+        'analysis',
+        'perception_scores',
+        'transcript_scores',
+        'interview_summary',
+        'unanswered_candidate_questions'
+      ];
+      if (EXPOSE_INTERVIEW_ANALYSIS_V2) interviewSelect.push('interview_analysis_v2');
+
       const { data: ivs, error: iErr } = await supabase
         .from('interviews')
-        .select([
-          'id',
-          'candidate_id',
-          'client_id',
-          'created_at',
-          'video_url',
-          'transcript_url',
-          'transcript',
-          'analysis_url',
-          'analysis',
-          'perception_scores',
-          'transcript_scores',
-          'interview_summary',
-          'unanswered_candidate_questions'
-        ].join(', '))
+        .select(interviewSelect.join(', '))
         .eq('client_id', clientId)
         .in('candidate_id', candIds)
         .order('created_at', { ascending: false });
@@ -403,6 +407,7 @@ router.get('/rows', requireAuth, withClientScope, async (req, res) => {
         overall_score,
         resume_analysis,
         interview_analysis,
+        interview_analysis_v2: EXPOSE_INTERVIEW_ANALYSIS_V2 ? (parseJsonObject(iv?.interview_analysis_v2) || null) : undefined,
         latest_report_url,
         report_generated_at: rep?.created_at || null,
       };
@@ -454,9 +459,12 @@ router.get('/interviews', requireAuth, withClientScope, async (req, res) => {
 
     if (!clientId) return res.status(400).json({ error: 'client_id required' });
 
+    const interviewSelect = 'id, created_at, client_id, candidate_id, role_id, video_url, transcript_url, transcript, analysis_url, resume_score, interview_score, overall_score, resume_analysis, interview_analysis, latest_report_url, report_generated_at, perception_scores, transcript_scores, interview_summary, unanswered_candidate_questions' +
+      (EXPOSE_INTERVIEW_ANALYSIS_V2 ? ', interview_analysis_v2' : '');
+
     const { data: rows, error: iErr } = await supabase
       .from('interviews')
-      .select('id, created_at, client_id, candidate_id, role_id, video_url, transcript_url, transcript, analysis_url, resume_score, interview_score, overall_score, resume_analysis, interview_analysis, latest_report_url, report_generated_at, perception_scores, transcript_scores, interview_summary, unanswered_candidate_questions')
+      .select(interviewSelect)
       .eq('client_id', clientId)
       .order('created_at', { ascending: false })
       .limit(500);
@@ -560,6 +568,7 @@ router.get('/interviews', requireAuth, withClientScope, async (req, res) => {
           engagement: insufficientInterview ? null : perception.engagement,
           summary: interviewSummary
         },
+        interview_analysis_v2: EXPOSE_INTERVIEW_ANALYSIS_V2 ? (parseJsonObject(r?.interview_analysis_v2) || null) : undefined,
         latest_report_url: r.latest_report_url || null,
         report_generated_at: r.report_generated_at || null,
       };

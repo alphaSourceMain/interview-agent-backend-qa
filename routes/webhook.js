@@ -112,6 +112,25 @@ function clampScore(value) {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
+function plainObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {}
+  }
+  return {};
+}
+
+function averageClampedScores(values) {
+  const nums = (values || [])
+    .map((value) => clampScore(value))
+    .filter((value) => value !== null);
+  if (!nums.length) return null;
+  return clampScore(nums.reduce((sum, value) => sum + value, 0) / nums.length);
+}
+
 function safeTopKeys(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : [];
 }
@@ -592,6 +611,124 @@ function hasNoSubstantiveInterviewSummary(summary) {
     lower.includes('before substantive responses were captured') ||
     lower.includes('insufficient data')
   );
+}
+
+function hasExistingPerceptionScores(scores) {
+  const obj = plainObject(scores);
+  return clampScore(obj.clarity) !== null ||
+    clampScore(obj.confidence) !== null ||
+    clampScore(obj.engagement) !== null ||
+    clampScore(obj.body_language) !== null;
+}
+
+function hasSubstantiveTranscriptScores(row) {
+  if (hasNoSubstantiveInterviewSummary(row?.interview_summary)) return false;
+  const scores = plainObject(row?.transcript_scores);
+  return clampScore(scores.overall) !== null ||
+    clampScore(scores.role_fit ?? scores.roleFit) !== null ||
+    clampScore(scores.communication_quality ?? scores.communicationQuality) !== null ||
+    clampScore(scores.technical_strength ?? scores.technicalStrength) !== null;
+}
+
+function buildTranscriptPerceptionFallback(row) {
+  const transcriptScores = plainObject(row?.transcript_scores);
+  const v2 = plainObject(row?.interview_analysis_v2);
+  const v2Scores = plainObject(v2.scores);
+  const v2Average = averageClampedScores([
+    v2Scores.answer_directness,
+    v2Scores.response_specificity,
+    v2Scores.answer_consistency
+  ]);
+  const clarity = clampScore(v2Scores.communication_structure) ??
+    clampScore(transcriptScores.communication_quality ?? transcriptScores.communicationQuality);
+  const confidence = v2Average ?? clampScore(transcriptScores.confidence);
+  const engagement = v2Average ??
+    clampScore(transcriptScores.role_fit ?? transcriptScores.roleFit) ??
+    clampScore(transcriptScores.communication_quality ?? transcriptScores.communicationQuality);
+
+  if (clarity === null || confidence === null || engagement === null) return null;
+  return {
+    clarity,
+    confidence,
+    engagement,
+    source: 'transcript_fallback',
+    fallback: true,
+    fallback_reason: 'tavus_perception_empty_analysis',
+    modality: 'transcript_only',
+    visual_signal_available: false
+  };
+}
+
+function logPerceptionFallback(event, details) {
+  console.log(`[webhook] ${event}`, {
+    request_id: details?.request_id || null,
+    interview_id: details?.interview_id || null,
+    conversation_id: details?.conversation_id || null,
+    source: details?.source || null,
+    fallback_reason: details?.fallback_reason || null,
+    reason: details?.reason || null
+  });
+}
+
+async function maybeStoreTranscriptPerceptionFallback(interview, requestId, conversationId) {
+  const baseLog = {
+    request_id: requestId || null,
+    interview_id: interview?.id || null,
+    conversation_id: conversationId || null,
+    source: 'transcript_fallback',
+    fallback_reason: 'tavus_perception_empty_analysis'
+  };
+  try {
+    if (!supabaseAdmin || !interview?.id) {
+      logPerceptionFallback('tavus_perception_empty_fallback_skipped', { ...baseLog, reason: 'missing_db_or_interview_id' });
+      return { stored: false };
+    }
+
+    const { data: row, error } = await supabaseAdmin
+      .from('interviews')
+      .select('id,transcript_scores,interview_analysis_v2,interview_summary,perception_scores')
+      .eq('id', interview.id)
+      .maybeSingle();
+    if (error || !row) {
+      logPerceptionFallback('tavus_perception_empty_fallback_skipped', { ...baseLog, reason: error?.message || 'interview_not_found' });
+      return { stored: false };
+    }
+    if (hasNoSubstantiveInterviewSummary(row.interview_summary)) {
+      logPerceptionFallback('tavus_perception_empty_fallback_skipped', { ...baseLog, reason: 'no_substantive_responses' });
+      return { stored: false };
+    }
+    if (!hasSubstantiveTranscriptScores(row)) {
+      logPerceptionFallback('tavus_perception_empty_fallback_skipped', { ...baseLog, reason: 'missing_substantive_transcript_scores' });
+      return { stored: false };
+    }
+
+    const existingScores = plainObject(row.perception_scores);
+    if (hasExistingPerceptionScores(existingScores) && existingScores.source !== 'transcript_fallback') {
+      logPerceptionFallback('tavus_perception_empty_fallback_skipped', { ...baseLog, reason: 'existing_perception_scores' });
+      return { stored: false };
+    }
+
+    const fallbackScores = buildTranscriptPerceptionFallback(row);
+    if (!fallbackScores) {
+      logPerceptionFallback('tavus_perception_empty_fallback_skipped', { ...baseLog, reason: 'unable_to_derive_scores' });
+      return { stored: false };
+    }
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('interviews')
+      .update({ perception_scores: { ...existingScores, ...fallbackScores } })
+      .eq('id', row.id);
+    if (updateErr) {
+      logPerceptionFallback('tavus_perception_empty_fallback_skipped', { ...baseLog, reason: updateErr.message || 'update_failed' });
+      return { stored: false };
+    }
+
+    logPerceptionFallback('tavus_perception_empty_fallback_stored', baseLog);
+    return { stored: true, perception_scores: fallbackScores };
+  } catch (err) {
+    logPerceptionFallback('tavus_perception_empty_fallback_skipped', { ...baseLog, reason: err?.message || String(err || 'unknown_error') });
+    return { stored: false };
+  }
 }
 
 function logInterviewAnalysisV2(level, event, details) {
@@ -1186,11 +1323,16 @@ async function updatePerceptionAnalysis(interview, analysisText, requestId, extr
   const updates = {};
   if (sanitizedText) updates.perception_analysis_text = sanitizedText;
   if (Object.keys(perceptionScores).length) {
-    const existingScores =
-      interview.perception_scores && typeof interview.perception_scores === 'object'
-        ? interview.perception_scores
-        : {};
-    updates.perception_scores = { ...existingScores, ...perceptionScores };
+    const existingScores = plainObject(interview.perception_scores);
+    updates.perception_scores = {
+      ...existingScores,
+      ...perceptionScores,
+      source: 'tavus_perception_analysis',
+      fallback: false,
+      fallback_reason: null,
+      modality: null,
+      visual_signal_available: null
+    };
   }
   if (!Object.keys(updates).length) return { stored: false, perception_scores: {} };
 
@@ -1827,6 +1969,9 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
         queueInterviewAnalysisV2({ interview, requestId, conversationId, refreshOnMissingPerception: true });
       }
       const extractedKeys = Object.keys(perceptionResult?.perception_scores || {});
+      if (eventType === 'application.perception_analysis' && !extractedKeys.length) {
+        await maybeStoreTranscriptPerceptionFallback(interview, requestId, conversationId);
+      }
       perceptionKeysCount = extractedKeys.length;
       if (extractedKeys.length) {
         console.log('[webhook] perception_analysis processed', {

@@ -78,6 +78,32 @@ function isDownloadableRecordingUrl(url) {
   return true;
 }
 
+function summarizeUrlValue(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return { has_url: false, host: null, path: null };
+  try {
+    const parsed = new URL(raw);
+    return {
+      has_url: true,
+      host: parsed.host || null,
+      path: parsed.pathname || null
+    };
+  } catch {
+    return { has_url: true, host: null, path: null };
+  }
+}
+
+function summarizeUrlValues(values) {
+  const list = (values || []).filter((value) => typeof value === 'string' && value.trim());
+  const first = summarizeUrlValue(list[0]);
+  return {
+    count: list.length,
+    has_url: list.length > 0,
+    host: first.host,
+    path: first.path
+  };
+}
+
 function isMissingColumnError(error) {
   const msg = String(error?.message || '');
   return /column .* does not exist/i.test(msg) || /could not find .* column .* schema cache/i.test(msg);
@@ -952,7 +978,8 @@ function extractAnswerScoresFromAnalysis(analysis) {
 }
 
 function getRequestId(req, body) {
-  return pickFirst(
+  const existing = pickFirst(
+    req?.request_id,
     req?.headers?.['x-request-id'],
     req?.headers?.['x-requestid'],
     req?.headers?.['x-correlation-id'],
@@ -963,6 +990,8 @@ function getRequestId(req, body) {
     fromAny(body, 'properties.request_id'),
     fromAny(body, 'payload.request_id')
   );
+  if (existing !== undefined && existing !== null && String(existing).trim()) return String(existing).trim();
+  return `tavus_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function shouldTriggerAnalysis(interviewId, requestId) {
@@ -1224,12 +1253,13 @@ function isEmptyQuestionList(value) {
   return false;
 }
 
-async function applyInterviewUpdates(interviewId, updates, recordingMeta) {
+async function applyInterviewUpdates(interviewId, updates, recordingMeta, options = {}) {
   const baseUpdates = updates && Object.keys(updates).length ? updates : null;
   const cleanedMeta = pruneMetadata(recordingMeta);
   const hasMeta = Object.keys(cleanedMeta).length > 0;
+  const skipRecordingUpdates = options.preserveRecordingState === true || options.suppressRecordingReadyState === true;
 
-  if (!hasMeta) {
+  if (!hasMeta || skipRecordingUpdates) {
     if (!baseUpdates) return;
     const { error } = await supabaseAdmin.from('interviews').update(baseUpdates).eq('id', interviewId);
     if (error) throw error;
@@ -1367,26 +1397,48 @@ async function getInterviewByIds(interviewId, conversationId) {
       .select('*')
       .eq('tavus_application_id', conversationId)
       .maybeSingle();
-    if (data) return data;
+    if (data) {
+      if (interviewId && String(data.id || '') !== String(interviewId || '')) {
+        return {
+          interview: null,
+          bindingError: {
+            code: 'interview_conversation_mismatch',
+            resolved_interview_id: data.id || null
+          }
+        };
+      }
+      return { interview: data, bindingError: null };
+    }
 
     ({ data } = await supabaseAdmin
       .from('interviews')
       .select('*')
       .eq('conversation_id', conversationId)
       .maybeSingle());
-    if (data) return data;
+    if (data) {
+      if (interviewId && String(data.id || '') !== String(interviewId || '')) {
+        return {
+          interview: null,
+          bindingError: {
+            code: 'interview_conversation_mismatch',
+            resolved_interview_id: data.id || null
+          }
+        };
+      }
+      return { interview: data, bindingError: null };
+    }
+
+    return { interview: null, bindingError: null };
   }
 
   if (interviewId) {
-    const { data } = await supabaseAdmin
-      .from('interviews')
-      .select('*')
-      .eq('id', interviewId)
-      .maybeSingle();
-    return data || null;
+    return {
+      interview: null,
+      bindingError: { code: 'missing_conversation_id_interview_id_only' }
+    };
   }
 
-  return null;
+  return { interview: null, bindingError: null };
 }
 
 async function ensureBucket(name) {
@@ -1578,6 +1630,8 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
       'payload.video_url',
       'output.video_url'
     );
+    const recordingUrlSummary = summarizeUrlValues(recordingUrls);
+    const videoUrlSummary = summarizeUrlValues(videoUrls);
 
     console.log('[webhook] received', {
       request_id: requestId || null,
@@ -1586,16 +1640,35 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
       event_type: eventType || null,
       interview_id: interviewId || null,
       conversation_id: conversationId || null,
-      recording_url: recordingUrls,
-      video_url: videoUrls
+      has_recording_url: recordingUrlSummary.has_url,
+      recording_url_host: recordingUrlSummary.host,
+      recording_url_path: recordingUrlSummary.path,
+      recording_url_count: recordingUrlSummary.count,
+      has_video_url: videoUrlSummary.has_url,
+      video_url_host: videoUrlSummary.host,
+      video_url_path: videoUrlSummary.path,
+      video_url_count: videoUrlSummary.count
     });
 
     if (!isKnownEvent) {
-      return res.status(200).json({ ok: true });
+      console.log('[webhook] unknown_event_ignored', {
+        request_id: requestId || null,
+        event_type: eventType || null,
+        conversation_id: conversationId || null,
+        has_interview_id: !!interviewId
+      });
+      return res.status(200).json({ ok: true, ignored: true });
     }
 
     if (!interviewId && !conversationId) {
-      return res.status(200).json({ ok: true });
+      console.warn('[webhook] unsafe_event_ignored', {
+        request_id: requestId || null,
+        event_type: eventType || null,
+        reason: 'missing_binding_ids',
+        conversation_id: null,
+        has_interview_id: false
+      });
+      return res.status(200).json({ ok: true, ignored: true });
     }
 
     if (!supabaseAdmin) {
@@ -1607,17 +1680,31 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    const interview = await getInterviewByIds(interviewId, conversationId);
+    const { interview, bindingError } = await getInterviewByIds(interviewId, conversationId);
+    if (bindingError) {
+      console.warn('[webhook] unsafe_event_ignored', {
+        request_id: requestId || null,
+        event_type: eventType || null,
+        reason: bindingError.code || 'unsafe_binding',
+        interview_id: interviewId || null,
+        resolved_interview_id: bindingError.resolved_interview_id || null,
+        conversation_id: conversationId || null
+      });
+      return res.status(200).json({ ok: true, ignored: true });
+    }
     if (!interview) {
       console.warn('[webhook] interview not found', {
         request_id: requestId || null,
         event_type: eventType || null,
         interview_id: interviewId || null,
         conversation_id: conversationId || null,
+        ignored: true,
+        has_interview_id: !!interviewId,
+        has_conversation_id: !!conversationId,
         top_keys: Object.keys(body || {}),
         payload_keys: Object.keys(body?.payload || {})
       });
-      return res.status(200).json({ ok: true });
+      return res.status(200).json({ ok: true, ignored: true });
     }
     if (interview?.id) Sentry.setTag('interview_id', String(interview.id));
     sentryCandidateId = interview?.candidate_id || null;
@@ -1695,6 +1782,8 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
     let shouldTriggerAnalysisRun = false;
     let transcriptText = '';
     let transcriptQuestionText = '';
+    let preserveRecordingState = false;
+    let suppressRecordingReadyState = false;
 
     if (isToolCall && toolName === 'end_interview' && conversationId && interview?.id) {
       try {
@@ -1842,25 +1931,37 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
     }
 
     if (isRecordingReady) {
+      const recordingUrlForLog = pickFirst(
+        fromAny(body, 'properties.recording_url'),
+        fromAny(body, 'recording_url'),
+        fromAny(body, 'payload.recording_url')
+      );
+      const videoUrlForLog = pickFirst(
+        fromAny(body, 'properties.video_url'),
+        fromAny(body, 'video_url'),
+        fromAny(body, 'payload.video_url'),
+        fromAny(body, 'output.video_url')
+      );
+      const recordingUrlLog = summarizeUrlValue(recordingUrlForLog);
+      const videoUrlLog = summarizeUrlValue(videoUrlForLog);
       const recordingFieldSnapshot = {
-        properties_recording_url: fromAny(body, 'properties.recording_url'),
-        properties_video_url: fromAny(body, 'properties.video_url'),
-        recording_url: fromAny(body, 'recording_url'),
-        video_url: fromAny(body, 'video_url'),
-        payload_recording_url: fromAny(body, 'payload.recording_url'),
-        payload_video_url: fromAny(body, 'payload.video_url'),
-        output_video_url: fromAny(body, 'output.video_url'),
+        has_recording_url: recordingUrlLog.has_url,
+        recording_url_host: recordingUrlLog.host,
+        recording_url_path: recordingUrlLog.path,
+        has_video_url: videoUrlLog.has_url,
+        video_url_host: videoUrlLog.host,
+        video_url_path: videoUrlLog.path,
         bucket_name: fromAny(body, 'bucket_name'),
-        s3_key: fromAny(body, 's3_key'),
+        has_s3_key: !!fromAny(body, 's3_key'),
         duration: fromAny(body, 'duration'),
         properties_bucket_name: fromAny(body, 'properties.bucket_name'),
-        properties_s3_key: fromAny(body, 'properties.s3_key'),
+        properties_has_s3_key: !!fromAny(body, 'properties.s3_key'),
         properties_duration: fromAny(body, 'properties.duration'),
         payload_bucket_name: fromAny(body, 'payload.bucket_name'),
-        payload_s3_key: fromAny(body, 'payload.s3_key'),
+        payload_has_s3_key: !!fromAny(body, 'payload.s3_key'),
         payload_duration: fromAny(body, 'payload.duration'),
         output_bucket_name: fromAny(body, 'output.bucket_name'),
-        output_s3_key: fromAny(body, 'output.s3_key'),
+        output_has_s3_key: !!fromAny(body, 'output.s3_key'),
         output_duration: fromAny(body, 'output.duration')
       };
       console.log('[webhook] recording_ready fields', {
@@ -1899,17 +2000,45 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
         )
       };
 
+      const currentRecordingStatus = String(interview.recording_status || '').trim().toLowerCase();
+      preserveRecordingState = currentRecordingStatus === 'deleted' || currentRecordingStatus === 'delete_failed';
+      const expectedRecordingBucket = String(process.env.TAVUS_RECORDING_S3_BUCKET_NAME || '').trim();
+      const receivedRecordingBucket = String(recordingMeta.bucket_name || '').trim();
+      const recordingBucketMismatch = !!(
+        receivedRecordingBucket &&
+        expectedRecordingBucket &&
+        receivedRecordingBucket !== expectedRecordingBucket
+      );
+      suppressRecordingReadyState = recordingBucketMismatch;
+      if (preserveRecordingState) {
+        console.warn('[webhook] recording_ready_state_preserved', {
+          request_id: requestId || null,
+          interview_id: interview.id,
+          conversation_id: conversationId || null,
+          recording_status: currentRecordingStatus
+        });
+      }
+      if (recordingBucketMismatch) {
+        console.warn('[webhook] recording_ready_bucket_mismatch', {
+          request_id: requestId || null,
+          interview_id: interview.id,
+          conversation_id: conversationId || null,
+          expected_bucket: expectedRecordingBucket,
+          received_bucket: receivedRecordingBucket
+        });
+      }
+
       const hasDownloadableUrl = isDownloadableRecordingUrl(recordingUrl);
       if (recordingUrl && !hasDownloadableUrl && isDailyRoomUrl(recordingUrl)) {
         const existingVideoUrl = interview.video_url || null;
-        if (!existingVideoUrl || isDailyRoomUrl(existingVideoUrl)) {
+        if (!preserveRecordingState && (!existingVideoUrl || isDailyRoomUrl(existingVideoUrl))) {
           updates.video_url = null;
         }
-      } else if (hasDownloadableUrl) {
+      } else if (hasDownloadableUrl && !preserveRecordingState && !recordingBucketMismatch) {
         updates.video_url = recordingUrl;
       }
 
-      if (!hasDownloadableUrl && Object.keys(pruneMetadata(recordingMeta)).length) {
+      if (!hasDownloadableUrl && Object.keys(pruneMetadata(recordingMeta)).length && !preserveRecordingState && !recordingBucketMismatch) {
         updates.recording_metadata = recordingMeta;
       }
     }
@@ -2010,7 +2139,10 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
       const { recording_metadata: recordingMeta, ...baseUpdates } = updates;
       const hasRecordingMetadata = Object.keys(pruneMetadata(recordingMeta)).length > 0;
       try {
-        await applyInterviewUpdates(interview.id, baseUpdates, recordingMeta);
+        await applyInterviewUpdates(interview.id, baseUpdates, recordingMeta, {
+          preserveRecordingState,
+          suppressRecordingReadyState
+        });
         updatesApplied = true;
         if (isRecordingReady && hasRecordingMetadata) {
           console.log('[webhook] recording_metadata_stored', {

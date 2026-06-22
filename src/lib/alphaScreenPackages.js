@@ -104,6 +104,33 @@ function getAlphaScreenStripePriceId(planKey, billingInterval, env = process.env
   return envName ? String(env?.[envName] || '').trim() : ''
 }
 
+function isAlphaScreenBillingCadenceSupported(planKey, billingInterval) {
+  const pkg = getAlphaScreenPackage(planKey)
+  const interval = normalizeBillingInterval(billingInterval)
+  return Boolean(pkg?.billing_cadences?.[interval])
+}
+
+function buildAlphaScreenPackageSnapshot(planKey, billingInterval) {
+  const pkg = getAlphaScreenPackage(planKey)
+  const interval = normalizeBillingInterval(billingInterval)
+  if (!pkg || !interval || !pkg.billing_cadences?.[interval]) return null
+
+  return {
+    plan_key: pkg.plan_key,
+    display_name: pkg.display_name,
+    included_interviews: pkg.included_interviews,
+    included_interviews_per_role: pkg.included_interviews_per_role,
+    interview_duration_minutes: pkg.interview_duration_minutes,
+    max_interview_minutes: pkg.max_interview_minutes,
+    additional_interview_price: pkg.additional_interview_price,
+    additional_interview_fee: pkg.additional_interview_fee,
+    overage_price: pkg.additional_interview_price,
+    per_role_fee: pkg.per_role_fee,
+    billing_cadence: interval,
+    billing_cadence_display_name: pkg.billing_cadences[interval].display_name
+  }
+}
+
 function listPublicAlphaScreenPackages({ env = process.env } = {}) {
   return PUBLIC_PACKAGE_KEYS.map((key) => {
     const pkg = ALPHA_SCREEN_PACKAGES[key]
@@ -141,5 +168,7 @@ module.exports = {
   buildAlphaScreenPlanSettingsPayload,
   getAlphaScreenStripePriceEnvName,
   getAlphaScreenStripePriceId,
+  isAlphaScreenBillingCadenceSupported,
+  buildAlphaScreenPackageSnapshot,
   listPublicAlphaScreenPackages
 }

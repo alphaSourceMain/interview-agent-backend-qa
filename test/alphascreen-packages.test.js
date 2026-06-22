@@ -8,6 +8,7 @@ const { test } = require('node:test')
 
 const {
   buildAlphaScreenPlanSettingsPayload,
+  buildAlphaScreenPackageSnapshot,
   getAlphaScreenPlanSettingsDefaults,
   getAlphaScreenStripePriceEnvName,
   getAlphaScreenStripePriceId,
@@ -15,6 +16,16 @@ const {
 } = require('../src/lib/alphaScreenPackages')
 
 const routePath = path.join(__dirname, '..', 'routes', 'alphaScreenPackages.js')
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
+
+function injectModule(filename, exports) {
+  require.cache[filename] = {
+    id: filename,
+    filename,
+    loaded: true,
+    exports
+  }
+}
 
 async function request(app, pathname) {
   const server = http.createServer(app)
@@ -36,6 +47,14 @@ async function request(app, pathname) {
 
 function buildApp() {
   delete require.cache[routePath]
+  delete require.cache[supabaseClientPath]
+  injectModule(supabaseClientPath, {
+    supabaseAdmin: {
+      from() {
+        throw new Error('GET /packages should not access Supabase')
+      }
+    }
+  })
   const router = require(routePath)
   const app = express()
   app.use('/api/alphascreen', router)
@@ -101,6 +120,18 @@ test('central package config defines Stripe price env var names without reading 
   assert.equal(getAlphaScreenStripePriceEnvName('pro', 'monthly'), 'STRIPE_PRICE_PRO_MONTHLY')
   assert.equal(getAlphaScreenStripePriceEnvName('pro', 'annual'), 'STRIPE_PRICE_PRO_ANNUAL')
   assert.equal(getAlphaScreenStripePriceId('basic', 'monthly', { STRIPE_PRICE_BASIC_MONTHLY: 'price_test_basic_monthly' }), 'price_test_basic_monthly')
+})
+
+test('central package snapshot includes public package values and no Stripe price ids', () => {
+  const snapshot = buildAlphaScreenPackageSnapshot('pro', 'annual')
+
+  assert.equal(snapshot.plan_key, 'pro')
+  assert.equal(snapshot.billing_cadence, 'annual')
+  assert.equal(snapshot.included_interviews, 30)
+  assert.equal(snapshot.max_interview_minutes, 12)
+  assert.equal(snapshot.additional_interview_fee, 35)
+  assert.equal(snapshot.per_role_fee, 699)
+  assert.doesNotMatch(JSON.stringify(snapshot), /STRIPE_PRICE_|price_test|price_live|sk_test|sk_live/)
 })
 
 test('public package endpoint exposes safe package data and no Stripe secrets', async () => {

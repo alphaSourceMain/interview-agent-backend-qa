@@ -166,6 +166,11 @@ test('valid Basic monthly intent creates pending intent with central package sna
   assert.equal(response.body.status, 'pending')
   assert.equal(response.body.selected_package.plan_key, 'basic')
   assert.equal(response.body.selected_package.billing_cadence, 'monthly')
+  assert.equal(response.body.selected_package.platform_fee, 299)
+  assert.equal(response.body.selected_package.platform_fee_cents, 29900)
+  assert.equal(response.body.selected_package.platform_monthly_fee, 299)
+  assert.equal(response.body.selected_package.platform_annual_fee, 3229.2)
+  assert.equal(response.body.selected_package.annual_discount_percent, 10)
   assert.equal(response.body.selected_package.included_interviews, 20)
   assert.equal(response.body.selected_package.interview_duration_minutes, 10)
   assert.equal(response.body.selected_package.additional_interview_price, 30)
@@ -181,6 +186,12 @@ test('valid Basic monthly intent creates pending intent with central package sna
   assert.equal(row.stripe_checkout_session_id, null)
   assert.equal(row.client_id, null)
   assert.equal(row.package_snapshot.included_interviews, 20)
+  assert.equal(row.package_snapshot.platform_fee, 299)
+  assert.equal(row.package_snapshot.platform_fee_cents, 29900)
+  assert.equal(row.package_snapshot.platform_fee_billing_cadence, 'monthly')
+  assert.equal(row.package_snapshot.platform_monthly_fee, 299)
+  assert.equal(row.package_snapshot.platform_annual_fee, 3229.2)
+  assert.equal(row.package_snapshot.per_role_fee, 399)
 })
 
 test('valid Pro annual intent creates pending intent when annual cadence is supported', async () => {
@@ -194,10 +205,17 @@ test('valid Pro annual intent creates pending intent when annual cadence is supp
   assert.equal(response.status, 201)
   assert.equal(response.body.selected_package.plan_key, 'pro')
   assert.equal(response.body.selected_package.billing_cadence, 'annual')
+  assert.equal(response.body.selected_package.platform_fee, 6469.2)
+  assert.equal(response.body.selected_package.platform_fee_cents, 646920)
+  assert.equal(response.body.selected_package.platform_monthly_fee, 599)
+  assert.equal(response.body.selected_package.platform_annual_fee, 6469.2)
+  assert.equal(response.body.selected_package.annual_discount_percent, 10)
   assert.equal(response.body.selected_package.included_interviews, 30)
   assert.equal(response.body.selected_package.max_interview_minutes, 12)
   assert.equal(response.body.selected_package.additional_interview_fee, 35)
   assert.equal(db.inserts[0].row.package_snapshot.per_role_fee, 699)
+  assert.equal(db.inserts[0].row.package_snapshot.platform_fee, 6469.2)
+  assert.equal(db.inserts[0].row.package_snapshot.platform_fee_billing_cadence, 'annual')
 })
 
 test('invalid purchase intent inputs are rejected before insert', async () => {
@@ -268,6 +286,14 @@ test('duplicate pending intent returns existing safe response without inserting'
         plan_key: 'basic',
         display_name: 'Basic',
         billing_cadence: 'monthly',
+        platform_fee: 299,
+        platform_fee_cents: 29900,
+        platform_fee_billing_cadence: 'monthly',
+        platform_monthly_fee: 299,
+        platform_monthly_fee_cents: 29900,
+        platform_annual_fee: 3229.2,
+        platform_annual_fee_cents: 322920,
+        annual_discount_percent: 10,
         included_interviews: 20,
         included_interviews_per_role: 20,
         interview_duration_minutes: 10,

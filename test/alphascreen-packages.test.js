@@ -9,6 +9,7 @@ const { test } = require('node:test')
 const {
   buildAlphaScreenPlanSettingsPayload,
   buildAlphaScreenPackageSnapshot,
+  getAlphaScreenPlatformFee,
   getAlphaScreenPlanSettingsDefaults,
   getAlphaScreenStripePriceEnvName,
   getAlphaScreenStripePriceId,
@@ -68,12 +69,16 @@ test('central package config returns canonical Basic and Pro values', () => {
     additional_interview_fee: 30,
     max_interview_minutes: 10
   })
+  assert.equal(getAlphaScreenPlatformFee('basic', 'monthly'), 299)
+  assert.equal(getAlphaScreenPlatformFee('basic', 'annual'), 3229.2)
   assert.deepEqual(getAlphaScreenPlanSettingsDefaults('pro'), {
     per_role_fee: 699,
     included_interviews_per_role: 30,
     additional_interview_fee: 35,
     max_interview_minutes: 12
   })
+  assert.equal(getAlphaScreenPlatformFee('pro', 'monthly'), 599)
+  assert.equal(getAlphaScreenPlatformFee('pro', 'annual'), 6469.2)
 })
 
 test('webhook Basic provisioning payload uses 20 interviews, 10 minutes, and $30 overage', () => {
@@ -87,7 +92,7 @@ test('webhook Basic provisioning payload uses 20 interviews, 10 minutes, and $30
     client_id: 'client-basic',
     plan_tier: 'basic',
     billing_interval: 'monthly',
-    platform_fee: null,
+    platform_fee: 299,
     per_role_fee: 399,
     included_interviews_per_role: 20,
     additional_interview_fee: 30,
@@ -106,7 +111,7 @@ test('webhook Pro provisioning payload uses 30 interviews, 12 minutes, and $35 o
     client_id: 'client-pro',
     plan_tier: 'pro',
     billing_interval: 'annual',
-    platform_fee: null,
+    platform_fee: 6469.2,
     per_role_fee: 699,
     included_interviews_per_role: 30,
     additional_interview_fee: 35,
@@ -127,6 +132,12 @@ test('central package snapshot includes public package values and no Stripe pric
 
   assert.equal(snapshot.plan_key, 'pro')
   assert.equal(snapshot.billing_cadence, 'annual')
+  assert.equal(snapshot.platform_fee, 6469.2)
+  assert.equal(snapshot.platform_fee_cents, 646920)
+  assert.equal(snapshot.platform_fee_billing_cadence, 'annual')
+  assert.equal(snapshot.platform_monthly_fee, 599)
+  assert.equal(snapshot.platform_annual_fee, 6469.2)
+  assert.equal(snapshot.annual_discount_percent, 10)
   assert.equal(snapshot.included_interviews, 30)
   assert.equal(snapshot.max_interview_minutes, 12)
   assert.equal(snapshot.additional_interview_fee, 35)
@@ -147,9 +158,21 @@ test('public package endpoint exposes safe package data and no Stripe secrets', 
 
     const basic = response.body.packages.find((item) => item.plan_key === 'basic')
     const pro = response.body.packages.find((item) => item.plan_key === 'pro')
+    assert.equal(basic.platform_monthly_fee, 299)
+    assert.equal(basic.platform_monthly_fee_cents, 29900)
+    assert.equal(basic.platform_annual_fee, 3229.2)
+    assert.equal(basic.platform_annual_fee_cents, 322920)
+    assert.equal(basic.annual_discount_percent, 10)
+    assert.equal(basic.per_role_fee, 399)
     assert.equal(basic.included_interviews, 20)
     assert.equal(basic.interview_duration_minutes, 10)
     assert.equal(basic.overage_price, 30)
+    assert.equal(pro.platform_monthly_fee, 599)
+    assert.equal(pro.platform_monthly_fee_cents, 59900)
+    assert.equal(pro.platform_annual_fee, 6469.2)
+    assert.equal(pro.platform_annual_fee_cents, 646920)
+    assert.equal(pro.annual_discount_percent, 10)
+    assert.equal(pro.per_role_fee, 699)
     assert.equal(pro.included_interviews, 30)
     assert.equal(pro.interview_duration_minutes, 12)
     assert.equal(pro.overage_price, 35)
@@ -184,4 +207,17 @@ test('public package listing exposes price configuration flags, not price id val
   assert.equal(basic.billing_cadences.find((item) => item.key === 'monthly').stripe_price_configured, true)
   assert.equal(pro.billing_cadences.find((item) => item.key === 'monthly').stripe_price_configured, false)
   assert.doesNotMatch(JSON.stringify(packages), /price_test_basic_monthly|STRIPE_PRICE_/)
+})
+
+test('public package listing keeps platform fees distinct from per-role fees', () => {
+  const packages = listPublicAlphaScreenPackages()
+  const basic = packages.find((item) => item.plan_key === 'basic')
+  const pro = packages.find((item) => item.plan_key === 'pro')
+
+  assert.equal(basic.platform_monthly_fee, 299)
+  assert.equal(basic.per_role_fee, 399)
+  assert.notEqual(basic.platform_monthly_fee, basic.per_role_fee)
+  assert.equal(pro.platform_monthly_fee, 599)
+  assert.equal(pro.per_role_fee, 699)
+  assert.notEqual(pro.platform_monthly_fee, pro.per_role_fee)
 })

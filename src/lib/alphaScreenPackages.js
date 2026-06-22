@@ -2,11 +2,23 @@
 
 const PUBLIC_PACKAGE_KEYS = Object.freeze(['basic', 'pro'])
 const BILLING_INTERVALS = Object.freeze(['monthly', 'annual'])
+const ANNUAL_DISCOUNT_PERCENT = 10
+
+function annualPlatformFee(monthlyFee) {
+  return Math.round(Number(monthlyFee || 0) * 12 * (100 - ANNUAL_DISCOUNT_PERCENT)) / 100
+}
+
+function moneyCents(value) {
+  return Math.round(Number(value || 0) * 100)
+}
 
 const ALPHA_SCREEN_PACKAGES = Object.freeze({
   basic: Object.freeze({
     plan_key: 'basic',
     display_name: 'Basic',
+    platform_monthly_fee: 299,
+    platform_annual_fee: annualPlatformFee(299),
+    annual_discount_percent: ANNUAL_DISCOUNT_PERCENT,
     included_interviews: 20,
     included_interviews_per_role: 20,
     interview_duration_minutes: 10,
@@ -30,6 +42,9 @@ const ALPHA_SCREEN_PACKAGES = Object.freeze({
   pro: Object.freeze({
     plan_key: 'pro',
     display_name: 'Pro',
+    platform_monthly_fee: 599,
+    platform_annual_fee: annualPlatformFee(599),
+    annual_discount_percent: ANNUAL_DISCOUNT_PERCENT,
     included_interviews: 30,
     included_interviews_per_role: 30,
     interview_duration_minutes: 12,
@@ -78,17 +93,25 @@ function getAlphaScreenPlanSettingsDefaults(planKey) {
   }
 }
 
+function getAlphaScreenPlatformFee(planKey, billingInterval) {
+  const pkg = getAlphaScreenPackage(planKey)
+  const interval = normalizeBillingInterval(billingInterval)
+  if (!pkg || !interval) return null
+  return interval === 'annual' ? pkg.platform_annual_fee : pkg.platform_monthly_fee
+}
+
 function buildAlphaScreenPlanSettingsPayload({ clientId, planKey, billingInterval } = {}) {
   const client_id = String(clientId || '').trim()
   const plan_tier = normalizeAlphaScreenPlanKey(planKey)
   const billing_interval = normalizeBillingInterval(billingInterval)
   const defaults = getAlphaScreenPlanSettingsDefaults(plan_tier)
-  if (!client_id || !plan_tier || !billing_interval || !defaults) return null
+  const platformFee = getAlphaScreenPlatformFee(plan_tier, billing_interval)
+  if (!client_id || !plan_tier || !billing_interval || !defaults || platformFee === null) return null
   return {
     client_id,
     plan_tier,
     billing_interval,
-    platform_fee: null,
+    platform_fee: platformFee,
     ...defaults
   }
 }
@@ -118,6 +141,14 @@ function buildAlphaScreenPackageSnapshot(planKey, billingInterval) {
   return {
     plan_key: pkg.plan_key,
     display_name: pkg.display_name,
+    platform_fee: getAlphaScreenPlatformFee(pkg.plan_key, interval),
+    platform_fee_cents: moneyCents(getAlphaScreenPlatformFee(pkg.plan_key, interval)),
+    platform_fee_billing_cadence: interval,
+    platform_monthly_fee: pkg.platform_monthly_fee,
+    platform_monthly_fee_cents: moneyCents(pkg.platform_monthly_fee),
+    platform_annual_fee: pkg.platform_annual_fee,
+    platform_annual_fee_cents: moneyCents(pkg.platform_annual_fee),
+    annual_discount_percent: pkg.annual_discount_percent,
     included_interviews: pkg.included_interviews,
     included_interviews_per_role: pkg.included_interviews_per_role,
     interview_duration_minutes: pkg.interview_duration_minutes,
@@ -137,6 +168,11 @@ function listPublicAlphaScreenPackages({ env = process.env } = {}) {
     return {
       plan_key: pkg.plan_key,
       display_name: pkg.display_name,
+      platform_monthly_fee: pkg.platform_monthly_fee,
+      platform_monthly_fee_cents: moneyCents(pkg.platform_monthly_fee),
+      platform_annual_fee: pkg.platform_annual_fee,
+      platform_annual_fee_cents: moneyCents(pkg.platform_annual_fee),
+      annual_discount_percent: pkg.annual_discount_percent,
       included_interviews: pkg.included_interviews,
       included_interviews_per_role: pkg.included_interviews_per_role,
       interview_duration_minutes: pkg.interview_duration_minutes,
@@ -165,6 +201,7 @@ module.exports = {
   normalizeBillingInterval,
   getAlphaScreenPackage,
   getAlphaScreenPlanSettingsDefaults,
+  getAlphaScreenPlatformFee,
   buildAlphaScreenPlanSettingsPayload,
   getAlphaScreenStripePriceEnvName,
   getAlphaScreenStripePriceId,

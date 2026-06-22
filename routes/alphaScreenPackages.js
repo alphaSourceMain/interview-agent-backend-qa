@@ -1,6 +1,7 @@
 'use strict'
 
 const express = require('express')
+const crypto = require('crypto')
 const { supabaseAdmin } = require('../src/lib/supabaseClient')
 const {
   buildAlphaScreenPackageSnapshot,
@@ -9,9 +10,14 @@ const {
   normalizeAlphaScreenPlanKey,
   normalizeBillingInterval
 } = require('../src/lib/alphaScreenPackages')
+const { buildMembershipAgreementSignUrl } = require('../config/urlConfig')
+const { htmlToPdf } = require('../utils/pdfRenderer')
+const { buildMembershipAgreementHtml } = require('../utils/renderMembershipAgreement')
 
 const router = express.Router()
+const AGREEMENTS_BUCKET = process.env.SUPABASE_AGREEMENTS_BUCKET || 'agreements'
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const PERSONAL_EMAIL_DOMAINS = new Set([
   'aol.com',
   'gmail.com',
@@ -31,6 +37,7 @@ const RATE_WINDOW_MS = 10 * 60 * 1000
 const RATE_MAX = Number(process.env.ALPHASCREEN_PURCHASE_INTENT_RATE_MAX || 12)
 const DUPLICATE_WINDOW_MS = 30 * 60 * 1000
 const INTENT_EXPIRATION_MS = 14 * 24 * 60 * 60 * 1000
+const SIGNING_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const rateBuckets = new Map()
 
 function rateLimit(req, res, next) {
@@ -70,6 +77,35 @@ function cleanPath(value) {
   } catch (_) {
     return trimText(raw.split('?')[0].split('#')[0], 300)
   }
+}
+
+function slugify(value) {
+  const slug = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+  return slug || 'client'
+}
+
+function dateOnly(date) {
+  const safe = date instanceof Date && Number.isFinite(date.getTime()) ? date : new Date()
+  return safe.toISOString().slice(0, 10)
+}
+
+function addOneYearDateOnly(date) {
+  const safe = date instanceof Date && Number.isFinite(date.getTime()) ? date : new Date()
+  const next = new Date(Date.UTC(safe.getUTCFullYear() + 1, safe.getUTCMonth(), safe.getUTCDate()))
+  return next.toISOString().slice(0, 10)
+}
+
+function packageNumber(snapshot, ...keys) {
+  for (const key of keys) {
+    const value = Number(snapshot?.[key])
+    if (Number.isFinite(value) && value >= 0) return value
+  }
+  return null
 }
 
 function isBusinessEmail(value) {
@@ -128,7 +164,7 @@ function validatePurchaseIntentInput(input) {
     return {
       ok: false,
       code: 'required_fields_missing',
-      detail: 'Required purchase intent fields are missing.',
+      detail: 'Required signup fields are missing.',
       fields: missing
     }
   }
@@ -162,6 +198,14 @@ function safePackageSummary(snapshot = {}) {
     plan_key: snapshot.plan_key || null,
     display_name: snapshot.display_name || null,
     billing_cadence: snapshot.billing_cadence || null,
+    platform_fee: snapshot.platform_fee ?? null,
+    platform_fee_cents: snapshot.platform_fee_cents ?? null,
+    platform_fee_billing_cadence: snapshot.platform_fee_billing_cadence || snapshot.billing_cadence || null,
+    platform_monthly_fee: snapshot.platform_monthly_fee ?? null,
+    platform_monthly_fee_cents: snapshot.platform_monthly_fee_cents ?? null,
+    platform_annual_fee: snapshot.platform_annual_fee ?? null,
+    platform_annual_fee_cents: snapshot.platform_annual_fee_cents ?? null,
+    annual_discount_percent: snapshot.annual_discount_percent ?? null,
     included_interviews: snapshot.included_interviews ?? null,
     included_interviews_per_role: snapshot.included_interviews_per_role ?? null,
     interview_duration_minutes: snapshot.interview_duration_minutes ?? null,
@@ -181,10 +225,154 @@ function buildPurchaseIntentResponse(row, { duplicate = false } = {}) {
     duplicate,
     selected_package: safePackageSummary(snapshot),
     next_step_message: duplicate
-      ? 'A pending purchase request already exists for this company and package. The next step is membership agreement preparation.'
-      : 'Purchase request received. The next step is membership agreement preparation.',
+      ? 'A signup request already exists for this company and package. The next step is membership agreement preparation.'
+      : 'Signup request received. The next step is membership agreement preparation.',
     request_id: row?.request_id || null
   }
+}
+
+function signingPathFromUrl(signingUrl) {
+  const raw = String(signingUrl || '').trim()
+  if (!raw) return ''
+  try {
+    const parsed = new URL(raw)
+    return parsed.pathname || raw
+  } catch (_) {
+    return raw
+  }
+}
+
+function buildAgreementResponse(intent, agreement, signingUrl, { refreshed = false } = {}) {
+  const snapshot = intent?.package_snapshot && typeof intent.package_snapshot === 'object' ? intent.package_snapshot : {}
+  return {
+    ok: true,
+    purchase_intent_id: intent?.id || null,
+    status: intent?.status || 'agreement_pending',
+    agreement: {
+      id: agreement?.id || null,
+      status: agreement?.status || 'sent',
+      signing_url: signingUrl || null,
+      signing_path: signingPathFromUrl(signingUrl) || null,
+      expires_at: agreement?.signer_token_expires_at || null,
+      refreshed: refreshed === true,
+      selected_package: safePackageSummary(snapshot)
+    },
+    next_step_message: 'Membership agreement is ready for review and signature. Payment and account setup happen after signing in later steps.'
+  }
+}
+
+function validatePurchaseIntentForAgreement(intent) {
+  if (!intent) {
+    return { ok: false, status: 404, code: 'purchase_intent_not_found', detail: 'Signup request was not found.' }
+  }
+  const status = String(intent.status || '').trim().toLowerCase()
+  if (intent.expires_at) {
+    const expiresAt = Date.parse(String(intent.expires_at))
+    if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
+      return { ok: false, status: 410, code: 'purchase_intent_expired', detail: 'Signup request has expired.' }
+    }
+  }
+  if (!['pending', 'agreement_pending'].includes(status)) {
+    return { ok: false, status: 409, code: 'purchase_intent_not_eligible', detail: 'Signup request is not eligible for agreement preparation.' }
+  }
+  const snapshot = intent.package_snapshot && typeof intent.package_snapshot === 'object' ? intent.package_snapshot : null
+  if (!snapshot || !snapshot.plan_key || !snapshot.billing_cadence) {
+    return { ok: false, status: 409, code: 'package_snapshot_missing', detail: 'Signup request package snapshot is missing.' }
+  }
+  const planKey = normalizeAlphaScreenPlanKey(snapshot.plan_key)
+  const billingCadence = normalizeBillingInterval(snapshot.billing_cadence)
+  if (!['basic', 'pro'].includes(planKey) || !billingCadence) {
+    return { ok: false, status: 409, code: 'package_snapshot_invalid', detail: 'Signup request package snapshot is invalid.' }
+  }
+  return { ok: true, planKey, billingCadence, snapshot }
+}
+
+function buildAgreementInputFromPurchaseIntent(intent) {
+  const snapshot = intent?.package_snapshot && typeof intent.package_snapshot === 'object' ? intent.package_snapshot : {}
+  const now = new Date()
+  const firstName = trimText(intent?.buyer_first_name, 80)
+  const lastName = trimText(intent?.buyer_last_name, 80)
+  const adminName = trimText(`${firstName} ${lastName}`, 170) || trimText(intent?.buyer_email, 254)
+  const includedInterviews = packageNumber(snapshot, 'included_interviews_per_role', 'included_interviews')
+  const interviewDuration = packageNumber(snapshot, 'max_interview_minutes', 'interview_duration_minutes')
+  const additionalInterviewFee = packageNumber(snapshot, 'additional_interview_fee', 'additional_interview_price', 'overage_price')
+  const perRoleFee = packageNumber(snapshot, 'per_role_fee')
+  const billingOption = normalizeBillingInterval(snapshot.billing_cadence || intent?.selected_billing_cadence)
+  const platformFee = packageNumber(snapshot, 'platform_fee') ??
+    (billingOption === 'annual'
+      ? packageNumber(snapshot, 'platform_annual_fee')
+      : packageNumber(snapshot, 'platform_monthly_fee'))
+
+  return {
+    client_id: null,
+    client_legal_name: trimText(intent?.company_legal_name, 160),
+    dba_trade_name: trimText(intent?.company_dba, 160) || trimText(intent?.company_legal_name, 160),
+    primary_admin_name: adminName,
+    admin_email: trimText(intent?.buyer_email, 254).toLowerCase(),
+    membership_tier: normalizeAlphaScreenPlanKey(snapshot.plan_key),
+    platform_fee: platformFee,
+    per_role_fee: perRoleFee,
+    additional_interview_fee: additionalInterviewFee,
+    included_interviews_per_role: includedInterviews,
+    max_interview_minutes: interviewDuration,
+    initial_term_start: dateOnly(now),
+    initial_renewal_date: addOneYearDateOnly(now),
+    billing_option: billingOption,
+    auto_renew: true,
+    notice_deadline_days: 30
+  }
+}
+
+function validateAgreementInput(input) {
+  const missing = []
+  if (!input.client_legal_name) missing.push('company_legal_name')
+  if (!input.primary_admin_name) missing.push('buyer_name')
+  if (!isBusinessEmail(input.admin_email)) missing.push('buyer_email')
+  if (!input.membership_tier) missing.push('plan_key')
+  if (!input.billing_option) missing.push('billing_cadence')
+  if (!input.included_interviews_per_role) missing.push('included_interviews')
+  if (!input.max_interview_minutes) missing.push('interview_duration_minutes')
+  if (input.platform_fee === null || input.platform_fee === undefined) missing.push('platform_fee')
+  if (input.additional_interview_fee === null || input.additional_interview_fee === undefined) missing.push('additional_interview_fee')
+  if (input.per_role_fee === null || input.per_role_fee === undefined) missing.push('per_role_fee')
+  if (missing.length) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'agreement_values_missing',
+      detail: 'Signup request is missing agreement package values.',
+      fields: missing
+    }
+  }
+  return { ok: true }
+}
+
+async function refreshAgreementSigningUrl(agreement) {
+  const signerToken = crypto.randomBytes(32).toString('hex')
+  const signerTokenHash = crypto.createHash('sha256').update(signerToken).digest('hex')
+  const signerTokenExpiresAt = new Date(Date.now() + SIGNING_LINK_TTL_MS).toISOString()
+  const signingUrl = buildMembershipAgreementSignUrl(signerToken)
+
+  const { data, error } = await supabaseAdmin
+    .from('membership_agreements')
+    .update({
+      signer_token_hash: signerTokenHash,
+      signer_token_expires_at: signerTokenExpiresAt,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', agreement.id)
+    .eq('status', 'sent')
+    .select('id,status,signer_token_expires_at,draft_pdf_path,sent_at')
+    .single()
+
+  if (error) {
+    const err = new Error(error.message || 'agreement_token_refresh_failed')
+    err.code = error.code || 'agreement_token_refresh_failed'
+    err.status = 500
+    throw err
+  }
+
+  return { agreement: data || agreement, signingUrl }
 }
 
 router.get('/packages', (req, res) => {
@@ -294,11 +482,222 @@ router.post('/purchase-intents', rateLimit, async (req, res) => {
   }
 })
 
+router.post('/purchase-intents/:id/agreement', rateLimit, async (req, res) => {
+  const request_id = req.request_id || null
+  const intentId = trimText(req.params?.id, 80)
+  if (!UUID_RE.test(intentId)) {
+    return res.status(400).json({
+      error: 'purchase_intent_id_required',
+      code: 'purchase_intent_id_required',
+      detail: 'A valid signup reference is required.',
+      request_id
+    })
+  }
+
+  try {
+    const { data: intent, error: intentErr } = await supabaseAdmin
+      .from('public_purchase_intents')
+      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,expires_at,created_at')
+      .eq('id', intentId)
+      .maybeSingle()
+
+    if (intentErr) {
+      console.error('[alphascreen/purchase-intents/agreement] intent_lookup_failed:', intentErr.message || intentErr)
+      return res.status(503).json({
+        error: 'purchase_intent_lookup_failed',
+        code: intentErr.code || 'purchase_intent_lookup_failed',
+        request_id
+      })
+    }
+
+    const intentValidation = validatePurchaseIntentForAgreement(intent)
+    if (!intentValidation.ok) {
+      return res.status(intentValidation.status).json({
+        error: intentValidation.code,
+        code: intentValidation.code,
+        detail: intentValidation.detail,
+        request_id
+      })
+    }
+
+    if (intent.agreement_id) {
+      const { data: existingAgreement, error: existingErr } = await supabaseAdmin
+        .from('membership_agreements')
+        .select('id,status,signer_token_expires_at,draft_pdf_path,sent_at')
+        .eq('id', intent.agreement_id)
+        .maybeSingle()
+
+      if (existingErr) {
+        console.error('[alphascreen/purchase-intents/agreement] existing_agreement_lookup_failed:', existingErr.message || existingErr)
+        return res.status(503).json({
+          error: 'agreement_lookup_failed',
+          code: existingErr.code || 'agreement_lookup_failed',
+          request_id
+        })
+      }
+
+      if (existingAgreement && String(existingAgreement.status || '').trim().toLowerCase() === 'sent') {
+        const refreshed = await refreshAgreementSigningUrl(existingAgreement)
+        const responseIntent = { ...intent, status: 'agreement_pending' }
+        const body = buildAgreementResponse(responseIntent, refreshed.agreement, refreshed.signingUrl, { refreshed: true })
+        body.request_id = request_id
+        return res.json(body)
+      }
+
+      if (existingAgreement) {
+        return res.status(409).json({
+          error: 'agreement_not_signable',
+          code: 'agreement_not_signable',
+          detail: 'The linked agreement is not available for signing.',
+          request_id
+        })
+      }
+    }
+
+    const agreementInput = buildAgreementInputFromPurchaseIntent(intent)
+    const agreementInputValidation = validateAgreementInput(agreementInput)
+    if (!agreementInputValidation.ok) {
+      return res.status(agreementInputValidation.status).json({
+        error: agreementInputValidation.code,
+        code: agreementInputValidation.code,
+        detail: agreementInputValidation.detail,
+        fields: agreementInputValidation.fields,
+        request_id
+      })
+    }
+
+    const { html, normalized } = buildMembershipAgreementHtml(agreementInput)
+    const pdf = await htmlToPdf(html, {
+      format: 'Letter',
+      margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' }
+    })
+
+    const agreementId = crypto.randomUUID()
+    const clientSlug = slugify(normalized.client_legal_name)
+    const draftPdfPath = `membership-agreements/${agreementId}/${clientSlug}-draft.pdf`
+
+    const upload = await supabaseAdmin
+      .storage
+      .from(AGREEMENTS_BUCKET)
+      .upload(draftPdfPath, pdf, {
+        contentType: 'application/pdf',
+        upsert: true
+      })
+
+    if (upload.error) {
+      console.error('[alphascreen/purchase-intents/agreement] draft_upload_failed:', upload.error.message || upload.error)
+      return res.status(500).json({
+        error: 'draft_upload_failed',
+        code: upload.error.code || 'draft_upload_failed',
+        detail: upload.error.message || 'Agreement draft could not be stored.',
+        request_id
+      })
+    }
+
+    const signerToken = crypto.randomBytes(32).toString('hex')
+    const signerTokenHash = crypto.createHash('sha256').update(signerToken).digest('hex')
+    const signerTokenExpiresAt = new Date(Date.now() + SIGNING_LINK_TTL_MS).toISOString()
+    const signingUrl = buildMembershipAgreementSignUrl(signerToken)
+    const nowIso = new Date().toISOString()
+    const templateSnapshot = {
+      template_name: 'membership-agreement',
+      template_version: 'membership_agreement_v2_phase1',
+      source: 'public_purchase_intent',
+      source_document: 'alphaScreen Membership Agreementv2.docx',
+      generated_at: nowIso,
+      purchase_intent: {
+        id: intent.id,
+        source_path: intent.source_path || null,
+        selected_plan_key: intent.selected_plan_key,
+        selected_billing_cadence: intent.selected_billing_cadence
+      },
+      package_snapshot: intentValidation.snapshot,
+      values: normalized,
+      rendered_html: html
+    }
+
+    const { data: insertedAgreement, error: insertErr } = await supabaseAdmin
+      .from('membership_agreements')
+      .insert({
+        id: agreementId,
+        client_id: null,
+        status: 'sent',
+        client_legal_name: normalized.client_legal_name,
+        dba_trade_name: normalized.dba_trade_name || null,
+        primary_admin_name: normalized.primary_admin_name,
+        admin_email: normalized.admin_email,
+        membership_tier: normalized.membership_tier,
+        initial_term_start: normalized.initial_term_start,
+        initial_renewal_date: normalized.initial_renewal_date,
+        billing_option: normalized.billing_option,
+        auto_renew: normalized.auto_renew,
+        notice_deadline_days: normalized.notice_deadline_days,
+        template_version: 'membership_agreement_v2_phase1',
+        template_snapshot: templateSnapshot,
+        draft_pdf_path: draftPdfPath,
+        signer_token_hash: signerTokenHash,
+        signer_token_expires_at: signerTokenExpiresAt,
+        sent_at: nowIso,
+        created_by_user_id: null,
+        created_by_email: 'public_purchase_intent'
+      })
+      .select('id,status,signer_token_expires_at,draft_pdf_path,sent_at')
+      .single()
+
+    if (insertErr) {
+      console.error('[alphascreen/purchase-intents/agreement] agreement_insert_failed:', insertErr.message || insertErr)
+      return res.status(503).json({
+        error: 'agreement_create_failed',
+        code: insertErr.code || 'agreement_create_failed',
+        request_id
+      })
+    }
+
+    const { data: updatedIntent, error: updateErr } = await supabaseAdmin
+      .from('public_purchase_intents')
+      .update({
+        status: 'agreement_pending',
+        agreement_id: agreementId,
+        updated_at: nowIso
+      })
+      .eq('id', intent.id)
+      .select('id,status,package_snapshot,agreement_id')
+      .single()
+
+    if (updateErr) {
+      console.error('[alphascreen/purchase-intents/agreement] intent_update_failed:', updateErr.message || updateErr)
+      return res.status(503).json({
+        error: 'purchase_intent_agreement_link_failed',
+        code: updateErr.code || 'purchase_intent_agreement_link_failed',
+        request_id
+      })
+    }
+
+    const body = buildAgreementResponse(
+      { ...intent, ...(updatedIntent || {}), package_snapshot: intent.package_snapshot },
+      insertedAgreement,
+      signingUrl
+    )
+    body.request_id = request_id
+    return res.status(201).json(body)
+  } catch (e) {
+    console.error('[alphascreen/purchase-intents/agreement] unexpected:', e?.message || e)
+    return res.status(Number(e?.status) || 500).json({
+      error: e?.code || 'server_error',
+      code: e?.code || 'server_error',
+      detail: e?.message || 'Server error',
+      request_id
+    })
+  }
+})
+
 router._test = {
   normalizePurchaseIntentInput,
   validatePurchaseIntentInput,
   safePackageSummary,
-  buildPurchaseIntentResponse
+  buildPurchaseIntentResponse,
+  buildAgreementInputFromPurchaseIntent,
+  validatePurchaseIntentForAgreement
 }
 
 module.exports = router

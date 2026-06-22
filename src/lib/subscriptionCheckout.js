@@ -3,6 +3,7 @@
 const Stripe = require('stripe')
 const { supabaseAdmin } = require('./supabaseClient')
 const { requireParentClient } = require('./clientBillingScope')
+const { getAlphaScreenStripePriceId } = require('./alphaScreenPackages')
 const { resolvePublicBackendBase, buildClientDashboardReturnUrl } = require('../../config/urlConfig')
 
 function makeError(status, code, detail) {
@@ -263,16 +264,7 @@ async function createSubscriptionCheckoutSession({
     })
     lineItems.push({ price: enterprisePrice.id, quantity: 1 })
   } else {
-    let priceId = ''
-    if (normalizedPlanTier === 'basic') {
-      priceId = normalizedBillingInterval === 'annual'
-        ? String(process.env.STRIPE_PRICE_BASIC_ANNUAL || '')
-        : String(process.env.STRIPE_PRICE_BASIC_MONTHLY || '')
-    } else if (normalizedPlanTier === 'pro') {
-      priceId = normalizedBillingInterval === 'annual'
-        ? String(process.env.STRIPE_PRICE_PRO_ANNUAL || '')
-        : String(process.env.STRIPE_PRICE_PRO_MONTHLY || '')
-    }
+    const priceId = getAlphaScreenStripePriceId(normalizedPlanTier, normalizedBillingInterval)
     if (!priceId) throw makeError(500, 'stripe_price_not_configured', 'Stripe price is not configured.')
     lineItems.push({ price: priceId, quantity: 1 })
   }

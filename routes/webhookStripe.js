@@ -4,6 +4,7 @@ const Stripe = require('stripe');
 const { supabaseAdmin } = require('../src/lib/supabaseClient');
 const { requireParentClient } = require('../src/lib/clientBillingScope');
 const { getRoleInterviewAvailability } = require('../src/lib/roleInterviewAvailability');
+const { buildAlphaScreenPlanSettingsPayload } = require('../src/lib/alphaScreenPackages');
 const router = express.Router();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '');
@@ -72,20 +73,6 @@ async function syncBillingInvoiceFromStripeEvent(stripeInvoice, request_id) {
 
 const LIVE_SUB_STATUSES = new Set(['active', 'trialing']);
 const MANAGED_SUBSCRIPTION_CHECKOUT_SOURCES = new Set(['admin_subscription_checkout', 'agreement_checkout']);
-const PLAN_SETTINGS_DEFAULTS = {
-  basic: {
-    per_role_fee: 399,
-    included_interviews_per_role: 25,
-    additional_interview_fee: 35,
-    max_interview_minutes: 8
-  },
-  pro: {
-    per_role_fee: 699,
-    included_interviews_per_role: 50,
-    additional_interview_fee: 45,
-    max_interview_minutes: 10
-  }
-};
 
 async function requireParentClientForStripeBilling(clientId, context = {}) {
   const result = await requireParentClient(supabaseAdmin, clientId, context);
@@ -200,18 +187,11 @@ function buildClientPlanSettingsPayloadFromSubscription(subscription, clientId, 
     };
   }
 
-  const defaults = PLAN_SETTINGS_DEFAULTS[planTier];
-  if (!defaults) return null;
-  return {
-    client_id: clientId,
-    plan_tier: planTier,
-    billing_interval: billingInterval,
-    platform_fee: null,
-    per_role_fee: defaults.per_role_fee,
-    included_interviews_per_role: defaults.included_interviews_per_role,
-    additional_interview_fee: defaults.additional_interview_fee,
-    max_interview_minutes: defaults.max_interview_minutes
-  };
+  return buildAlphaScreenPlanSettingsPayload({
+    clientId,
+    planKey: planTier,
+    billingInterval
+  });
 }
 
 async function upsertClientPlanSettingsFromSubscription(subscription, clientId, options = {}) {

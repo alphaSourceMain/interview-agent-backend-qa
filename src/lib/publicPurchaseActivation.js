@@ -8,11 +8,12 @@ const {
   normalizeBillingInterval
 } = require('./alphaScreenPackages');
 const { ensureUserAndSendRecovery, redactEmail } = require('./recoveryHelper');
-const { sendMemberRecoveryEmail } = require('../../utils/mailer');
+const { sendMemberRecoveryEmail, sendAlphaScreenWelcomeEmail } = require('../../utils/mailer');
 const { buildClientPwResetUrl } = require('../../config/urlConfig');
 
 const LIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
 const PRIVILEGED_MEMBER_ROLES = new Set(['manager', 'admin', 'owner', 'super_admin']);
+const WELCOME_EMAIL_CATEGORY = 'public_purchase_welcome';
 
 function pickId(value) {
   if (!value) return null;
@@ -78,6 +79,180 @@ function buildClientName(intent, agreement) {
     cleanText(agreement?.client_legal_name) ||
     cleanText(intent?.company_dba) ||
     'alphaScreen client';
+}
+
+function isLiveClientActivationState(client) {
+  const billingStatus = cleanText(client?.billing_status).toLowerCase();
+  const subscriptionStatus = cleanText(client?.subscription_status).toLowerCase();
+  return billingStatus === 'active' && (!subscriptionStatus || LIVE_SUBSCRIPTION_STATUSES.has(subscriptionStatus));
+}
+
+function buildWelcomeLedgerKey({ agreement, intent, clientId, email }) {
+  const stableId = cleanText(intent?.id) || cleanText(agreement?.id) || cleanText(clientId);
+  const normalizedEmail = lowerEmail(email);
+  return `public_purchase_welcome:${stableId}:${normalizedEmail}`.slice(0, 240);
+}
+
+function welcomeLedgerPayload({ agreement, intent, clientId, email, ledgerKey, nowIso }) {
+  const purchaseIntentId = cleanText(intent?.id) || null;
+  const agreementId = cleanText(agreement?.id) || null;
+  const safeClientId = cleanText(clientId) || null;
+  return {
+    event_type: 'outbound_public_purchase_welcome',
+    event_at: nowIso,
+    email,
+    sg_event_id: ledgerKey,
+    category: WELCOME_EMAIL_CATEGORY,
+    email_category: WELCOME_EMAIL_CATEGORY,
+    custom_args: {
+      email_category: WELCOME_EMAIL_CATEGORY,
+      client_id: safeClientId,
+      agreement_id: agreementId,
+      purchase_intent_id: purchaseIntentId
+    },
+    status: 'sending',
+    subject: 'Welcome to alphaScreen',
+    raw_payload: {
+      source: 'public_purchase_activation',
+      client_id: safeClientId,
+      agreement_id: agreementId,
+      purchase_intent_id: purchaseIntentId
+    },
+    is_problem: false,
+    is_time_sensitive: false
+  };
+}
+
+async function readWelcomeLedger(db, ledgerKey) {
+  const { data, error } = await db
+    .from('email_delivery_events')
+    .select('id,status,sg_event_id')
+    .eq('sg_event_id', ledgerKey)
+    .maybeSingle();
+  if (error) {
+    const err = new Error(error.message || 'Welcome email ledger lookup failed');
+    err.code = error.code || 'welcome_email_ledger_lookup_failed';
+    throw err;
+  }
+  return data || null;
+}
+
+async function reserveWelcomeEmailSend({ db, agreement, intent, clientId, email, nowIso }) {
+  const ledgerKey = buildWelcomeLedgerKey({ agreement, intent, clientId, email });
+  const existing = await readWelcomeLedger(db, ledgerKey);
+  if (existing?.id || existing?.sg_event_id) {
+    return {
+      reserved: false,
+      ledgerKey,
+      status: cleanText(existing.status) || 'already_recorded'
+    };
+  }
+
+  const { error } = await db
+    .from('email_delivery_events')
+    .insert(welcomeLedgerPayload({ agreement, intent, clientId, email, ledgerKey, nowIso }));
+  if (error) {
+    const duplicate = String(error.code || '') === '23505' || /duplicate/i.test(String(error.message || ''));
+    if (duplicate) {
+      return { reserved: false, ledgerKey, status: 'already_recorded' };
+    }
+    const err = new Error(error.message || 'Welcome email ledger reservation failed');
+    err.code = error.code || 'welcome_email_ledger_reservation_failed';
+    throw err;
+  }
+
+  return { reserved: true, ledgerKey, status: 'reserved' };
+}
+
+async function updateWelcomeEmailLedger({ db, ledgerKey, status, response = '', isProblem = false }) {
+  const payload = {
+    status,
+    response: cleanText(response).slice(0, 500) || null,
+    is_problem: isProblem === true,
+    event_at: new Date().toISOString()
+  };
+  const { error } = await db
+    .from('email_delivery_events')
+    .update(payload)
+    .eq('sg_event_id', ledgerKey);
+  if (error) {
+    const err = new Error(error.message || 'Welcome email ledger update failed');
+    err.code = error.code || 'welcome_email_ledger_update_failed';
+    throw err;
+  }
+}
+
+async function sendWelcomeEmailOnce({
+  db,
+  agreement,
+  intent,
+  clientId,
+  buyerEmail,
+  buyerName,
+  sendWelcomeEmail,
+  logger,
+  nowIso
+}) {
+  const reservation = await reserveWelcomeEmailSend({
+    db,
+    agreement,
+    intent,
+    clientId,
+    email: buyerEmail,
+    nowIso
+  });
+
+  if (!reservation.reserved) return reservation.status === 'sent' ? 'already_sent' : 'already_recorded';
+
+  try {
+    const firstName = cleanText(intent?.buyer_first_name) || cleanText(buyerName).split(/\s+/).filter(Boolean)[0] || '';
+    const emailResult = await sendWelcomeEmail(buyerEmail, {
+      firstName,
+      recipientName: buyerName,
+      clientId,
+      agreementId: agreement?.id,
+      purchaseIntentId: intent?.id
+    });
+    const status = emailResult?.statusCode === 202
+      ? 'sent'
+      : emailResult?.skipped
+        ? 'skipped'
+        : 'send_failed';
+    await updateWelcomeEmailLedger({
+      db,
+      ledgerKey: reservation.ledgerKey,
+      status,
+      response: emailResult?.skipped ? 'email_skipped' : `status:${emailResult?.statusCode || 0}`,
+      isProblem: status === 'send_failed'
+    });
+    if (status !== 'sent') {
+      logger.warn?.('[public-purchase-activation] welcome_email_not_sent', {
+        email: redactEmail(buyerEmail),
+        status
+      });
+    }
+    return status;
+  } catch (error) {
+    try {
+      await updateWelcomeEmailLedger({
+        db,
+        ledgerKey: reservation.ledgerKey,
+        status: 'send_failed',
+        response: error?.message || 'send_failed',
+        isProblem: true
+      });
+    } catch (ledgerError) {
+      logger.warn?.('[public-purchase-activation] welcome_email_ledger_update_failed', {
+        email: redactEmail(buyerEmail),
+        error: ledgerError?.message || ledgerError
+      });
+    }
+    logger.error?.('[public-purchase-activation] welcome_email_failed', {
+      email: redactEmail(buyerEmail),
+      error: error?.message || error
+    });
+    return 'send_failed';
+  }
 }
 
 function resolvePlanSelection({ agreement, intent, packageSnapshot, fallbackPlanTier, fallbackBillingInterval }) {
@@ -226,6 +401,28 @@ async function findAuthUserByEmail(authAdmin, email, logger = console) {
   } catch (error) {
     logger.error?.('[public-purchase-activation] list_users_exception', {
       email: redactEmail(normalizedEmail),
+      error: error?.message || error
+    });
+    return null;
+  }
+}
+
+async function findAuthUserById(authAdmin, userId, logger = console) {
+  const normalizedUserId = cleanText(userId);
+  if (!authAdmin?.getUserById || !normalizedUserId) return null;
+  try {
+    const { data, error } = await authAdmin.getUserById(normalizedUserId);
+    if (error) {
+      logger.error?.('[public-purchase-activation] get_user_by_id_failed', {
+        user_id: normalizedUserId,
+        error: error.message || error
+      });
+      return null;
+    }
+    return data?.user || null;
+  } catch (error) {
+    logger.error?.('[public-purchase-activation] get_user_by_id_exception', {
+      user_id: normalizedUserId,
       error: error?.message || error
     });
     return null;
@@ -389,6 +586,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
   const requireParent = options.requireParentClient || requireParentClient;
   const ensureRecovery = options.ensureRecovery || ensureUserAndSendRecovery;
   const sendRecoveryEmail = options.sendRecoveryEmail || sendMemberRecoveryEmail;
+  const sendWelcomeEmail = options.sendWelcomeEmail || sendAlphaScreenWelcomeEmail;
   const agreementId = cleanText(options.agreementId);
   if (!agreementId) return { ok: false, status: 'agreement_missing' };
 
@@ -421,6 +619,14 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     billingInterval,
     fallbackClientId: options.fallbackClientId
   });
+  const { data: existingClientState, error: existingClientStateErr } = await db
+    .from('clients')
+    .select('id,billing_status,subscription_status')
+    .eq('id', clientId)
+    .maybeSingle();
+  if (existingClientStateErr) throw new Error(existingClientStateErr.message || 'Client activation state lookup failed');
+  const agreementAlreadyPaid = cleanText(agreement.checkout_status).toLowerCase() === 'paid';
+  const clientAlreadyActive = isLiveClientActivationState(existingClientState);
   const parentGuard = await requireParent(db, clientId, {
     route: 'public_purchase_webhook_activation',
     agreement_id: agreementId,
@@ -500,6 +706,34 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     ensureRecovery,
     sendRecoveryEmail
   });
+  let welcomeEmailStatus = 'not_sent';
+  const buyerEmail = lowerEmail(intent?.buyer_email || agreement?.admin_email);
+  const buyerName = buildBuyerName(intent, agreement) || buyerEmail;
+  const shouldSendWelcome = Boolean(intent?.id && buyerEmail && !agreementAlreadyPaid && !clientAlreadyActive);
+  if (shouldSendWelcome) {
+    try {
+      welcomeEmailStatus = await sendWelcomeEmailOnce({
+        db,
+        agreement,
+        intent,
+        clientId,
+        buyerEmail,
+        buyerName,
+        sendWelcomeEmail,
+        logger,
+        nowIso: paidAt
+      });
+    } catch (error) {
+      welcomeEmailStatus = 'ledger_unavailable';
+      logger.error?.('[public-purchase-activation] welcome_email_ledger_failed', {
+        email: redactEmail(buyerEmail),
+        error: error?.message || error,
+        code: error?.code || null
+      });
+    }
+  } else if (agreementAlreadyPaid || clientAlreadyActive) {
+    welcomeEmailStatus = 'not_sent_existing_activation';
+  }
 
   return {
     ok: true,
@@ -512,12 +746,15 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     member_status: setup.member_status,
     member_role: setup.member_role,
     auth_status: setup.auth_status,
-    setup_email_status: setup.setup_email_status
+    setup_email_status: setup.setup_email_status,
+    welcome_email_status: welcomeEmailStatus
   };
 }
 
 async function resolvePublicCheckoutReturnState(options = {}) {
   const db = options.db || supabaseAdmin;
+  const authAdmin = options.authAdmin || supabaseAdmin.auth?.admin;
+  const logger = options.logger || console;
   const sessionId = cleanText(options.sessionId);
   const fallbackClientId = cleanText(options.fallbackClientId);
   const fallbackAgreementId = cleanText(options.agreementId);
@@ -590,6 +827,16 @@ async function resolvePublicCheckoutReturnState(options = {}) {
   const member = Array.isArray(members) ? members[0] : members;
   if (!member?.user_id) return { status: 'setup_pending', client_id: clientId };
 
+  const authUser = await findAuthUserById(authAdmin, member.user_id, logger);
+  if (!cleanText(authUser?.last_sign_in_at)) {
+    return {
+      status: 'setup_email_sent',
+      client_id: clientId,
+      password_setup_required: true,
+      setup_email_sent: true
+    };
+  }
+
   return { status: 'ready', client_id: clientId };
 }
 
@@ -597,5 +844,6 @@ module.exports = {
   activatePublicPurchaseAgreementCheckout,
   resolvePublicCheckoutReturnState,
   buildClientActivationPayload,
-  findAuthUserByEmail
+  findAuthUserByEmail,
+  findAuthUserById
 };

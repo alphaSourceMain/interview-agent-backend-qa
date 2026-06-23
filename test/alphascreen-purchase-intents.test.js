@@ -237,12 +237,29 @@ test('valid Pro annual intent creates pending intent when annual cadence is supp
   assertNoStaleAnnualPricingPayload(db.inserts[0].row.package_snapshot)
 })
 
+test('purchase intent accepts personal email domains and normalizes email', async () => {
+  const cases = [
+    ['igrunner@icloud.com', 'igrunner@icloud.com'],
+    ['Buyer.Person+test@Gmail.com', 'buyer.person+test@gmail.com'],
+    ['owner@yahoo.com', 'owner@yahoo.com'],
+    ['founder@outlook.com', 'founder@outlook.com']
+  ]
+
+  for (const [inputEmail, storedEmail] of cases) {
+    const db = makeDb()
+    const response = await request(buildApp(db), validBody({ buyer_email: inputEmail }))
+
+    assert.equal(response.status, 201)
+    assert.equal(db.inserts.length, 1)
+    assert.equal(db.inserts[0].row.buyer_email, storedEmail)
+  }
+})
+
 test('invalid purchase intent inputs are rejected before insert', async () => {
   const cases = [
     [{ plan_key: 'enterprise' }, 'invalid_plan'],
     [{ billing_cadence: 'weekly' }, 'invalid_billing_cadence'],
     [{ buyer_email: 'not-an-email' }, 'invalid_email'],
-    [{ buyer_email: 'buyer@gmail.com' }, 'invalid_email'],
     [{ company_legal_name: '' }, 'required_fields_missing']
   ]
 

@@ -299,6 +299,59 @@ async function sendMemberRecoveryEmail(to, recoveryUrl, recipientName) {
   return { statusCode: resp?.statusCode || 0 }
 }
 
+async function sendAlphaScreenWelcomeEmail(to, details = {}) {
+  if (!API_KEY) return { skipped: true }
+  const firstNameRaw = String(details.firstName || details.first_name || details.recipientName || details.recipient_name || '').trim().split(/\s+/).filter(Boolean)[0] || ''
+  const safeFirstName = firstNameRaw.replace(/[^A-Za-z0-9'.-]/g, '').slice(0, 40)
+  const greeting = /[A-Za-z0-9]/.test(safeFirstName) ? `Hi ${safeFirstName},` : 'Hi there,'
+  const helpEmail = String(details.helpEmail || details.help_email || DEFAULT_HELP_EMAIL).trim() || DEFAULT_HELP_EMAIL
+  const safeEmail = escapeHtml(String(to || '').trim())
+  const safeHelpEmail = escapeHtml(helpEmail)
+  const clientId = cleanEmailText(details.clientId || details.client_id)
+  const agreementId = cleanEmailText(details.agreementId || details.agreement_id)
+  const purchaseIntentId = cleanEmailText(details.purchaseIntentId || details.purchase_intent_id)
+  const msg = {
+    to,
+    from: FROM,
+    subject: 'Welcome to alphaScreen',
+    html: buildBrandedEmailShell({
+      title: 'Welcome to alphaScreen',
+      preheader: 'Your alphaScreen membership is active and account setup is being prepared.',
+      helpEmail,
+      contentHtml: `
+        <p style="margin:0 0 12px;font-size:15px;line-height:1.6;">${escapeHtml(greeting)}</p>
+        <p style="margin:0 0 12px;font-size:15px;line-height:1.6;">
+          Thank you for signing up for alphaScreen. I appreciate you trusting alphaSource with your candidate screening workflow.
+        </p>
+        <p style="margin:0 0 12px;font-size:15px;line-height:1.6;">
+          Your membership is now active, and your account setup is being prepared. The next step is to set your password using the setup email we send to ${safeEmail}. After that, you can sign in, create your first role, add screening questions, and start inviting candidates.
+        </p>
+        <p style="margin:0 0 8px;font-size:15px;line-height:1.6;">A few helpful starting points:</p>
+        <ul style="margin:0 0 14px;padding:0;">
+          <li style="margin:0 0 6px 18px;">Start with one role and a focused set of screening questions.</li>
+          <li style="margin:0 0 6px 18px;">Use the FAQ if you need help with setup, candidate links, memberships, billing, or interview limits.</li>
+          <li style="margin:0 0 6px 18px;">When the alphaScreen playbook is finalized, we will make it available as a getting-started guide.</li>
+        </ul>
+        <p style="margin:0 0 12px;font-size:15px;line-height:1.6;">
+          Need help? Email us at <a href="mailto:${safeHelpEmail}">${safeHelpEmail}</a> and we will help you get set up.
+        </p>
+        <p style="margin:0 0 2px;font-size:15px;line-height:1.6;">Thank you again,</p>
+        <p style="margin:0;font-size:15px;line-height:1.6;">Jason Gardner<br />alphaSource</p>
+      `
+    }),
+    categories: ['public_purchase_welcome'],
+    customArgs: {
+      email_category: 'public_purchase_welcome',
+      client_id: clientId,
+      agreement_id: agreementId,
+      purchase_intent_id: purchaseIntentId
+    }
+  }
+  // Future playbook attachment can be added here once an approved file is available.
+  const [resp] = await sg.send(msg)
+  return { statusCode: resp?.statusCode || 0 }
+}
+
 async function sendMembershipAgreementEmail(to, signingUrl, details = {}) {
   if (!API_KEY) return { skipped: true }
   const safeSigningUrl = escapeHtml(String(signingUrl || '').trim())
@@ -667,6 +720,7 @@ module.exports = {
   sendSubscriptionCheckoutEmail,
   sendRoleInterviewLimitReachedEmail,
   sendMemberRecoveryEmail,
+  sendAlphaScreenWelcomeEmail,
   sendMembershipAgreementEmail,
   sendMembershipAgreementInternalNotification,
   sendMembershipAgreementSignedCopyEmail,

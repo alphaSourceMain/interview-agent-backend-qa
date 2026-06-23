@@ -18,21 +18,6 @@ const router = express.Router()
 const AGREEMENTS_BUCKET = process.env.SUPABASE_AGREEMENTS_BUCKET || 'agreements'
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const PERSONAL_EMAIL_DOMAINS = new Set([
-  'aol.com',
-  'gmail.com',
-  'googlemail.com',
-  'hotmail.com',
-  'icloud.com',
-  'live.com',
-  'me.com',
-  'msn.com',
-  'outlook.com',
-  'proton.me',
-  'protonmail.com',
-  'yahoo.com',
-  'ymail.com'
-])
 const RATE_WINDOW_MS = 10 * 60 * 1000
 const RATE_MAX = Number(process.env.ALPHASCREEN_PURCHASE_INTENT_RATE_MAX || 12)
 const DUPLICATE_WINDOW_MS = 30 * 60 * 1000
@@ -108,11 +93,9 @@ function packageNumber(snapshot, ...keys) {
   return null
 }
 
-function isBusinessEmail(value) {
+function isValidEmail(value) {
   const email = trimText(value, 254).toLowerCase()
-  if (!EMAIL_RE.test(email)) return false
-  const domain = email.split('@')[1] || ''
-  return Boolean(domain && !PERSONAL_EMAIL_DOMAINS.has(domain))
+  return EMAIL_RE.test(email)
 }
 
 function validationError(res, req, code, detail, fields = []) {
@@ -187,8 +170,8 @@ function validatePurchaseIntentInput(input) {
       fields: ['billing_cadence']
     }
   }
-  if (!isBusinessEmail(input.buyer_email)) {
-    return { ok: false, code: 'invalid_email', detail: 'A valid work email is required.', fields: ['buyer_email'] }
+  if (!isValidEmail(input.buyer_email)) {
+    return { ok: false, code: 'invalid_email', detail: 'A valid email is required.', fields: ['buyer_email'] }
   }
   return { ok: true }
 }
@@ -327,7 +310,7 @@ function validateAgreementInput(input) {
   const missing = []
   if (!input.client_legal_name) missing.push('company_legal_name')
   if (!input.primary_admin_name) missing.push('buyer_name')
-  if (!isBusinessEmail(input.admin_email)) missing.push('buyer_email')
+  if (!isValidEmail(input.admin_email)) missing.push('buyer_email')
   if (!input.membership_tier) missing.push('plan_key')
   if (!input.billing_option) missing.push('billing_cadence')
   if (!input.included_interviews_per_role) missing.push('included_interviews')

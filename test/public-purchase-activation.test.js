@@ -4,7 +4,10 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 const { test } = require('node:test')
 
+const projectRoot = path.resolve(__dirname, '..')
 const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
+const mailerPath = path.join(projectRoot, 'utils', 'mailer.js')
+const sendgridMailPath = require.resolve('@sendgrid/mail')
 require.cache[supabaseClientPath] = {
   id: supabaseClientPath,
   filename: supabaseClientPath,
@@ -73,6 +76,7 @@ class FakeQuery {
     if (this.table === 'clients') return this.db.clients
     if (this.table === 'client_members') return this.db.clientMembers
     if (this.table === 'client_plan_settings') return this.db.clientPlanSettings
+    if (this.table === 'email_delivery_events') return this.db.emailDeliveryEvents
     return []
   }
 
@@ -84,6 +88,10 @@ class FakeQuery {
   async single() {
     if (this.insertPayload) {
       const row = { ...this.insertPayload }
+      if (this.table === 'email_delivery_events' && row.sg_event_id) {
+        const duplicate = this.rows().find((item) => String(item.sg_event_id || '') === String(row.sg_event_id || ''))
+        if (duplicate) return { data: null, error: { message: 'duplicate key value violates unique constraint', code: '23505' } }
+      }
       if (this.table === 'clients' && !row.id) row.id = CLIENT_ID
       this.rows().push(row)
       this.db.inserts.push({ table: this.table, row })
@@ -182,6 +190,7 @@ function makeDb(plan = 'basic', cadence = 'monthly', overrides = {}) {
     }],
     clientMembers: overrides.clientMembers ? [...overrides.clientMembers] : [],
     clientPlanSettings: [],
+    emailDeliveryEvents: overrides.emailDeliveryEvents ? [...overrides.emailDeliveryEvents] : [],
     inserts: [],
     updates: [],
     upserts: [],
@@ -197,6 +206,10 @@ function makeAuthAdmin(users = []) {
     async listUsers(args) {
       this.calls.push(args)
       return { data: { users }, error: null }
+    },
+    async getUserById(userId) {
+      const user = users.find((item) => String(item?.id || '') === String(userId || '')) || null
+      return { data: { user }, error: null }
     }
   }
 }
@@ -224,6 +237,7 @@ function makeSubscription(cadence) {
 async function activateCase(plan, cadence, extra = {}) {
   const db = extra.db || makeDb(plan, cadence, extra)
   const sentEmails = []
+  const welcomeEmails = []
   let recoveryCalls = 0
   const result = await activatePublicPurchaseAgreementCheckout({
     db,
@@ -241,13 +255,26 @@ async function activateCase(plan, cadence, extra = {}) {
       sentEmails.push({ to, actionLink, name })
       return { statusCode: 202 }
     },
+    sendWelcomeEmail: extra.sendWelcomeEmail || (async (to, details) => {
+      welcomeEmails.push({ to, details })
+      return { statusCode: 202 }
+    }),
     logger: {
       error() {},
       warn() {},
       info() {}
     }
   })
-  return { db, result, sentEmails, recoveryCalls }
+  return { db, result, sentEmails, welcomeEmails, recoveryCalls }
+}
+
+function injectModule(filename, exports) {
+  require.cache[filename] = {
+    id: filename,
+    filename,
+    loaded: true,
+    exports,
+  }
 }
 
 test('public purchase webhook activation provisions Basic and Pro monthly/annual buyers', async () => {
@@ -259,16 +286,22 @@ test('public purchase webhook activation provisions Basic and Pro monthly/annual
   ]
 
   for (const [plan, cadence, platformFee, perRoleFee, included, minutes, overage] of cases) {
-    const { db, result, sentEmails, recoveryCalls } = await activateCase(plan, cadence)
+    const { db, result, sentEmails, welcomeEmails, recoveryCalls } = await activateCase(plan, cadence)
 
     assert.equal(result.ok, true)
     assert.equal(result.plan_key, plan)
     assert.equal(result.billing_interval, cadence)
     assert.equal(result.client_id, CLIENT_ID)
     assert.equal(result.setup_email_status, 'sent')
+    assert.equal(result.welcome_email_status, 'sent')
     assert.equal(recoveryCalls, 1)
     assert.equal(sentEmails.length, 1)
     assert.equal(sentEmails[0].to, BUYER_EMAIL)
+    assert.equal(welcomeEmails.length, 1)
+    assert.equal(welcomeEmails[0].to, BUYER_EMAIL)
+    assert.equal(db.emailDeliveryEvents.length, 1)
+    assert.equal(db.emailDeliveryEvents[0].email_category, 'public_purchase_welcome')
+    assert.equal(db.emailDeliveryEvents[0].status, 'sent')
 
     const agreement = db.membershipAgreements[0]
     assert.equal(agreement.checkout_status, 'paid')
@@ -307,6 +340,7 @@ test('public purchase webhook activation provisions Basic and Pro monthly/annual
 test('public purchase activation links an existing auth user without sending setup email', async () => {
   let recoveryCalled = false
   let emailCalled = false
+  const welcomeEmails = []
   const db = makeDb('pro', 'annual')
   const result = await activatePublicPurchaseAgreementCheckout({
     db,
@@ -324,19 +358,26 @@ test('public purchase activation links an existing auth user without sending set
       emailCalled = true
       throw new Error('should_not_send_setup_email_for_existing_user')
     },
+    sendWelcomeEmail: async (to, details) => {
+      welcomeEmails.push({ to, details })
+      return { statusCode: 202 }
+    },
     logger: { error() {}, warn() {} }
   })
 
   assert.equal(result.auth_status, 'existing_user')
   assert.equal(result.setup_email_status, 'not_sent_existing_user')
+  assert.equal(result.welcome_email_status, 'sent')
   assert.equal(recoveryCalled, false)
   assert.equal(emailCalled, false)
+  assert.equal(welcomeEmails.length, 1)
   assert.equal(db.clientMembers.length, 1)
   assert.equal(db.clientMembers[0].user_id, 'user-existing')
   assert.equal(db.clientMembers[0].role, 'manager')
 })
 
 test('public purchase activation reuses existing member row idempotently', async () => {
+  const welcomeEmails = []
   const db = makeDb('basic', 'monthly', {
     clientMembers: [{
       client_id: CLIENT_ID,
@@ -360,12 +401,109 @@ test('public purchase activation reuses existing member row idempotently', async
     sendRecoveryEmail: async () => {
       throw new Error('should_not_send_setup_email_for_existing_member')
     },
+    sendWelcomeEmail: async (to, details) => {
+      welcomeEmails.push({ to, details })
+      return { statusCode: 202 }
+    },
     logger: { error() {}, warn() {} }
   })
 
   assert.equal(result.member_status, 'existing')
+  assert.equal(result.welcome_email_status, 'sent')
+  assert.equal(welcomeEmails.length, 1)
   assert.equal(db.clientMembers.length, 1)
   assert.equal(db.inserts.filter((entry) => entry.table === 'client_members').length, 0)
+})
+
+test('duplicate public purchase webhook activation does not resend welcome email', async () => {
+  const db = makeDb('basic', 'monthly')
+  const welcomeEmails = []
+  const commonOptions = {
+    db,
+    authAdmin: makeAuthAdmin([{ id: 'user-existing', email: BUYER_EMAIL }]),
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('monthly'),
+    requireParentClient: async () => ({ ok: true }),
+    ensureRecovery: async () => {
+      throw new Error('should_not_generate_recovery_for_existing_user')
+    },
+    sendRecoveryEmail: async () => {
+      throw new Error('should_not_send_setup_email_for_existing_user')
+    },
+    sendWelcomeEmail: async (to, details) => {
+      welcomeEmails.push({ to, details })
+      return { statusCode: 202 }
+    },
+    logger: { error() {}, warn() {} }
+  }
+
+  const first = await activatePublicPurchaseAgreementCheckout(commonOptions)
+  const second = await activatePublicPurchaseAgreementCheckout(commonOptions)
+
+  assert.equal(first.welcome_email_status, 'sent')
+  assert.equal(second.welcome_email_status, 'not_sent_existing_activation')
+  assert.equal(welcomeEmails.length, 1)
+  assert.equal(db.emailDeliveryEvents.filter((row) => row.email_category === 'public_purchase_welcome').length, 1)
+})
+
+test('public purchase activation does not send welcome email when activation fails', async () => {
+  const db = makeDb('basic', 'monthly')
+  let welcomeCalled = false
+  await assert.rejects(
+    activatePublicPurchaseAgreementCheckout({
+      db,
+      authAdmin: makeAuthAdmin([{ id: 'user-existing', email: BUYER_EMAIL }]),
+      agreementId: AGREEMENT_ID,
+      checkoutSessionId: 'cs_test_public',
+      paidAt: '2026-06-23T12:00:00.000Z',
+      subscription: makeSubscription('monthly'),
+      requireParentClient: async () => ({
+        ok: false,
+        body: { error: 'client_scope_invalid', detail: 'Client scope invalid.' }
+      }),
+      sendWelcomeEmail: async () => {
+        welcomeCalled = true
+        return { statusCode: 202 }
+      },
+      logger: { error() {}, warn() {} }
+    }),
+    /Client scope invalid/
+  )
+
+  assert.equal(welcomeCalled, false)
+  assert.equal(db.emailDeliveryEvents.length, 0)
+})
+
+test('public purchase activation does not log setup action links', async () => {
+  const db = makeDb('basic', 'monthly')
+  const logEntries = []
+
+  const result = await activatePublicPurchaseAgreementCheckout({
+    db,
+    authAdmin: makeAuthAdmin([]),
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('monthly'),
+    requireParentClient: async () => ({ ok: true }),
+    ensureRecovery: async () => ({
+      userId: 'user-new-buyer',
+      method: 'createUser',
+      actionLink: 'https://setup.example/recovery-token'
+    }),
+    sendRecoveryEmail: async () => ({ skipped: true }),
+    sendWelcomeEmail: async () => ({ skipped: true }),
+    logger: {
+      error(...args) { logEntries.push(args) },
+      warn(...args) { logEntries.push(args) }
+    }
+  })
+
+  assert.equal(result.setup_email_status, 'skipped')
+  assert.doesNotMatch(JSON.stringify(result), /recovery-token|setup\.example/)
+  assert.doesNotMatch(JSON.stringify(logEntries), /recovery-token|setup\.example/)
 })
 
 test('checkout return state reads webhook state and does not activate pending rows', async () => {
@@ -380,13 +518,90 @@ test('checkout return state reads webhook state and does not activate pending ro
   assert.equal(status.status, 'payment_pending')
   assert.equal(db.updates.length, 0)
   assert.equal(db.inserts.length, 0)
+  assert.equal(db.emailDeliveryEvents.length, 0)
 
   await activateCase('basic', 'monthly', { db })
-  const readyStatus = await resolvePublicCheckoutReturnState({
+  const passwordRequiredStatus = await resolvePublicCheckoutReturnState({
     db,
+    authAdmin: makeAuthAdmin([{ id: 'user-new-buyer', email: BUYER_EMAIL }]),
     sessionId: 'cs_test_public',
     fallbackClientId: CLIENT_ID,
     agreementId: AGREEMENT_ID
   })
+  assert.equal(passwordRequiredStatus.status, 'setup_email_sent')
+  assert.equal(passwordRequiredStatus.password_setup_required, true)
+  assert.equal(passwordRequiredStatus.setup_email_sent, true)
+})
+
+test('sendAlphaScreenWelcomeEmail renders help email and avoids setup tokens or attachments', async () => {
+  const originalApiKey = process.env.SENDGRID_API_KEY
+  const originalHelpEmail = process.env.BRANDED_EMAIL_HELP_EMAIL
+  const sentMessages = []
+  delete require.cache[mailerPath]
+  delete require.cache[sendgridMailPath]
+  injectModule(sendgridMailPath, {
+    setApiKey() {},
+    async send(message) {
+      sentMessages.push(message)
+      return [{ statusCode: 202 }]
+    },
+  })
+  process.env.SENDGRID_API_KEY = 'test-key'
+  process.env.BRANDED_EMAIL_HELP_EMAIL = 'support@alphasourceai.com'
+  try {
+    const { sendAlphaScreenWelcomeEmail } = require(mailerPath)
+    await sendAlphaScreenWelcomeEmail(BUYER_EMAIL, {
+      firstName: 'Alex',
+      clientId: CLIENT_ID,
+      agreementId: AGREEMENT_ID,
+      purchaseIntentId: INTENT_ID
+    })
+  } finally {
+    if (originalApiKey === undefined) delete process.env.SENDGRID_API_KEY
+    else process.env.SENDGRID_API_KEY = originalApiKey
+    if (originalHelpEmail === undefined) delete process.env.BRANDED_EMAIL_HELP_EMAIL
+    else process.env.BRANDED_EMAIL_HELP_EMAIL = originalHelpEmail
+    delete require.cache[mailerPath]
+    delete require.cache[sendgridMailPath]
+  }
+
+  assert.equal(sentMessages.length, 1)
+  assert.equal(sentMessages[0].subject, 'Welcome to alphaScreen')
+  assert.equal(sentMessages[0].customArgs.email_category, 'public_purchase_welcome')
+  assert.equal(sentMessages[0].attachments, undefined)
+  const messageBody = `${sentMessages[0].text || ''}\n${sentMessages[0].html || ''}`
+  assert.match(messageBody, /support@alphasourceai\.com/)
+  assert.match(messageBody, /set your password using the setup email/)
+  assert.doesNotMatch(messageBody, /recovery-token|setup\.example|raw_payload|stripe/i)
+})
+
+test('checkout return state reports ready for an existing signed-in user', async () => {
+  const db = makeDb('pro', 'annual')
+  await activatePublicPurchaseAgreementCheckout({
+    db,
+    authAdmin: makeAuthAdmin([{ id: 'user-existing', email: BUYER_EMAIL, last_sign_in_at: '2026-06-20T00:00:00Z' }]),
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('annual'),
+    requireParentClient: async () => ({ ok: true }),
+    ensureRecovery: async () => {
+      throw new Error('should_not_generate_recovery_for_existing_user')
+    },
+    sendRecoveryEmail: async () => {
+      throw new Error('should_not_send_setup_email_for_existing_user')
+    },
+    sendWelcomeEmail: async () => ({ statusCode: 202 }),
+    logger: { error() {}, warn() {} }
+  })
+
+  const readyStatus = await resolvePublicCheckoutReturnState({
+    db,
+    authAdmin: makeAuthAdmin([{ id: 'user-existing', email: BUYER_EMAIL, last_sign_in_at: '2026-06-20T00:00:00Z' }]),
+    sessionId: 'cs_test_public',
+    fallbackClientId: CLIENT_ID,
+    agreementId: AGREEMENT_ID
+  })
+
   assert.equal(readyStatus.status, 'ready')
 })

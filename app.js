@@ -92,6 +92,7 @@ const {
   buildAdminDashboardUrl,
   buildClientPwResetUrl,
   buildPublicPwResetUrl,
+  buildPublicCheckoutSuccessUrl,
   buildAcceptInviteUrl
 } = require('./config/urlConfig')
 const ROLE_CHECKOUT_JD_BUCKET = (process.env.SUPABASE_JOB_DESCRIPTIONS_BUCKET || process.env.SUPABASE_JD_BUCKET || 'job-descriptions').trim()
@@ -5726,6 +5727,11 @@ app.get('/checkout/subscription-success', async (req, res) => {
     if (tab) params.set('tab', tab)
     return buildClientDashboardReturnUrl(params)
   }
+  const makePublicCheckoutStatusUrl = (status, clientId = '') => {
+    const params = { checkout: 'success', status: status || 'setup_pending' }
+    if (clientId) params.client_id = clientId
+    return buildPublicCheckoutSuccessUrl(params)
+  }
   const request_id = req.request_id || null
   const fallbackClientId = String(req.query?.client_id || '').trim()
   const fallbackTab = String(req.query?.tab || '').trim().toLowerCase()
@@ -5759,6 +5765,7 @@ app.get('/checkout/subscription-success', async (req, res) => {
     const metadataBillingInterval = String(metadata?.billing_interval || '').trim().toLowerCase()
     const clientId = metadataClientId || fallbackClientId
     const successUrl = makeAccountSuccessUrl(clientId, fallbackTab)
+    const agreementStatusUrl = (status) => makePublicCheckoutStatusUrl(status, clientId)
     const paymentStatus = String(session?.payment_status || '').toLowerCase()
     const subscriptionObj = session?.subscription && typeof session.subscription === 'object' ? session.subscription : null
     const subscriptionMetadata = subscriptionObj?.metadata && typeof subscriptionObj.metadata === 'object' ? subscriptionObj.metadata : {}
@@ -5788,23 +5795,23 @@ app.get('/checkout/subscription-success', async (req, res) => {
     if (String(session?.status || '').toLowerCase() !== 'complete') {
       console.log('subscription_checkout_success_redirect:', {
         branch: 'session_incomplete',
-        target: 'success_url'
+        target: metadataSource === 'agreement_checkout' ? 'public_checkout_status' : 'success_url'
       })
-      return res.redirect(302, successUrl)
+      return res.redirect(302, metadataSource === 'agreement_checkout' ? agreementStatusUrl('payment_pending') : successUrl)
     }
     if (paymentStatus && !['paid', 'no_payment_required'].includes(paymentStatus)) {
       console.log('subscription_checkout_success_redirect:', {
         branch: 'payment_not_paid',
-        target: 'success_url'
+        target: metadataSource === 'agreement_checkout' ? 'public_checkout_status' : 'success_url'
       })
-      return res.redirect(302, successUrl)
+      return res.redirect(302, metadataSource === 'agreement_checkout' ? agreementStatusUrl('payment_pending') : successUrl)
     }
     if (subscriptionStatus && !['active', 'trialing'].includes(subscriptionStatus)) {
       console.log('subscription_checkout_success_redirect:', {
         branch: 'subscription_not_active',
-        target: 'success_url'
+        target: metadataSource === 'agreement_checkout' ? 'public_checkout_status' : 'success_url'
       })
-      return res.redirect(302, successUrl)
+      return res.redirect(302, metadataSource === 'agreement_checkout' ? agreementStatusUrl('activation_pending') : successUrl)
     }
 
     if (metadataSource === 'agreement_checkout' && metadataAgreementId) {
@@ -5840,9 +5847,9 @@ app.get('/checkout/subscription-success', async (req, res) => {
     if (!client?.id) {
       console.log('subscription_checkout_success_redirect:', {
         branch: 'client_not_found',
-        target: 'success_url'
+        target: metadataSource === 'agreement_checkout' ? 'public_checkout_status' : 'success_url'
       })
-      return res.redirect(302, successUrl)
+      return res.redirect(302, metadataSource === 'agreement_checkout' ? agreementStatusUrl('setup_pending') : successUrl)
     }
 
     if (subscriptionObj && ['active', 'trialing'].includes(subscriptionStatus)) {
@@ -5985,9 +5992,9 @@ app.get('/checkout/subscription-success', async (req, res) => {
     if (!clientEmail) {
       console.log('subscription_checkout_success_redirect:', {
         branch: 'client_email_missing',
-        target: 'success_url'
+        target: metadataSource === 'agreement_checkout' ? 'public_checkout_status' : 'success_url'
       })
-      return res.redirect(302, successUrl)
+      return res.redirect(302, metadataSource === 'agreement_checkout' ? agreementStatusUrl('setup_pending') : successUrl)
     }
     const clientEmailLower = clientEmail.toLowerCase()
     const membershipName = String(client.client_admin_name || client.name || clientEmail).trim() || clientEmail
@@ -6107,9 +6114,9 @@ app.get('/checkout/subscription-success', async (req, res) => {
     if (existingAuthUser && hasSignedIn) {
       console.log('subscription_checkout_success_redirect:', {
         branch: 'existing_user_signed_in',
-        target: 'success_url'
+        target: metadataSource === 'agreement_checkout' ? 'public_checkout_status' : 'success_url'
       })
-      return res.redirect(302, successUrl)
+      return res.redirect(302, metadataSource === 'agreement_checkout' ? agreementStatusUrl('ready') : successUrl)
     }
 
     const generateRecoveryActionLink = async () => {
@@ -6194,12 +6201,11 @@ app.get('/checkout/subscription-success', async (req, res) => {
     }
 
     if (metadataSource === 'agreement_checkout') {
-      return res.status(500).json({
-        error: 'agreement_checkout_bootstrap_failed',
-        code: 'agreement_checkout_bootstrap_failed',
-        detail: 'Unable to complete onboarding bootstrap.',
-        request_id
+      console.log('subscription_checkout_success_redirect:', {
+        branch: 'agreement_checkout_onboarding_pending_no_recovery_link',
+        target: 'public_checkout_status'
       })
+      return res.redirect(302, agreementStatusUrl('setup_pending'))
     }
 
     const pendingOnboardingUrl = buildPublicPwResetUrl({
@@ -6220,12 +6226,11 @@ app.get('/checkout/subscription-success', async (req, res) => {
   } catch (e) {
     console.error('subscription_checkout_success_handoff_failed:', e?.message || e)
     if (parsedMetadataSource === 'agreement_checkout') {
-      return res.status(500).json({
-        error: 'agreement_checkout_bootstrap_failed',
-        code: 'agreement_checkout_bootstrap_failed',
-        detail: e?.message || 'Unable to complete onboarding bootstrap.',
-        request_id
+      console.log('subscription_checkout_success_redirect:', {
+        branch: 'agreement_checkout_handler_exception',
+        target: 'public_checkout_status'
       })
+      return res.redirect(302, makePublicCheckoutStatusUrl('setup_pending', fallbackClientId))
     }
     console.log('subscription_checkout_success_redirect:', {
       branch: 'handler_exception',

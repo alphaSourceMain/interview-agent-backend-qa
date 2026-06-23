@@ -211,6 +211,15 @@ function buildPublicPwResetUrl(query) {
   return appendQuery(`${publicSiteOrFrontendBase}/pwreset`, query);
 }
 
+function buildPublicCheckoutSuccessUrl(query) {
+  const base = firstBase(
+    publicSiteOrFrontendBase,
+    frontendBase,
+    frontendUrl
+  );
+  return appendQuery(`${base}/checkout/subscription-success`, query);
+}
+
 function buildAcceptInviteUrl(token) {
   return appendQuery(`${frontendUrl}/accept-invite`, { token: String(token || '') });
 }
@@ -244,6 +253,7 @@ module.exports = {
   buildAdminDashboardUrl,
   buildClientPwResetUrl,
   buildPublicPwResetUrl,
+  buildPublicCheckoutSuccessUrl,
   buildAcceptInviteUrl,
   buildTextInterviewUrl,
   buildMembershipAgreementSignUrl,

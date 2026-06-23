@@ -322,6 +322,25 @@ async function markAgreementCheckoutPaid(agreementId, options = {}) {
     .update(payload)
     .eq('id', normalizedAgreementId);
   if (error) throw new Error(error.message || 'Agreement checkout status update failed');
+
+  const intentUpdatePayload = {
+    status: 'completed',
+    updated_at: paidAt
+  };
+  if (checkoutSessionId) intentUpdatePayload.stripe_checkout_session_id = checkoutSessionId;
+  const { error: intentUpdateErr } = await supabaseAdmin
+    .from('public_purchase_intents')
+    .update(intentUpdatePayload)
+    .eq('agreement_id', normalizedAgreementId);
+  if (intentUpdateErr) {
+    console.error('stripe_webhook_purchase_intent_completion_update_failed', {
+      agreement_id: normalizedAgreementId,
+      checkout_session_id: checkoutSessionId || null,
+      error: intentUpdateErr.message,
+      code: intentUpdateErr.code || null,
+      hint: intentUpdateErr.hint || null
+    });
+  }
 }
 
 router.post('/', async (req, res) => {

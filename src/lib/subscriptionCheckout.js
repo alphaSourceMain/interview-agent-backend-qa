@@ -58,6 +58,12 @@ function wantsEmbeddedCheckout(value) {
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'embedded'
 }
 
+function normalizeIdempotencyKey(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  return raw.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 255)
+}
+
 async function resolveStripeCustomerId({
   stripe,
   client,
@@ -120,7 +126,8 @@ async function createSubscriptionCheckoutSession({
   metadataSource = 'admin_subscription_checkout',
   metadata = {},
   enterpriseFees = null,
-  requestContext = null
+  requestContext = null,
+  idempotencyKey = ''
 }) {
   const normalizedClientId = String(clientId || '').trim()
   const normalizedPlanTier = normalizePlanTier(planTier)
@@ -128,6 +135,7 @@ async function createSubscriptionCheckoutSession({
   const normalizedMetadataSource = String(metadataSource || '').trim().toLowerCase()
   const normalizedReturnTab = String(returnTab || '').trim().toLowerCase()
   const embeddedCheckoutRequested = wantsEmbeddedCheckout(embedded)
+  const normalizedIdempotencyKey = normalizeIdempotencyKey(idempotencyKey)
 
   if (!normalizedClientId) throw makeError(400, 'client_id_required', 'Client id is required.')
   if (!normalizedPlanTier) throw makeError(400, 'invalid_plan_tier', 'Invalid plan tier.')
@@ -310,6 +318,11 @@ async function createSubscriptionCheckoutSession({
   let checkoutClientSecret = null
   let primaryCheckoutSession = null
   let hostedFallbackSession = null
+  const createOptions = (suffix = '') => {
+    if (!normalizedIdempotencyKey) return undefined
+    const key = suffix ? `${normalizedIdempotencyKey}:${suffix}` : normalizedIdempotencyKey
+    return { idempotencyKey: key.slice(0, 255) }
+  }
 
   if (embeddedCheckoutRequested) {
     try {
@@ -317,7 +330,7 @@ async function createSubscriptionCheckoutSession({
         ...checkoutBasePayload,
         ui_mode: 'embedded',
         return_url: checkoutSuccessUrl
-      })
+      }, createOptions('embedded'))
       const resolvedClientSecret = String(primaryCheckoutSession?.client_secret || '').trim()
       if (resolvedClientSecret) {
         checkoutClientSecret = resolvedClientSecret
@@ -334,14 +347,14 @@ async function createSubscriptionCheckoutSession({
       ...checkoutBasePayload,
       success_url: checkoutSuccessUrl,
       cancel_url: normalizedCancelUrl || buildClientDashboardReturnUrl(cancelParams)
-    })
+    }, createOptions())
   } else {
     try {
       hostedFallbackSession = await stripe.checkout.sessions.create({
         ...checkoutBasePayload,
         success_url: checkoutSuccessUrl,
         cancel_url: normalizedCancelUrl || buildClientDashboardReturnUrl(cancelParams)
-      })
+      }, createOptions('hosted'))
     } catch (hostedFallbackErr) {
       console.error('create_subscription_hosted_fallback_checkout_session_failed:', hostedFallbackErr?.message || hostedFallbackErr)
     }

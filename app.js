@@ -72,6 +72,7 @@ const { createSubscriptionCheckoutSession } = require('./src/lib/subscriptionChe
 const { processClientEntityImport } = require('./src/lib/clientEntityImportService')
 const { archiveChildClientEntity, restoreChildClientEntity } = require('./src/lib/clientEntityArchive')
 const { buildAdminMetricsPayload, safeErrorBody } = require('./src/lib/adminMetricsService')
+const { resolvePublicCheckoutReturnState } = require('./src/lib/publicPurchaseActivation')
 const {
   archivePublicLeadCapture,
   buildAdminPublicAnalyticsLeadsCsv,
@@ -5812,6 +5813,20 @@ app.get('/checkout/subscription-success', async (req, res) => {
         target: metadataSource === 'agreement_checkout' ? 'public_checkout_status' : 'success_url'
       })
       return res.redirect(302, metadataSource === 'agreement_checkout' ? agreementStatusUrl('activation_pending') : successUrl)
+    }
+
+    if (metadataSource === 'agreement_checkout') {
+      const returnState = await resolvePublicCheckoutReturnState({
+        sessionId,
+        fallbackClientId: clientId,
+        agreementId: metadataAgreementId
+      })
+      console.log('subscription_checkout_success_redirect:', {
+        branch: 'agreement_checkout_webhook_state',
+        status: returnState?.status || 'setup_pending',
+        target: 'public_checkout_status'
+      })
+      return res.redirect(302, agreementStatusUrl(returnState?.status || 'setup_pending'))
     }
 
     if (metadataSource === 'agreement_checkout' && metadataAgreementId) {

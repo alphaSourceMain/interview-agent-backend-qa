@@ -1,0 +1,392 @@
+'use strict'
+
+const assert = require('node:assert/strict')
+const path = require('node:path')
+const { test } = require('node:test')
+
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
+require.cache[supabaseClientPath] = {
+  id: supabaseClientPath,
+  filename: supabaseClientPath,
+  loaded: true,
+  exports: {
+    supabaseAdmin: {
+      auth: { admin: {} }
+    }
+  }
+}
+
+const {
+  activatePublicPurchaseAgreementCheckout,
+  resolvePublicCheckoutReturnState
+} = require('../src/lib/publicPurchaseActivation')
+const { buildAlphaScreenPackageSnapshot } = require('../src/lib/alphaScreenPackages')
+
+const AGREEMENT_ID = '33333333-3333-4333-8333-333333333333'
+const INTENT_ID = '11111111-1111-4111-8111-111111111111'
+const CLIENT_ID = '44444444-4444-4444-8444-444444444444'
+const BUYER_EMAIL = 'alex@acmedental.example'
+
+function matchesFilters(row, filters) {
+  return filters.every(({ column, value }) => String(row?.[column] ?? '') === String(value ?? ''))
+}
+
+class FakeQuery {
+  constructor(db, table) {
+    this.db = db
+    this.table = table
+    this.filters = []
+    this.insertPayload = null
+    this.updatePayload = null
+    this.upsertPayload = null
+  }
+
+  select(columns) {
+    this.selectColumns = columns
+    return this
+  }
+
+  eq(column, value) {
+    this.filters.push({ column, value })
+    return this
+  }
+
+  insert(payload) {
+    this.insertPayload = payload
+    return this
+  }
+
+  update(payload) {
+    this.updatePayload = payload
+    return this
+  }
+
+  upsert(payload, options = {}) {
+    this.upsertPayload = payload
+    this.upsertOptions = options
+    return this
+  }
+
+  rows() {
+    if (this.table === 'membership_agreements') return this.db.membershipAgreements
+    if (this.table === 'public_purchase_intents') return this.db.purchaseIntents
+    if (this.table === 'clients') return this.db.clients
+    if (this.table === 'client_members') return this.db.clientMembers
+    if (this.table === 'client_plan_settings') return this.db.clientPlanSettings
+    return []
+  }
+
+  async maybeSingle() {
+    const row = this.rows().find((item) => matchesFilters(item, this.filters)) || null
+    return { data: row, error: null }
+  }
+
+  async single() {
+    if (this.insertPayload) {
+      const row = { ...this.insertPayload }
+      if (this.table === 'clients' && !row.id) row.id = CLIENT_ID
+      this.rows().push(row)
+      this.db.inserts.push({ table: this.table, row })
+      return { data: row, error: null }
+    }
+    if (this.updatePayload) {
+      const rows = this.rows().filter((item) => matchesFilters(item, this.filters))
+      const row = rows[0] || null
+      if (!row) return { data: null, error: { message: 'row_not_found', code: 'PGRST116' } }
+      for (const item of rows) Object.assign(item, this.updatePayload)
+      this.db.updates.push({ table: this.table, rows, payload: this.updatePayload })
+      return { data: row, error: null }
+    }
+    return this.maybeSingle()
+  }
+
+  async execute() {
+    if (this.upsertPayload) {
+      const rows = this.rows()
+      const existing = rows.find((row) => String(row.client_id || '') === String(this.upsertPayload.client_id || ''))
+      if (existing) Object.assign(existing, this.upsertPayload)
+      else rows.push({ ...this.upsertPayload })
+      this.db.upserts.push({ table: this.table, payload: this.upsertPayload, options: this.upsertOptions })
+      return { data: this.upsertPayload, error: null }
+    }
+    if (this.insertPayload) return this.single()
+    if (this.updatePayload) {
+      const rows = this.rows().filter((item) => matchesFilters(item, this.filters))
+      for (const item of rows) Object.assign(item, this.updatePayload)
+      this.db.updates.push({ table: this.table, rows, payload: this.updatePayload })
+      return { data: rows, error: null }
+    }
+    return { data: this.rows().filter((item) => matchesFilters(item, this.filters)), error: null }
+  }
+
+  then(resolve, reject) {
+    return this.execute().then(resolve, reject)
+  }
+}
+
+function makeAgreement(plan = 'basic', cadence = 'monthly') {
+  const packageSnapshot = buildAlphaScreenPackageSnapshot(plan, cadence)
+  return {
+    id: AGREEMENT_ID,
+    client_id: CLIENT_ID,
+    status: 'signed',
+    is_current: true,
+    checkout_status: 'pending_payment',
+    checkout_session_id: 'cs_test_public',
+    primary_admin_name: 'Alex Rivera',
+    admin_email: BUYER_EMAIL,
+    client_legal_name: 'Acme Dental Group',
+    dba_trade_name: 'Acme Dental',
+    membership_tier: plan,
+    billing_option: cadence,
+    auto_renew: true,
+    template_snapshot: {
+      source: 'public_purchase_intent',
+      purchase_intent: { id: INTENT_ID },
+      package_snapshot: packageSnapshot
+    }
+  }
+}
+
+function makeIntent(plan = 'basic', cadence = 'monthly') {
+  return {
+    id: INTENT_ID,
+    status: 'checkout_pending',
+    selected_plan_key: plan,
+    selected_billing_cadence: cadence,
+    package_snapshot: buildAlphaScreenPackageSnapshot(plan, cadence),
+    company_legal_name: 'Acme Dental Group',
+    company_dba: 'Acme Dental',
+    buyer_first_name: 'Alex',
+    buyer_last_name: 'Rivera',
+    buyer_email: BUYER_EMAIL,
+    agreement_id: AGREEMENT_ID,
+    stripe_checkout_session_id: 'cs_test_public',
+    client_id: CLIENT_ID
+  }
+}
+
+function makeDb(plan = 'basic', cadence = 'monthly', overrides = {}) {
+  return {
+    membershipAgreements: [makeAgreement(plan, cadence)],
+    purchaseIntents: [makeIntent(plan, cadence)],
+    clients: [{
+      id: CLIENT_ID,
+      name: 'Acme Dental Group',
+      email: BUYER_EMAIL,
+      client_admin_name: 'Alex Rivera',
+      billing_status: 'inactive',
+      subscription_status: 'incomplete',
+      plan_tier: plan,
+      billing_interval: cadence
+    }],
+    clientMembers: overrides.clientMembers ? [...overrides.clientMembers] : [],
+    clientPlanSettings: [],
+    inserts: [],
+    updates: [],
+    upserts: [],
+    from(table) {
+      return new FakeQuery(this, table)
+    }
+  }
+}
+
+function makeAuthAdmin(users = []) {
+  return {
+    calls: [],
+    async listUsers(args) {
+      this.calls.push(args)
+      return { data: { users }, error: null }
+    }
+  }
+}
+
+function makeSubscription(cadence) {
+  return {
+    id: 'sub_test_public',
+    status: 'active',
+    customer: 'cus_test_public',
+    start_date: 1782172800,
+    current_period_end: cadence === 'annual' ? 1813708800 : 1784851200,
+    cancel_at_period_end: false,
+    items: {
+      data: [{
+        price: {
+          recurring: {
+            interval: cadence === 'annual' ? 'year' : 'month'
+          }
+        }
+      }]
+    }
+  }
+}
+
+async function activateCase(plan, cadence, extra = {}) {
+  const db = extra.db || makeDb(plan, cadence, extra)
+  const sentEmails = []
+  let recoveryCalls = 0
+  const result = await activatePublicPurchaseAgreementCheckout({
+    db,
+    authAdmin: extra.authAdmin || makeAuthAdmin(extra.users || []),
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription(cadence),
+    requireParentClient: async () => ({ ok: true }),
+    ensureRecovery: async () => {
+      recoveryCalls += 1
+      return { userId: 'user-new-buyer', method: 'createUser', actionLink: 'https://setup.example/recovery-token' }
+    },
+    sendRecoveryEmail: async (to, actionLink, name) => {
+      sentEmails.push({ to, actionLink, name })
+      return { statusCode: 202 }
+    },
+    logger: {
+      error() {},
+      warn() {},
+      info() {}
+    }
+  })
+  return { db, result, sentEmails, recoveryCalls }
+}
+
+test('public purchase webhook activation provisions Basic and Pro monthly/annual buyers', async () => {
+  const cases = [
+    ['basic', 'monthly', 299, 399, 20, 10, 30],
+    ['basic', 'annual', 3299, 399, 20, 10, 30],
+    ['pro', 'monthly', 599, 699, 30, 12, 35],
+    ['pro', 'annual', 6499, 699, 30, 12, 35]
+  ]
+
+  for (const [plan, cadence, platformFee, perRoleFee, included, minutes, overage] of cases) {
+    const { db, result, sentEmails, recoveryCalls } = await activateCase(plan, cadence)
+
+    assert.equal(result.ok, true)
+    assert.equal(result.plan_key, plan)
+    assert.equal(result.billing_interval, cadence)
+    assert.equal(result.client_id, CLIENT_ID)
+    assert.equal(result.setup_email_status, 'sent')
+    assert.equal(recoveryCalls, 1)
+    assert.equal(sentEmails.length, 1)
+    assert.equal(sentEmails[0].to, BUYER_EMAIL)
+
+    const agreement = db.membershipAgreements[0]
+    assert.equal(agreement.checkout_status, 'paid')
+    assert.equal(agreement.checkout_paid_at, '2026-06-23T12:00:00.000Z')
+
+    const intent = db.purchaseIntents[0]
+    assert.equal(intent.status, 'completed')
+    assert.equal(intent.stripe_checkout_session_id, 'cs_test_public')
+
+    const client = db.clients[0]
+    assert.equal(client.billing_status, 'active')
+    assert.equal(client.subscription_status, 'active')
+    assert.equal(client.plan_tier, plan)
+    assert.equal(client.billing_interval, cadence)
+
+    assert.equal(db.clientMembers.length, 1)
+    assert.equal(db.clientMembers[0].email, BUYER_EMAIL)
+    assert.equal(db.clientMembers[0].user_id, 'user-new-buyer')
+    assert.equal(db.clientMembers[0].role, 'manager')
+
+    const settings = db.clientPlanSettings[0]
+    assert.deepEqual(settings, {
+      client_id: CLIENT_ID,
+      plan_tier: plan,
+      billing_interval: cadence,
+      platform_fee: platformFee,
+      per_role_fee: perRoleFee,
+      included_interviews_per_role: included,
+      additional_interview_fee: overage,
+      max_interview_minutes: minutes
+    })
+    assert.doesNotMatch(JSON.stringify(result), /recovery-token|setup\.example/)
+  }
+})
+
+test('public purchase activation links an existing auth user without sending setup email', async () => {
+  let recoveryCalled = false
+  let emailCalled = false
+  const db = makeDb('pro', 'annual')
+  const result = await activatePublicPurchaseAgreementCheckout({
+    db,
+    authAdmin: makeAuthAdmin([{ id: 'user-existing', email: BUYER_EMAIL, last_sign_in_at: '2026-06-20T00:00:00Z' }]),
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('annual'),
+    requireParentClient: async () => ({ ok: true }),
+    ensureRecovery: async () => {
+      recoveryCalled = true
+      throw new Error('should_not_generate_recovery_for_existing_user')
+    },
+    sendRecoveryEmail: async () => {
+      emailCalled = true
+      throw new Error('should_not_send_setup_email_for_existing_user')
+    },
+    logger: { error() {}, warn() {} }
+  })
+
+  assert.equal(result.auth_status, 'existing_user')
+  assert.equal(result.setup_email_status, 'not_sent_existing_user')
+  assert.equal(recoveryCalled, false)
+  assert.equal(emailCalled, false)
+  assert.equal(db.clientMembers.length, 1)
+  assert.equal(db.clientMembers[0].user_id, 'user-existing')
+  assert.equal(db.clientMembers[0].role, 'manager')
+})
+
+test('public purchase activation reuses existing member row idempotently', async () => {
+  const db = makeDb('basic', 'monthly', {
+    clientMembers: [{
+      client_id: CLIENT_ID,
+      email: BUYER_EMAIL,
+      name: 'Alex Rivera',
+      role: 'manager',
+      user_id: 'user-existing'
+    }]
+  })
+  const result = await activatePublicPurchaseAgreementCheckout({
+    db,
+    authAdmin: makeAuthAdmin([{ id: 'user-existing', email: BUYER_EMAIL }]),
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('monthly'),
+    requireParentClient: async () => ({ ok: true }),
+    ensureRecovery: async () => {
+      throw new Error('should_not_generate_recovery_for_existing_member')
+    },
+    sendRecoveryEmail: async () => {
+      throw new Error('should_not_send_setup_email_for_existing_member')
+    },
+    logger: { error() {}, warn() {} }
+  })
+
+  assert.equal(result.member_status, 'existing')
+  assert.equal(db.clientMembers.length, 1)
+  assert.equal(db.inserts.filter((entry) => entry.table === 'client_members').length, 0)
+})
+
+test('checkout return state reads webhook state and does not activate pending rows', async () => {
+  const db = makeDb('basic', 'monthly')
+  const status = await resolvePublicCheckoutReturnState({
+    db,
+    sessionId: 'cs_test_public',
+    fallbackClientId: CLIENT_ID,
+    agreementId: AGREEMENT_ID
+  })
+
+  assert.equal(status.status, 'payment_pending')
+  assert.equal(db.updates.length, 0)
+  assert.equal(db.inserts.length, 0)
+
+  await activateCase('basic', 'monthly', { db })
+  const readyStatus = await resolvePublicCheckoutReturnState({
+    db,
+    sessionId: 'cs_test_public',
+    fallbackClientId: CLIENT_ID,
+    agreementId: AGREEMENT_ID
+  })
+  assert.equal(readyStatus.status, 'ready')
+})

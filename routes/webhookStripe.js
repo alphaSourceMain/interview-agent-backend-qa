@@ -5,6 +5,7 @@ const { supabaseAdmin } = require('../src/lib/supabaseClient');
 const { requireParentClient } = require('../src/lib/clientBillingScope');
 const { getRoleInterviewAvailability } = require('../src/lib/roleInterviewAvailability');
 const { buildAlphaScreenPlanSettingsPayload } = require('../src/lib/alphaScreenPackages');
+const { activatePublicPurchaseAgreementCheckout } = require('../src/lib/publicPurchaseActivation');
 const router = express.Router();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '');
@@ -287,60 +288,18 @@ function shouldIgnoreStaleSubscriptionUpdate(client, incomingSubscriptionId, eve
 async function markAgreementCheckoutPaid(agreementId, options = {}) {
   const normalizedAgreementId = String(agreementId || '').trim();
   if (!normalizedAgreementId) return;
-  const paidAt = String(options.paidAt || '').trim() || new Date().toISOString();
-  const checkoutSessionId = String(options.checkoutSessionId || '').trim() || null;
-
-  const { data: agreement, error: agreementErr } = await supabaseAdmin
-    .from('membership_agreements')
-    .select('id,client_id')
-    .eq('id', normalizedAgreementId)
-    .maybeSingle();
-  if (agreementErr) throw new Error(agreementErr.message || 'Agreement lookup failed');
-  if (!agreement) return;
-
-  const agreementClientId = String(agreement.client_id || '').trim();
-  if (!agreementClientId) {
-    const err = new Error('Agreement is not linked to a client.');
-    err.code = 'missing_agreement_client_id';
-    err.agreement_id = normalizedAgreementId;
-    throw err;
-  }
-  await requireParentClientForStripeBilling(agreementClientId, {
-    route: 'stripe_webhook_agreement_checkout_paid',
-    agreement_id: normalizedAgreementId,
-    client_id: agreementClientId
+  return activatePublicPurchaseAgreementCheckout({
+    agreementId: normalizedAgreementId,
+    checkoutSessionId: options.checkoutSessionId || null,
+    paidAt: options.paidAt || null,
+    subscription: options.subscription || null,
+    fallbackCustomerId: options.fallbackCustomerId || null,
+    fallbackSubscriptionId: options.fallbackSubscriptionId || null,
+    fallbackClientId: options.fallbackClientId || null,
+    fallbackPlanTier: options.fallbackPlanTier || null,
+    fallbackBillingInterval: options.fallbackBillingInterval || null,
+    requestId: options.requestId || null
   });
-
-  const payload = {
-    checkout_status: 'paid',
-    checkout_paid_at: paidAt
-  };
-  if (checkoutSessionId) payload.checkout_session_id = checkoutSessionId;
-
-  const { error } = await supabaseAdmin
-    .from('membership_agreements')
-    .update(payload)
-    .eq('id', normalizedAgreementId);
-  if (error) throw new Error(error.message || 'Agreement checkout status update failed');
-
-  const intentUpdatePayload = {
-    status: 'completed',
-    updated_at: paidAt
-  };
-  if (checkoutSessionId) intentUpdatePayload.stripe_checkout_session_id = checkoutSessionId;
-  const { error: intentUpdateErr } = await supabaseAdmin
-    .from('public_purchase_intents')
-    .update(intentUpdatePayload)
-    .eq('agreement_id', normalizedAgreementId);
-  if (intentUpdateErr) {
-    console.error('stripe_webhook_purchase_intent_completion_update_failed', {
-      agreement_id: normalizedAgreementId,
-      checkout_session_id: checkoutSessionId || null,
-      error: intentUpdateErr.message,
-      code: intentUpdateErr.code || null,
-      hint: intentUpdateErr.hint || null
-    });
-  }
 }
 
 router.post('/', async (req, res) => {
@@ -667,9 +626,10 @@ router.post('/', async (req, res) => {
         }
       } else if (String(eventObject?.mode || '').toLowerCase() === 'subscription') {
         const subscriptionId = pickId(eventObject?.subscription);
+        let targetClientId = null;
+        let checkoutSubscription = null;
 
         if (subscriptionId) {
-          let targetClientId = null;
           if (metadataClientId) {
             const { data: metadataClient, error: metadataClientErr } = await supabaseAdmin
               .from('clients')
@@ -696,8 +656,8 @@ router.post('/', async (req, res) => {
               subscription_id: subscriptionId,
               source: metadataSource || null
             });
-            const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-            const updates = buildClientSubscriptionUpdatesFromStripe(subscription, {
+            checkoutSubscription = await stripe.subscriptions.retrieve(subscriptionId);
+            const updates = buildClientSubscriptionUpdatesFromStripe(checkoutSubscription, {
               fallbackCustomerId: customerId,
               fallbackSubscriptionId: subscriptionId,
               fallbackBillingInterval: metadataBillingInterval,
@@ -712,7 +672,7 @@ router.post('/', async (req, res) => {
 
             if (MANAGED_SUBSCRIPTION_CHECKOUT_SOURCES.has(metadataSource)) {
               const planTierForSettings = String(updates?.plan_tier || metadataPlanTier || '').trim().toLowerCase();
-              const planSettingsUpserted = await upsertClientPlanSettingsFromSubscription(subscription, targetClientId, {
+              const planSettingsUpserted = await upsertClientPlanSettingsFromSubscription(checkoutSubscription, targetClientId, {
                 fallbackSource: metadataSource,
                 fallbackPlanTier: updates?.plan_tier || metadataPlanTier || null,
                 fallbackBillingInterval: updates?.billing_interval || metadataBillingInterval || null,
@@ -740,14 +700,39 @@ router.post('/', async (req, res) => {
         ) {
           await markAgreementCheckoutPaid(metadataAgreementId, {
             checkoutSessionId: pickId(eventObject?.id) || null,
-            paidAt: new Date().toISOString()
+            paidAt: new Date().toISOString(),
+            subscription: checkoutSubscription || (subscriptionId ? await stripe.subscriptions.retrieve(subscriptionId) : null),
+            fallbackCustomerId: customerId,
+            fallbackSubscriptionId: subscriptionId,
+            fallbackClientId: targetClientId || metadataClientId || null,
+            fallbackPlanTier: metadataPlanTier,
+            fallbackBillingInterval: metadataBillingInterval,
+            requestId: request_id
           });
         }
       }
     } else if (event.type === 'invoice.payment_succeeded' || event.type === 'invoice.payment_failed') {
       const customerId = pickId(eventObject?.customer);
       const subscriptionId = pickId(eventObject?.subscription);
-      const metadata = eventObject?.metadata && typeof eventObject.metadata === 'object' ? eventObject.metadata : {};
+      let invoiceSubscription = null;
+      let metadata = eventObject?.metadata && typeof eventObject.metadata === 'object' ? eventObject.metadata : {};
+      if (
+        subscriptionId &&
+        (
+          !String(metadata?.source || '').trim() ||
+          !String(metadata?.agreement_id || '').trim() ||
+          !String(metadata?.client_id || '').trim()
+        )
+      ) {
+        invoiceSubscription = await stripe.subscriptions.retrieve(subscriptionId);
+        const subscriptionMetadata = invoiceSubscription?.metadata && typeof invoiceSubscription.metadata === 'object'
+          ? invoiceSubscription.metadata
+          : {};
+        metadata = {
+          ...subscriptionMetadata,
+          ...metadata
+        };
+      }
       const metadataSource = String(metadata?.source || '').trim().toLowerCase();
       const metadataClientId = String(metadata?.client_id || '').trim();
       const metadataAgreementId = String(metadata?.agreement_id || '').trim();
@@ -805,7 +790,14 @@ router.post('/', async (req, res) => {
         metadataAgreementId
       ) {
         await markAgreementCheckoutPaid(metadataAgreementId, {
-          paidAt: new Date().toISOString()
+          paidAt: new Date().toISOString(),
+          subscription: invoiceSubscription || null,
+          fallbackCustomerId: customerId,
+          fallbackSubscriptionId: subscriptionId,
+          fallbackClientId: metadataClientId,
+          fallbackPlanTier: metadataPlanTier,
+          fallbackBillingInterval: metadataBillingInterval,
+          requestId: request_id
         });
       }
 

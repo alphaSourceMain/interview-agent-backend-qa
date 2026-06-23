@@ -205,7 +205,7 @@ function safePackageSummary(snapshot = {}) {
     platform_monthly_fee_cents: snapshot.platform_monthly_fee_cents ?? null,
     platform_annual_fee: snapshot.platform_annual_fee ?? null,
     platform_annual_fee_cents: snapshot.platform_annual_fee_cents ?? null,
-    annual_discount_percent: snapshot.annual_discount_percent ?? null,
+    annual_platform_fee_note: snapshot.annual_platform_fee_note || null,
     included_interviews: snapshot.included_interviews ?? null,
     included_interviews_per_role: snapshot.included_interviews_per_role ?? null,
     interview_duration_minutes: snapshot.interview_duration_minutes ?? null,

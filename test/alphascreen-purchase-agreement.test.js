@@ -193,9 +193,9 @@ function intent(overrides = {}) {
       platform_fee_billing_cadence: 'monthly',
       platform_monthly_fee: 299,
       platform_monthly_fee_cents: 29900,
-      platform_annual_fee: 3229.2,
-      platform_annual_fee_cents: 322920,
-      annual_discount_percent: 10,
+      platform_annual_fee: 3299,
+      platform_annual_fee_cents: 329900,
+      annual_platform_fee_note: 'Discounted annual platform fee',
       included_interviews: 20,
       included_interviews_per_role: 20,
       interview_duration_minutes: 10,
@@ -236,7 +236,8 @@ test('valid pending Basic purchase intent creates a sent agreement from purchase
   assert.equal(response.body.agreement.selected_package.additional_interview_fee, 30)
   assert.equal(response.body.agreement.selected_package.platform_fee, 299)
   assert.equal(response.body.agreement.selected_package.platform_monthly_fee, 299)
-  assert.equal(response.body.agreement.selected_package.platform_annual_fee, 3229.2)
+  assert.equal(response.body.agreement.selected_package.platform_annual_fee, 3299)
+  assert.equal(response.body.agreement.selected_package.annual_platform_fee_note, 'Discounted annual platform fee')
   assert.equal(response.body.agreement.selected_package.per_role_fee, 399)
 
   assert.equal(db.uploads.length, 1)
@@ -272,14 +273,14 @@ test('valid pending Pro purchase intent creates agreement with Pro snapshot valu
         plan_key: 'pro',
         display_name: 'Pro',
         billing_cadence: 'annual',
-        platform_fee: 6469.2,
-        platform_fee_cents: 646920,
+        platform_fee: 6499,
+        platform_fee_cents: 649900,
         platform_fee_billing_cadence: 'annual',
         platform_monthly_fee: 599,
         platform_monthly_fee_cents: 59900,
-        platform_annual_fee: 6469.2,
-        platform_annual_fee_cents: 646920,
-        annual_discount_percent: 10,
+        platform_annual_fee: 6499,
+        platform_annual_fee_cents: 649900,
+        annual_platform_fee_note: 'Discounted annual platform fee',
         included_interviews: 30,
         included_interviews_per_role: 30,
         interview_duration_minutes: 12,
@@ -299,12 +300,13 @@ test('valid pending Pro purchase intent creates agreement with Pro snapshot valu
   assert.equal(agreement.billing_option, 'annual')
   assert.equal(agreement.template_snapshot.values.included_interviews_per_role, '30')
   assert.equal(agreement.template_snapshot.values.max_interview_minutes, '12')
-  assert.equal(agreement.template_snapshot.values.platform_fee, '6469.2')
+  assert.equal(agreement.template_snapshot.values.platform_fee, '6499')
   assert.equal(agreement.template_snapshot.values.additional_interview_fee, '35')
   assert.equal(agreement.template_snapshot.values.per_role_fee, '699')
-  assert.equal(response.body.agreement.selected_package.platform_fee, 6469.2)
+  assert.equal(response.body.agreement.selected_package.platform_fee, 6499)
   assert.equal(response.body.agreement.selected_package.platform_monthly_fee, 599)
-  assert.equal(response.body.agreement.selected_package.platform_annual_fee, 6469.2)
+  assert.equal(response.body.agreement.selected_package.platform_annual_fee, 6499)
+  assert.equal(response.body.agreement.selected_package.annual_platform_fee_note, 'Discounted annual platform fee')
   assert.equal(response.body.agreement.selected_package.included_interviews, 30)
   assert.equal(response.body.agreement.selected_package.max_interview_minutes, 12)
   assert.equal(response.body.agreement.selected_package.additional_interview_fee, 35)

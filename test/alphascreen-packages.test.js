@@ -18,6 +18,19 @@ const {
 
 const routePath = path.join(__dirname, '..', 'routes', 'alphaScreenPackages.js')
 const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
+const STALE_ANNUAL_PRICE_PATTERN = new RegExp([
+  String(3229 + 0.2).replace('.', '\\.'),
+  String(322900 + 20),
+  String(6469 + 0.2).replace('.', '\\.'),
+  String(646900 + 20)
+].join('|'))
+const STALE_DISCOUNT_KEY = ['annual', 'discount_percent'].join('_')
+
+function assertNoStaleAnnualPricingPayload(value) {
+  const serialized = JSON.stringify(value)
+  assert.doesNotMatch(serialized, STALE_ANNUAL_PRICE_PATTERN)
+  assert.equal(Object.prototype.hasOwnProperty.call(value || {}, STALE_DISCOUNT_KEY), false)
+}
 
 function injectModule(filename, exports) {
   require.cache[filename] = {
@@ -70,7 +83,7 @@ test('central package config returns canonical Basic and Pro values', () => {
     max_interview_minutes: 10
   })
   assert.equal(getAlphaScreenPlatformFee('basic', 'monthly'), 299)
-  assert.equal(getAlphaScreenPlatformFee('basic', 'annual'), 3229.2)
+  assert.equal(getAlphaScreenPlatformFee('basic', 'annual'), 3299)
   assert.deepEqual(getAlphaScreenPlanSettingsDefaults('pro'), {
     per_role_fee: 699,
     included_interviews_per_role: 30,
@@ -78,7 +91,7 @@ test('central package config returns canonical Basic and Pro values', () => {
     max_interview_minutes: 12
   })
   assert.equal(getAlphaScreenPlatformFee('pro', 'monthly'), 599)
-  assert.equal(getAlphaScreenPlatformFee('pro', 'annual'), 6469.2)
+  assert.equal(getAlphaScreenPlatformFee('pro', 'annual'), 6499)
 })
 
 test('webhook Basic provisioning payload uses 20 interviews, 10 minutes, and $30 overage', () => {
@@ -111,7 +124,7 @@ test('webhook Pro provisioning payload uses 30 interviews, 12 minutes, and $35 o
     client_id: 'client-pro',
     plan_tier: 'pro',
     billing_interval: 'annual',
-    platform_fee: 6469.2,
+    platform_fee: 6499,
     per_role_fee: 699,
     included_interviews_per_role: 30,
     additional_interview_fee: 35,
@@ -132,17 +145,18 @@ test('central package snapshot includes public package values and no Stripe pric
 
   assert.equal(snapshot.plan_key, 'pro')
   assert.equal(snapshot.billing_cadence, 'annual')
-  assert.equal(snapshot.platform_fee, 6469.2)
-  assert.equal(snapshot.platform_fee_cents, 646920)
+  assert.equal(snapshot.platform_fee, 6499)
+  assert.equal(snapshot.platform_fee_cents, 649900)
   assert.equal(snapshot.platform_fee_billing_cadence, 'annual')
   assert.equal(snapshot.platform_monthly_fee, 599)
-  assert.equal(snapshot.platform_annual_fee, 6469.2)
-  assert.equal(snapshot.annual_discount_percent, 10)
+  assert.equal(snapshot.platform_annual_fee, 6499)
+  assert.equal(snapshot.annual_platform_fee_note, 'Discounted annual platform fee')
   assert.equal(snapshot.included_interviews, 30)
   assert.equal(snapshot.max_interview_minutes, 12)
   assert.equal(snapshot.additional_interview_fee, 35)
   assert.equal(snapshot.per_role_fee, 699)
   assert.doesNotMatch(JSON.stringify(snapshot), /STRIPE_PRICE_|price_test|price_live|sk_test|sk_live/)
+  assertNoStaleAnnualPricingPayload(snapshot)
 })
 
 test('public package endpoint exposes safe package data and no Stripe secrets', async () => {
@@ -160,18 +174,18 @@ test('public package endpoint exposes safe package data and no Stripe secrets', 
     const pro = response.body.packages.find((item) => item.plan_key === 'pro')
     assert.equal(basic.platform_monthly_fee, 299)
     assert.equal(basic.platform_monthly_fee_cents, 29900)
-    assert.equal(basic.platform_annual_fee, 3229.2)
-    assert.equal(basic.platform_annual_fee_cents, 322920)
-    assert.equal(basic.annual_discount_percent, 10)
+    assert.equal(basic.platform_annual_fee, 3299)
+    assert.equal(basic.platform_annual_fee_cents, 329900)
+    assert.equal(basic.annual_platform_fee_note, 'Discounted annual platform fee')
     assert.equal(basic.per_role_fee, 399)
     assert.equal(basic.included_interviews, 20)
     assert.equal(basic.interview_duration_minutes, 10)
     assert.equal(basic.overage_price, 30)
     assert.equal(pro.platform_monthly_fee, 599)
     assert.equal(pro.platform_monthly_fee_cents, 59900)
-    assert.equal(pro.platform_annual_fee, 6469.2)
-    assert.equal(pro.platform_annual_fee_cents, 646920)
-    assert.equal(pro.annual_discount_percent, 10)
+    assert.equal(pro.platform_annual_fee, 6499)
+    assert.equal(pro.platform_annual_fee_cents, 649900)
+    assert.equal(pro.annual_platform_fee_note, 'Discounted annual platform fee')
     assert.equal(pro.per_role_fee, 699)
     assert.equal(pro.included_interviews, 30)
     assert.equal(pro.interview_duration_minutes, 12)
@@ -186,6 +200,8 @@ test('public package endpoint exposes safe package data and no Stripe secrets', 
     assert.doesNotMatch(serialized, /price_test_basic_monthly_secret_value/)
     assert.doesNotMatch(serialized, /price_test_pro_annual_secret_value/)
     assert.doesNotMatch(serialized, /STRIPE_SECRET|sk_live|sk_test/)
+    assertNoStaleAnnualPricingPayload(basic)
+    assertNoStaleAnnualPricingPayload(pro)
   } finally {
     if (previousBasicMonthly === undefined) delete process.env.STRIPE_PRICE_BASIC_MONTHLY
     else process.env.STRIPE_PRICE_BASIC_MONTHLY = previousBasicMonthly

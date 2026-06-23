@@ -2,11 +2,7 @@
 
 const PUBLIC_PACKAGE_KEYS = Object.freeze(['basic', 'pro'])
 const BILLING_INTERVALS = Object.freeze(['monthly', 'annual'])
-const ANNUAL_DISCOUNT_PERCENT = 10
-
-function annualPlatformFee(monthlyFee) {
-  return Math.round(Number(monthlyFee || 0) * 12 * (100 - ANNUAL_DISCOUNT_PERCENT)) / 100
-}
+const ANNUAL_PLATFORM_FEE_NOTE = 'Discounted annual platform fee'
 
 function moneyCents(value) {
   return Math.round(Number(value || 0) * 100)
@@ -17,8 +13,8 @@ const ALPHA_SCREEN_PACKAGES = Object.freeze({
     plan_key: 'basic',
     display_name: 'Basic',
     platform_monthly_fee: 299,
-    platform_annual_fee: annualPlatformFee(299),
-    annual_discount_percent: ANNUAL_DISCOUNT_PERCENT,
+    platform_annual_fee: 3299,
+    annual_platform_fee_note: ANNUAL_PLATFORM_FEE_NOTE,
     included_interviews: 20,
     included_interviews_per_role: 20,
     interview_duration_minutes: 10,
@@ -43,8 +39,8 @@ const ALPHA_SCREEN_PACKAGES = Object.freeze({
     plan_key: 'pro',
     display_name: 'Pro',
     platform_monthly_fee: 599,
-    platform_annual_fee: annualPlatformFee(599),
-    annual_discount_percent: ANNUAL_DISCOUNT_PERCENT,
+    platform_annual_fee: 6499,
+    annual_platform_fee_note: ANNUAL_PLATFORM_FEE_NOTE,
     included_interviews: 30,
     included_interviews_per_role: 30,
     interview_duration_minutes: 12,
@@ -148,7 +144,7 @@ function buildAlphaScreenPackageSnapshot(planKey, billingInterval) {
     platform_monthly_fee_cents: moneyCents(pkg.platform_monthly_fee),
     platform_annual_fee: pkg.platform_annual_fee,
     platform_annual_fee_cents: moneyCents(pkg.platform_annual_fee),
-    annual_discount_percent: pkg.annual_discount_percent,
+    annual_platform_fee_note: pkg.annual_platform_fee_note,
     included_interviews: pkg.included_interviews,
     included_interviews_per_role: pkg.included_interviews_per_role,
     interview_duration_minutes: pkg.interview_duration_minutes,
@@ -172,7 +168,7 @@ function listPublicAlphaScreenPackages({ env = process.env } = {}) {
       platform_monthly_fee_cents: moneyCents(pkg.platform_monthly_fee),
       platform_annual_fee: pkg.platform_annual_fee,
       platform_annual_fee_cents: moneyCents(pkg.platform_annual_fee),
-      annual_discount_percent: pkg.annual_discount_percent,
+      annual_platform_fee_note: pkg.annual_platform_fee_note,
       included_interviews: pkg.included_interviews,
       included_interviews_per_role: pkg.included_interviews_per_role,
       interview_duration_minutes: pkg.interview_duration_minutes,

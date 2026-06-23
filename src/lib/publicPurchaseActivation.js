@@ -14,6 +14,7 @@ const { buildClientPwResetUrl } = require('../../config/urlConfig');
 const LIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
 const PRIVILEGED_MEMBER_ROLES = new Set(['manager', 'admin', 'owner', 'super_admin']);
 const WELCOME_EMAIL_CATEGORY = 'public_purchase_welcome';
+const NON_RETRYABLE_WELCOME_EMAIL_STATUSES = new Set(['sent', 'sending']);
 
 function pickId(value) {
   if (!value) return null;
@@ -81,6 +82,15 @@ function buildClientName(intent, agreement) {
     'alphaScreen client';
 }
 
+function isPublicPurchaseAgreement(agreement, intent) {
+  const snapshot = getTemplateSnapshot(agreement);
+  return Boolean(
+    intent?.id ||
+    publicPurchaseIntentIdFromAgreement(agreement) ||
+    cleanText(snapshot?.source).toLowerCase() === 'public_purchase_intent'
+  );
+}
+
 function isLiveClientActivationState(client) {
   const billingStatus = cleanText(client?.billing_status).toLowerCase();
   const subscriptionStatus = cleanText(client?.subscription_status).toLowerCase();
@@ -111,6 +121,7 @@ function welcomeLedgerPayload({ agreement, intent, clientId, email, ledgerKey, n
       purchase_intent_id: purchaseIntentId
     },
     status: 'sending',
+    attempt: 1,
     subject: 'Welcome to alphaScreen',
     raw_payload: {
       source: 'public_purchase_activation',
@@ -126,7 +137,7 @@ function welcomeLedgerPayload({ agreement, intent, clientId, email, ledgerKey, n
 async function readWelcomeLedger(db, ledgerKey) {
   const { data, error } = await db
     .from('email_delivery_events')
-    .select('id,status,sg_event_id')
+    .select('id,status,sg_event_id,attempt')
     .eq('sg_event_id', ledgerKey)
     .maybeSingle();
   if (error) {
@@ -141,10 +152,35 @@ async function reserveWelcomeEmailSend({ db, agreement, intent, clientId, email,
   const ledgerKey = buildWelcomeLedgerKey({ agreement, intent, clientId, email });
   const existing = await readWelcomeLedger(db, ledgerKey);
   if (existing?.id || existing?.sg_event_id) {
+    const existingStatus = cleanText(existing.status).toLowerCase();
+    if (NON_RETRYABLE_WELCOME_EMAIL_STATUSES.has(existingStatus)) {
+      return {
+        reserved: false,
+        ledgerKey,
+        status: existingStatus || 'already_recorded'
+      };
+    }
+
+    const attempt = Math.max(0, Number(existing.attempt || 0)) + 1;
+    const { error } = await db
+      .from('email_delivery_events')
+      .update({
+        status: 'sending',
+        response: null,
+        is_problem: false,
+        event_at: nowIso,
+        attempt
+      })
+      .eq('sg_event_id', ledgerKey);
+    if (error) {
+      const err = new Error(error.message || 'Welcome email ledger retry reservation failed');
+      err.code = error.code || 'welcome_email_ledger_retry_failed';
+      throw err;
+    }
     return {
-      reserved: false,
+      reserved: true,
       ledgerKey,
-      status: cleanText(existing.status) || 'already_recorded'
+      status: 'retrying'
     };
   }
 
@@ -202,10 +238,26 @@ async function sendWelcomeEmailOnce({
     nowIso
   });
 
-  if (!reservation.reserved) return reservation.status === 'sent' ? 'already_sent' : 'already_recorded';
+  if (!reservation.reserved) {
+    logger.info?.('[public-purchase-activation] welcome_email_skipped', {
+      email: redactEmail(buyerEmail),
+      client_id: clientId,
+      agreement_id: cleanText(agreement?.id) || null,
+      purchase_intent_id: cleanText(intent?.id) || null,
+      status: reservation.status
+    });
+    return reservation.status === 'sent' ? 'already_sent' : 'already_recorded';
+  }
 
   try {
     const firstName = cleanText(intent?.buyer_first_name) || cleanText(buyerName).split(/\s+/).filter(Boolean)[0] || '';
+    logger.info?.('[public-purchase-activation] welcome_email_attempting', {
+      email: redactEmail(buyerEmail),
+      client_id: clientId,
+      agreement_id: cleanText(agreement?.id) || null,
+      purchase_intent_id: cleanText(intent?.id) || null,
+      reservation_status: reservation.status
+    });
     const emailResult = await sendWelcomeEmail(buyerEmail, {
       firstName,
       recipientName: buyerName,
@@ -229,6 +281,13 @@ async function sendWelcomeEmailOnce({
       logger.warn?.('[public-purchase-activation] welcome_email_not_sent', {
         email: redactEmail(buyerEmail),
         status
+      });
+    } else {
+      logger.info?.('[public-purchase-activation] welcome_email_sent', {
+        email: redactEmail(buyerEmail),
+        client_id: clientId,
+        agreement_id: cleanText(agreement?.id) || null,
+        purchase_intent_id: cleanText(intent?.id) || null
       });
     }
     return status;
@@ -709,7 +768,18 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
   let welcomeEmailStatus = 'not_sent';
   const buyerEmail = lowerEmail(intent?.buyer_email || agreement?.admin_email);
   const buyerName = buildBuyerName(intent, agreement) || buyerEmail;
-  const shouldSendWelcome = Boolean(intent?.id && buyerEmail && !agreementAlreadyPaid && !clientAlreadyActive);
+  const publicPurchaseWelcomeEligible = Boolean(isPublicPurchaseAgreement(agreement, intent) && buyerEmail);
+  logger.info?.('[public-purchase-activation] welcome_email_decision', {
+    eligible: publicPurchaseWelcomeEligible,
+    reason: publicPurchaseWelcomeEligible ? 'public_purchase_activation' : buyerEmail ? 'not_public_purchase' : 'missing_buyer_email',
+    email: redactEmail(buyerEmail),
+    client_id: clientId,
+    agreement_id: agreementId,
+    purchase_intent_id: cleanText(intent?.id) || null,
+    agreement_already_paid: agreementAlreadyPaid,
+    client_already_active: clientAlreadyActive
+  });
+  const shouldSendWelcome = publicPurchaseWelcomeEligible;
   if (shouldSendWelcome) {
     try {
       welcomeEmailStatus = await sendWelcomeEmailOnce({
@@ -731,8 +801,8 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
         code: error?.code || null
       });
     }
-  } else if (agreementAlreadyPaid || clientAlreadyActive) {
-    welcomeEmailStatus = 'not_sent_existing_activation';
+  } else {
+    welcomeEmailStatus = buyerEmail ? 'not_sent_not_public_purchase' : 'not_sent_missing_buyer_email';
   }
 
   return {

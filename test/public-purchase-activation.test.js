@@ -443,9 +443,84 @@ test('duplicate public purchase webhook activation does not resend welcome email
   const second = await activatePublicPurchaseAgreementCheckout(commonOptions)
 
   assert.equal(first.welcome_email_status, 'sent')
-  assert.equal(second.welcome_email_status, 'not_sent_existing_activation')
+  assert.equal(second.welcome_email_status, 'already_sent')
   assert.equal(welcomeEmails.length, 1)
   assert.equal(db.emailDeliveryEvents.filter((row) => row.email_category === 'public_purchase_welcome').length, 1)
+})
+
+test('hosted-like public purchase activation sends welcome when webhook pre-activated client', async () => {
+  const db = makeDb('basic', 'monthly')
+  db.clients[0].billing_status = 'active'
+  db.clients[0].subscription_status = 'active'
+  db.clients[0].stripe_subscription_id = 'sub_test_public'
+  const welcomeEmails = []
+
+  const result = await activatePublicPurchaseAgreementCheckout({
+    db,
+    authAdmin: makeAuthAdmin([{ id: 'user-existing', email: BUYER_EMAIL }]),
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('monthly'),
+    requireParentClient: async () => ({ ok: true }),
+    ensureRecovery: async () => {
+      throw new Error('should_not_generate_recovery_for_existing_user')
+    },
+    sendRecoveryEmail: async () => {
+      throw new Error('should_not_send_setup_email_for_existing_user')
+    },
+    sendWelcomeEmail: async (to, details) => {
+      welcomeEmails.push({ to, details })
+      return { statusCode: 202 }
+    },
+    logger: { error() {}, warn() {}, info() {} }
+  })
+
+  assert.equal(result.welcome_email_status, 'sent')
+  assert.equal(welcomeEmails.length, 1)
+  assert.equal(welcomeEmails[0].to, BUYER_EMAIL)
+  assert.equal(db.emailDeliveryEvents[0].status, 'sent')
+})
+
+test('skipped welcome email can retry on duplicate webhook instead of being treated as sent', async () => {
+  const db = makeDb('basic', 'monthly')
+  const welcomeCalls = []
+  const loggerEntries = []
+  const commonOptions = {
+    db,
+    authAdmin: makeAuthAdmin([{ id: 'user-existing', email: BUYER_EMAIL }]),
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('monthly'),
+    requireParentClient: async () => ({ ok: true }),
+    ensureRecovery: async () => {
+      throw new Error('should_not_generate_recovery_for_existing_user')
+    },
+    sendRecoveryEmail: async () => {
+      throw new Error('should_not_send_setup_email_for_existing_user')
+    },
+    sendWelcomeEmail: async (to, details) => {
+      welcomeCalls.push({ to, details })
+      return welcomeCalls.length === 1 ? { skipped: true } : { statusCode: 202 }
+    },
+    logger: {
+      error(...args) { loggerEntries.push(args) },
+      warn(...args) { loggerEntries.push(args) },
+      info(...args) { loggerEntries.push(args) }
+    }
+  }
+
+  const first = await activatePublicPurchaseAgreementCheckout(commonOptions)
+  const second = await activatePublicPurchaseAgreementCheckout(commonOptions)
+
+  assert.equal(first.welcome_email_status, 'skipped')
+  assert.equal(second.welcome_email_status, 'sent')
+  assert.equal(welcomeCalls.length, 2)
+  assert.equal(db.emailDeliveryEvents.length, 1)
+  assert.equal(db.emailDeliveryEvents[0].status, 'sent')
+  assert.equal(db.emailDeliveryEvents[0].attempt, 2)
+  assert.doesNotMatch(JSON.stringify(loggerEntries), /recovery-token|setup\.example|raw_payload|sk_test|SG\./)
 })
 
 test('public purchase activation does not send welcome email when activation fails', async () => {

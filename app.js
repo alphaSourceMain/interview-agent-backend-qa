@@ -81,6 +81,10 @@ const {
   unarchivePublicLeadCapture,
   updatePublicLeadCaptureArchiveBatch,
 } = require('./src/lib/adminPublicAnalyticsService')
+const {
+  buildAdminPublicPurchasesPayload,
+  safePublicPurchasesErrorBody,
+} = require('./src/lib/adminPublicPurchasesService')
 const { sendSubscriptionCheckoutEmail, sendMemberRecoveryEmail } = require('./utils/mailer')
 const {
   frontendUrl: FRONTEND_URL,
@@ -2361,6 +2365,26 @@ adminRouter.get('/public-analytics', requireAuth, requireAdmin, async (req, res)
   } catch (error) {
     const body = safePublicAnalyticsErrorBody(error, request_id)
     console.error('[admin/public-analytics] failed', {
+      request_id,
+      code: body.code,
+      detail: body.detail
+    })
+    return sendAdminError(res, error?.status || 500, body)
+  }
+})
+
+adminRouter.get('/public-purchases', requireAuth, requireAdmin, async (req, res) => {
+  const request_id = req.request_id || null
+  try {
+    const payload = await buildAdminPublicPurchasesPayload({
+      db: supabaseAdmin,
+      query: req.query || {},
+      requestId: request_id
+    })
+    return res.json(payload)
+  } catch (error) {
+    const body = safePublicPurchasesErrorBody(error, request_id)
+    console.error('[admin/public-purchases] failed', {
       request_id,
       code: body.code,
       detail: body.detail

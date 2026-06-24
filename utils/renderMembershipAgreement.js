@@ -180,9 +180,28 @@ function normalizeMembershipAgreementInput(input = {}) {
   };
 }
 
+function normalizeBooleanFlag(value) {
+  if (value === true) return true;
+  if (value === false || value === null || value === undefined) return false;
+  const normalized = String(value).trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+function shouldShowPackageTerms(payload, options) {
+  return normalizeBooleanFlag(
+    options.showPackageTerms ??
+      options.show_package_terms ??
+      payload.showPackageTerms ??
+      payload.show_package_terms ??
+      payload.renderPackageTerms ??
+      payload.render_package_terms
+  );
+}
+
 function buildMembershipAgreementHtml(payload = {}, options = {}) {
   const normalized = normalizeMembershipAgreementInput(payload);
   const execution = normalizeExecutionInput(options.execution || payload.execution || {});
+  const showPackageTerms = shouldShowPackageTerms(payload, options);
   const now = new Date();
   const generatedAtIso = now.toISOString();
   const generatedAtLabel = now.toLocaleDateString('en-US', {
@@ -201,6 +220,7 @@ function buildMembershipAgreementHtml(payload = {}, options = {}) {
     admin_email: normalized.admin_email || '______________________________',
     membership_tier: titleCase(normalized.membership_tier),
     is_enterprise: normalized.membership_tier === 'enterprise',
+    show_package_terms: showPackageTerms,
     package_platform_fee: formatUsd(normalized.platform_fee),
     package_per_role_fee: formatUsd(normalized.per_role_fee),
     package_additional_interview_fee: formatUsd(normalized.additional_interview_fee),

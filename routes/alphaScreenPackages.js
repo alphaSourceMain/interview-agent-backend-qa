@@ -13,6 +13,7 @@ const {
 const { buildMembershipAgreementSignUrl } = require('../config/urlConfig')
 const { htmlToPdf } = require('../utils/pdfRenderer')
 const { buildMembershipAgreementHtml } = require('../utils/renderMembershipAgreement')
+const { resolvePublicCheckoutReturnState } = require('../src/lib/publicPurchaseActivation')
 
 const router = express.Router()
 const AGREEMENTS_BUCKET = process.env.SUPABASE_AGREEMENTS_BUCKET || 'agreements'
@@ -62,6 +63,10 @@ function cleanPath(value) {
   } catch (_) {
     return trimText(raw.split('?')[0].split('#')[0], 300)
   }
+}
+
+function cleanLookupId(value) {
+  return trimText(value, 200)
 }
 
 function slugify(value) {
@@ -366,6 +371,47 @@ router.get('/packages', (req, res) => {
   })
 })
 
+router.get('/checkout-status', rateLimit, async (req, res) => {
+  const request_id = req.request_id || null
+  const sessionId = cleanLookupId(req.query?.session_id)
+  const agreementId = cleanLookupId(req.query?.agreement_id)
+  const fallbackClientId = cleanLookupId(req.query?.client_id)
+
+  if (!sessionId && !agreementId && !fallbackClientId) {
+    return res.status(400).json({
+      error: 'checkout_lookup_required',
+      code: 'checkout_lookup_required',
+      detail: 'Checkout session, agreement, or client reference is required.',
+      request_id
+    })
+  }
+
+  try {
+    const state = await resolvePublicCheckoutReturnState({
+      sessionId,
+      agreementId,
+      fallbackClientId
+    })
+
+    return res.json({
+      ok: true,
+      status: state?.status || 'payment_pending',
+      client_id: state?.client_id || null,
+      password_setup_required: state?.password_setup_required === true,
+      setup_email_sent: state?.setup_email_sent === true,
+      request_id
+    })
+  } catch (e) {
+    console.error('[alphascreen/checkout-status] unexpected:', e?.message || e)
+    return res.status(500).json({
+      error: 'checkout_status_failed',
+      code: 'checkout_status_failed',
+      detail: 'Checkout status could not be loaded.',
+      request_id
+    })
+  }
+})
+
 router.post('/purchase-intents', rateLimit, async (req, res) => {
   const request_id = req.request_id || null
   try {
@@ -549,7 +595,7 @@ router.post('/purchase-intents/:id/agreement', rateLimit, async (req, res) => {
       })
     }
 
-    const { html, normalized } = buildMembershipAgreementHtml(agreementInput)
+    const { html, normalized } = buildMembershipAgreementHtml(agreementInput, { showPackageTerms: true })
     const pdf = await htmlToPdf(html, {
       format: 'Letter',
       margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' }

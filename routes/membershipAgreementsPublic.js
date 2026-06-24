@@ -692,6 +692,7 @@ router.post('/sign', async (req, res) => {
 
     const agreementInput = buildAgreementInputFromRow(agreement);
     const { html } = buildMembershipAgreementHtml(agreementInput, {
+      showPackageTerms: isPublicPurchaseIntentAgreement(agreement),
       execution: {
         accepted: true,
         signer_typed_name: typedName,

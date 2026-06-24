@@ -606,6 +606,29 @@ test('checkout return state reads webhook state and does not activate pending ro
   assert.equal(passwordRequiredStatus.status, 'setup_email_sent')
   assert.equal(passwordRequiredStatus.password_setup_required, true)
   assert.equal(passwordRequiredStatus.setup_email_sent, true)
+
+  const readyDb = makeDb('pro', 'annual', {
+    clientMembers: [{
+      client_id: CLIENT_ID,
+      email: BUYER_EMAIL,
+      name: 'Alex Rivera',
+      role: 'manager',
+      user_id: 'user-existing'
+    }]
+  })
+  readyDb.membershipAgreements[0].checkout_status = 'paid'
+  readyDb.purchaseIntents[0].status = 'completed'
+  readyDb.clients[0].billing_status = 'active'
+  readyDb.clients[0].subscription_status = 'active'
+  const readyStatus = await resolvePublicCheckoutReturnState({
+    db: readyDb,
+    authAdmin: makeAuthAdmin([{ id: 'user-existing', email: BUYER_EMAIL, last_sign_in_at: '2026-06-20T00:00:00.000Z' }]),
+    sessionId: 'cs_test_public',
+    fallbackClientId: CLIENT_ID,
+    agreementId: AGREEMENT_ID
+  })
+  assert.equal(readyStatus.status, 'ready')
+  assert.equal(readyStatus.client_id, CLIENT_ID)
 })
 
 test('sendAlphaScreenWelcomeEmail renders help email and avoids setup tokens or attachments', async () => {

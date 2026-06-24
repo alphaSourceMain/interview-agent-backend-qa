@@ -5832,9 +5832,11 @@ app.get('/checkout/subscription-success', async (req, res) => {
     if (tab) params.set('tab', tab)
     return buildClientDashboardReturnUrl(params)
   }
-  const makePublicCheckoutStatusUrl = (status, clientId = '') => {
+  const makePublicCheckoutStatusUrl = (status, clientId = '', extra = {}) => {
     const params = { checkout: 'success', status: status || 'setup_pending' }
     if (clientId) params.client_id = clientId
+    if (extra.session_id) params.session_id = extra.session_id
+    if (extra.agreement_id) params.agreement_id = extra.agreement_id
     return buildPublicCheckoutSuccessUrl(params)
   }
   const request_id = req.request_id || null
@@ -5870,7 +5872,10 @@ app.get('/checkout/subscription-success', async (req, res) => {
     const metadataBillingInterval = String(metadata?.billing_interval || '').trim().toLowerCase()
     const clientId = metadataClientId || fallbackClientId
     const successUrl = makeAccountSuccessUrl(clientId, fallbackTab)
-    const agreementStatusUrl = (status) => makePublicCheckoutStatusUrl(status, clientId)
+    const agreementStatusUrl = (status) => makePublicCheckoutStatusUrl(status, clientId, {
+      session_id: sessionId,
+      agreement_id: metadataAgreementId
+    })
     const paymentStatus = String(session?.payment_status || '').toLowerCase()
     const subscriptionObj = session?.subscription && typeof session.subscription === 'object' ? session.subscription : null
     const subscriptionMetadata = subscriptionObj?.metadata && typeof subscriptionObj.metadata === 'object' ? subscriptionObj.metadata : {}

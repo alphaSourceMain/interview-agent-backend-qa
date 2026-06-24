@@ -10,6 +10,7 @@ const routePath = path.join(__dirname, '..', 'routes', 'alphaScreenPackages.js')
 const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
 const pdfRendererPath = path.join(__dirname, '..', 'utils', 'pdfRenderer.js')
 const urlConfigPath = path.join(__dirname, '..', 'config', 'urlConfig.js')
+const publicPurchaseActivationPath = path.join(__dirname, '..', 'src', 'lib', 'publicPurchaseActivation.js')
 
 const BASIC_INTENT_ID = '11111111-1111-4111-8111-111111111111'
 const PRO_INTENT_ID = '22222222-2222-4222-8222-222222222222'
@@ -76,6 +77,8 @@ class FakeQuery {
   tableRows() {
     if (this.table === 'public_purchase_intents') return this.db.purchaseIntents
     if (this.table === 'membership_agreements') return this.db.membershipAgreements
+    if (this.table === 'clients') return this.db.clients
+    if (this.table === 'client_members') return this.db.clientMembers
     return []
   }
 
@@ -106,15 +109,34 @@ class FakeQuery {
 
     return this.maybeSingle()
   }
+
+  async execute() {
+    if (this.insertPayload || this.updatePayload) return this.single()
+    return { data: this.tableRows().filter((item) => matchesFilters(item, this.filters)), error: null }
+  }
+
+  then(resolve, reject) {
+    return this.execute().then(resolve, reject)
+  }
 }
 
 function makeDb(options = {}) {
   const db = {
     purchaseIntents: options.purchaseIntents || [],
     membershipAgreements: options.membershipAgreements || [],
+    clients: options.clients || [],
+    clientMembers: options.clientMembers || [],
     lookupError: options.lookupError || null,
     insertError: options.insertError || null,
     updateError: options.updateError || null,
+    auth: {
+      admin: {
+        async getUserById(userId) {
+          const user = (options.authUsers || []).find((item) => String(item?.id || '') === String(userId || '')) || null
+          return { data: { user }, error: null }
+        }
+      }
+    },
     inserts: [],
     updates: [],
     touchedTables: [],
@@ -143,6 +165,7 @@ function buildApp(db) {
   delete require.cache[supabaseClientPath]
   delete require.cache[pdfRendererPath]
   delete require.cache[urlConfigPath]
+  delete require.cache[publicPurchaseActivationPath]
   injectModule(supabaseClientPath, { supabaseAdmin: db })
   injectModule(pdfRendererPath, { htmlToPdf: async () => Buffer.from('%PDF-qa') })
   injectModule(urlConfigPath, {
@@ -166,6 +189,25 @@ async function postAgreement(app, intentId, headers = {}) {
       method: 'POST',
       headers
     })
+    const text = await response.text()
+    return {
+      status: response.status,
+      body: text ? JSON.parse(text) : null
+    }
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()))
+    })
+  }
+}
+
+async function getCheckoutStatus(app, query = {}) {
+  const server = http.createServer(app)
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  try {
+    const params = new URLSearchParams(query)
+    const response = await fetch(`http://127.0.0.1:${port}/api/alphascreen/checkout-status?${params.toString()}`)
     const text = await response.text()
     return {
       status: response.status,
@@ -256,6 +298,11 @@ test('valid pending Basic purchase intent creates a sent agreement from purchase
   assert.equal(agreement.template_snapshot.values.max_interview_minutes, '10')
   assert.equal(agreement.template_snapshot.values.additional_interview_fee, '30')
   assert.equal(agreement.template_snapshot.values.per_role_fee, '399')
+  assert.match(agreement.template_snapshot.rendered_html, /Platform Fee/)
+  assert.match(agreement.template_snapshot.rendered_html, /Per-Role Fee/)
+  assert.match(agreement.template_snapshot.rendered_html, /Included Interviews/)
+  assert.match(agreement.template_snapshot.rendered_html, /Interview Duration Cap/)
+  assert.match(agreement.template_snapshot.rendered_html, /Additional Interview Fee/)
 
   const intentUpdate = db.updates.find((update) => update.table === 'public_purchase_intents')
   assert.equal(intentUpdate.payload.status, 'agreement_pending')
@@ -310,6 +357,48 @@ test('valid pending Pro purchase intent creates agreement with Pro snapshot valu
   assert.equal(response.body.agreement.selected_package.included_interviews, 30)
   assert.equal(response.body.agreement.selected_package.max_interview_minutes, 12)
   assert.equal(response.body.agreement.selected_package.additional_interview_fee, 35)
+})
+
+test('checkout status endpoint returns completed webhook setup state without raw checkout payloads', async () => {
+  const clientId = '44444444-4444-4444-8444-444444444444'
+  const db = makeDb({
+    purchaseIntents: [intent({
+      status: 'completed',
+      agreement_id: AGREEMENT_ID,
+      stripe_checkout_session_id: 'cs_test_public',
+      client_id: clientId
+    })],
+    membershipAgreements: [{
+      id: AGREEMENT_ID,
+      client_id: clientId,
+      checkout_status: 'paid',
+      checkout_session_id: 'cs_test_public'
+    }],
+    clients: [{
+      id: clientId,
+      billing_status: 'active',
+      subscription_status: 'active'
+    }],
+    clientMembers: [{
+      client_id: clientId,
+      email: 'alex@acmedental.example',
+      role: 'manager',
+      user_id: 'user-new-buyer'
+    }]
+  })
+
+  const response = await getCheckoutStatus(buildApp(db), {
+    session_id: 'cs_test_public',
+    agreement_id: AGREEMENT_ID,
+    client_id: clientId
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.body.status, 'setup_email_sent')
+  assert.equal(response.body.client_id, clientId)
+  assert.equal(response.body.password_setup_required, true)
+  assert.equal(response.body.setup_email_sent, true)
+  assert.doesNotMatch(JSON.stringify(response.body), /buyer_email|company_legal_name|raw_payload|stripe_checkout_session_id|signer_token|sk_test|sk_live/i)
 })
 
 test('purchase intent agreement endpoint is idempotent for an existing sent agreement', async () => {

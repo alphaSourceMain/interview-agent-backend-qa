@@ -488,6 +488,36 @@ async function findAuthUserById(authAdmin, userId, logger = console) {
   }
 }
 
+async function generatePasswordSetupUrl({ authAdmin, email, clientId, requestId, logger = console } = {}) {
+  const normalizedEmail = lowerEmail(email);
+  if (!authAdmin?.generateLink || !normalizedEmail) return '';
+
+  const redirectTo = buildClientPwResetUrl({
+    origin: 'client',
+    checkout: 'success',
+    client_id: cleanText(clientId)
+  });
+
+  try {
+    const link = await authAdmin.generateLink({
+      type: 'recovery',
+      email: normalizedEmail,
+      options: { redirectTo }
+    });
+    if (link?.error) throw link.error;
+    return cleanText(link?.data?.action_link || link?.data?.properties?.action_link);
+  } catch (error) {
+    logger.warn?.('[public-purchase-activation] setup_link_generation_failed', {
+      request_id: requestId || null,
+      email: redactEmail(normalizedEmail),
+      client_id: cleanText(clientId) || null,
+      error: error?.message || error,
+      code: error?.code || null
+    });
+    return '';
+  }
+}
+
 async function loadExistingMembership(db, clientId, email, userId) {
   const { data, error } = await db
     .from('client_members')
@@ -825,6 +855,7 @@ async function resolvePublicCheckoutReturnState(options = {}) {
   const db = options.db || supabaseAdmin;
   const authAdmin = options.authAdmin || supabaseAdmin.auth?.admin;
   const logger = options.logger || console;
+  const requestId = options.requestId || null;
   const sessionId = cleanText(options.sessionId);
   const fallbackClientId = cleanText(options.fallbackClientId);
   const fallbackAgreementId = cleanText(options.agreementId);
@@ -833,7 +864,7 @@ async function resolvePublicCheckoutReturnState(options = {}) {
   if (sessionId) {
     const { data, error } = await db
       .from('membership_agreements')
-      .select('id,client_id,checkout_status,checkout_session_id')
+      .select('id,client_id,checkout_status,checkout_session_id,admin_email')
       .eq('checkout_session_id', sessionId)
       .maybeSingle();
     if (error) throw new Error(error.message || 'Agreement checkout lookup failed');
@@ -842,7 +873,7 @@ async function resolvePublicCheckoutReturnState(options = {}) {
   if (!agreement && fallbackAgreementId) {
     const { data, error } = await db
       .from('membership_agreements')
-      .select('id,client_id,checkout_status,checkout_session_id')
+      .select('id,client_id,checkout_status,checkout_session_id,admin_email')
       .eq('id', fallbackAgreementId)
       .maybeSingle();
     if (error) throw new Error(error.message || 'Agreement checkout lookup failed');
@@ -889,7 +920,7 @@ async function resolvePublicCheckoutReturnState(options = {}) {
     return { status: 'activation_pending', client_id: clientId };
   }
 
-  const buyerEmail = lowerEmail(intent?.buyer_email);
+  const buyerEmail = lowerEmail(intent?.buyer_email || agreement?.admin_email);
   let memberQuery = db.from('client_members').select('client_id,user_id,email,role').eq('client_id', clientId);
   if (buyerEmail) memberQuery = memberQuery.eq('email', buyerEmail);
   const { data: members, error: memberErr } = await memberQuery;
@@ -899,6 +930,24 @@ async function resolvePublicCheckoutReturnState(options = {}) {
 
   const authUser = await findAuthUserById(authAdmin, member.user_id, logger);
   if (!cleanText(authUser?.last_sign_in_at)) {
+    const setupEmail = lowerEmail(buyerEmail || member.email || authUser?.email || agreement?.admin_email);
+    const setPasswordUrl = await generatePasswordSetupUrl({
+      authAdmin,
+      email: setupEmail,
+      clientId,
+      requestId,
+      logger
+    });
+    if (setPasswordUrl) {
+      return {
+        status: 'password_required',
+        client_id: clientId,
+        password_setup_required: true,
+        direct_setup_available: true,
+        set_password_url: setPasswordUrl
+      };
+    }
+
     return {
       status: 'setup_email_sent',
       client_id: clientId,
@@ -915,5 +964,6 @@ module.exports = {
   resolvePublicCheckoutReturnState,
   buildClientActivationPayload,
   findAuthUserByEmail,
-  findAuthUserById
+  findAuthUserById,
+  generatePasswordSetupUrl
 };

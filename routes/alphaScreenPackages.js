@@ -398,6 +398,8 @@ router.get('/checkout-status', rateLimit, async (req, res) => {
       status: state?.status || 'payment_pending',
       client_id: state?.client_id || null,
       password_setup_required: state?.password_setup_required === true,
+      direct_setup_available: state?.direct_setup_available === true,
+      set_password_url: state?.set_password_url || null,
       setup_email_sent: state?.setup_email_sent === true,
       request_id
     })

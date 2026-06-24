@@ -134,6 +134,15 @@ function makeDb(options = {}) {
         async getUserById(userId) {
           const user = (options.authUsers || []).find((item) => String(item?.id || '') === String(userId || '')) || null
           return { data: { user }, error: null }
+        },
+        async generateLink() {
+          if (options.generateLinkError) throw options.generateLinkError
+          return {
+            data: {
+              action_link: options.setupActionLink || 'https://qa.alphasourceai.com/pwreset?token_hash=direct-setup-token&type=recovery'
+            },
+            error: null
+          }
         }
       }
     },
@@ -171,6 +180,11 @@ function buildApp(db) {
   injectModule(urlConfigPath, {
     buildMembershipAgreementSignUrl(token) {
       return `https://qa.alphasourceai.com/membership-agreement/sign/${encodeURIComponent(token)}`
+    },
+    buildClientPwResetUrl(query = {}) {
+      const params = new URLSearchParams(query)
+      const serialized = params.toString()
+      return `https://qa.alphasourceai.com/pwreset${serialized ? `?${serialized}` : ''}`
     }
   })
   const router = require(routePath)
@@ -384,7 +398,9 @@ test('checkout status endpoint returns completed webhook setup state without raw
       email: 'alex@acmedental.example',
       role: 'manager',
       user_id: 'user-new-buyer'
-    }]
+    }],
+    authUsers: [{ id: 'user-new-buyer', email: 'alex@acmedental.example' }],
+    setupActionLink: 'https://qa.alphasourceai.com/pwreset?token_hash=direct-setup-token&type=recovery'
   })
 
   const response = await getCheckoutStatus(buildApp(db), {
@@ -394,10 +410,12 @@ test('checkout status endpoint returns completed webhook setup state without raw
   })
 
   assert.equal(response.status, 200)
-  assert.equal(response.body.status, 'setup_email_sent')
+  assert.equal(response.body.status, 'password_required')
   assert.equal(response.body.client_id, clientId)
   assert.equal(response.body.password_setup_required, true)
-  assert.equal(response.body.setup_email_sent, true)
+  assert.equal(response.body.direct_setup_available, true)
+  assert.equal(response.body.setup_email_sent, false)
+  assert.match(response.body.set_password_url, /\/pwreset\?token_hash=direct-setup-token/)
   assert.doesNotMatch(JSON.stringify(response.body), /buyer_email|company_legal_name|raw_payload|stripe_checkout_session_id|signer_token|sk_test|sk_live/i)
 })
 

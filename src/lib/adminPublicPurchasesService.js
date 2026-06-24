@@ -543,7 +543,7 @@ function sanitizePurchaseItem({ intent, agreement, client, member, emailSummary 
     agreement: agreement ? {
       id: trimText(agreement.id, 120),
       status: trimText(agreement.status, 80) || null,
-      is_current: agreement.is_current === true,
+      is_current: agreement.is_current !== false,
       checkout_status: trimText(agreement.checkout_status, 80) || null,
       checkout_session_id: trimText(agreement.checkout_session_id, 255) || null,
       sent_at: trimText(agreement.sent_at, 40) || null,
@@ -726,8 +726,8 @@ function requireAgreementLinkEligible(context) {
   const agreement = context?.agreement;
   if (!agreement?.id) throw makeActionError(409, 'agreement_missing', 'This purchase does not have an agreement yet.');
   const status = lowerText(agreement.status, 80);
-  if (agreement.is_current !== true) {
-    throw makeActionError(409, 'agreement_not_current', 'Only a current agreement link can be resent.');
+  if (agreement.is_current === false) {
+    throw makeActionError(409, 'agreement_not_current', 'Only unsigned agreements can be resent.');
   }
   if (trimText(agreement.voided_at, 40) || status === 'voided' || status === 'canceled' || status === 'cancelled' || trimText(agreement.superseded_by_agreement_id, 120)) {
     throw makeActionError(409, 'agreement_not_current', 'This agreement is voided, canceled, or superseded.');
@@ -960,11 +960,22 @@ async function resendPublicPurchaseAgreementLink(options = {}) {
   if (typeof sendAgreementEmail !== 'function') throw makeActionError(500, 'agreement_mailer_required', 'Agreement email sender is required.');
 
   enforceRecoveryRateLimit({ action: 'resend_agreement_link', purchaseIntentId, actorEmail, store: rateLimitStore });
+  let context = null;
+  let recipient = '';
   try {
-    const context = await loadPublicPurchaseRecoveryContext(db, purchaseIntentId);
-    const recipient = requireAgreementLinkEligible(context);
+    context = await loadPublicPurchaseRecoveryContext(db, purchaseIntentId);
+    recipient = requireAgreementLinkEligible(context);
+    logger.info?.('[admin/public-purchases] agreement_link_resend_eligible', {
+      request_id: requestId,
+      purchase_intent_id: purchaseIntentId,
+      agreement_id: context.agreement.id,
+      agreement_status: lowerText(context.agreement.status, 80) || null,
+      agreement_is_current: context.agreement.is_current !== false,
+      recipient: redactEmail(recipient),
+      actor: redactEmail(actorEmail)
+    });
     const recovery = generateSigningLink();
-    const { error: updateError } = await db
+    const { data: refreshedAgreement, error: updateError } = await db
       .from('membership_agreements')
       .update({
         signer_token_hash: recovery.tokenHash,
@@ -972,15 +983,31 @@ async function resendPublicPurchaseAgreementLink(options = {}) {
         updated_at: new Date().toISOString()
       })
       .eq('id', context.agreement.id)
-      .in('status', AGREEMENT_LINK_RESEND_STATUS_VALUES);
-    if (updateError) throw makeActionError(503, 'agreement_link_refresh_failed', 'Could not prepare the agreement link.');
+      .in('status', AGREEMENT_LINK_RESEND_STATUS_VALUES)
+      .select('id')
+      .maybeSingle();
+    if (updateError || !refreshedAgreement?.id) throw makeActionError(503, 'agreement_link_refresh_failed', 'Could not prepare the agreement link.');
 
-    const emailResult = await sendAgreementEmail(recipient, recovery.url, {
-      clientLegalName: context.agreement.client_legal_name || context.intent.company_legal_name,
-      primaryAdmin: context.agreement.primary_admin_name || context.item?.buyer?.name || '',
-      membershipTier: context.agreement.membership_tier || context.intent.selected_plan_key,
-      expiresOn: recovery.expiresAt
+    logger.info?.('[admin/public-purchases] agreement_link_send_attempt', {
+      request_id: requestId,
+      purchase_intent_id: purchaseIntentId,
+      agreement_id: context.agreement.id,
+      recipient: redactEmail(recipient),
+      actor: redactEmail(actorEmail)
     });
+    let emailResult;
+    try {
+      emailResult = await sendAgreementEmail(recipient, recovery.url, {
+        clientLegalName: context.agreement.client_legal_name || context.intent.company_legal_name,
+        primaryAdmin: context.agreement.primary_admin_name || context.item?.buyer?.name || '',
+        membershipTier: context.agreement.membership_tier || context.intent.selected_plan_key,
+        expiresOn: recovery.expiresAt
+      });
+    } catch (sendError) {
+      const error = makeActionError(503, 'agreement_link_email_send_failed', 'Email provider did not accept the agreement email.');
+      error.cause = sendError;
+      throw error;
+    }
     ensureEmailSent(emailResult, 'agreement_link_email_send_failed');
     logger.info?.('[admin/public-purchases] agreement_link_resent', {
       request_id: requestId,
@@ -999,6 +1026,16 @@ async function resendPublicPurchaseAgreementLink(options = {}) {
     };
   } catch (error) {
     clearRecoveryRateLimit({ action: 'resend_agreement_link', purchaseIntentId, actorEmail, store: rateLimitStore });
+    logger.warn?.('[admin/public-purchases] agreement_link_resend_failed', {
+      request_id: requestId,
+      purchase_intent_id: purchaseIntentId,
+      agreement_id: trimText(context?.agreement?.id, 120) || null,
+      recipient: recipient ? redactEmail(recipient) : null,
+      actor: redactEmail(actorEmail),
+      code: trimText(error?.code, 80) || 'agreement_link_resend_failed',
+      status: Number(error?.status) || 500,
+      detail: scrubActionDetail(error?.detail || error?.message || 'Agreement link resend failed.')
+    });
     throw error;
   }
 }

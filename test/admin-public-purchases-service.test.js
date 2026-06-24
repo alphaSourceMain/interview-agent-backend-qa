@@ -11,6 +11,7 @@ const {
   resendPublicPurchaseCheckoutLink,
   resendPublicPurchaseSetupEmail,
   resendPublicPurchaseWelcomeEmail,
+  safePublicPurchaseActionErrorBody,
 } = require('../src/lib/adminPublicPurchasesService');
 
 class FakeQuery {
@@ -217,7 +218,7 @@ function agreement(overrides = {}) {
     id: overrides.id || 'agreement-1',
     client_id: overrides.client_id || null,
     status: overrides.status || 'sent',
-    is_current: overrides.is_current !== false,
+    is_current: Object.prototype.hasOwnProperty.call(overrides, 'is_current') ? overrides.is_current : true,
     checkout_status: overrides.checkout_status || null,
     checkout_session_id: overrides.checkout_session_id || null,
     checkout_created_at: overrides.checkout_created_at || null,
@@ -524,7 +525,7 @@ test('agreement link resend is allowed for sent agreement and returns no link', 
       intent({ id: 'intent-agreement-link', status: 'agreement_pending', agreement_id: 'agreement-link' }),
     ],
     membership_agreements: [
-      agreement({ id: 'agreement-link', status: 'sent', checkout_status: null }),
+      agreement({ id: 'agreement-link', status: 'sent', checkout_status: null, is_current: null }),
     ],
   });
   const sent = [];
@@ -554,7 +555,48 @@ test('agreement link resend is allowed for sent agreement and returns no link', 
   assert.doesNotMatch(JSON.stringify(result), /membership-agreement\/sign|signer_token|tokenHash|raw_payload|secret/i);
 });
 
-test('agreement link resend rejects missing, signed, paid, voided, and canceled agreements', async () => {
+test('agreement link resend reports safe send failure and allows retry after failed attempt', async () => {
+  const db = makeDb({
+    public_purchase_intents: [
+      intent({ id: 'intent-agreement-fail', status: 'agreement_pending', agreement_id: 'agreement-fail' }),
+    ],
+    membership_agreements: [
+      agreement({ id: 'agreement-fail', status: 'sent', checkout_status: null, is_current: null }),
+    ],
+  });
+  const rateLimitStore = new Map();
+  let sendCount = 0;
+  const options = {
+    db,
+    purchaseIntentId: 'intent-agreement-fail',
+    actorEmail: 'admin@example.com',
+    logger: silentLogger,
+    rateLimitStore,
+    sendAgreementEmail: async () => {
+      sendCount += 1;
+      return sendCount === 1 ? { skipped: true } : { statusCode: 202 };
+    },
+  };
+
+  let failure;
+  try {
+    await resendPublicPurchaseAgreementLink(options);
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure);
+  assert.equal(failure.code, 'agreement_link_email_send_failed');
+  const safeBody = safePublicPurchaseActionErrorBody(failure, 'req-fail');
+  assert.equal(safeBody.code, 'agreement_link_email_send_failed');
+  assert.match(safeBody.detail, /not configured/i);
+  assert.doesNotMatch(JSON.stringify(safeBody), /membership-agreement\/sign|signer_token|tokenHash|raw_payload|secret/i);
+
+  const retry = await resendPublicPurchaseAgreementLink(options);
+  assert.equal(retry.sent, true);
+  assert.equal(sendCount, 2);
+});
+
+test('agreement link resend rejects missing, non-current, signed, paid, voided, and canceled agreements', async () => {
   const cases = [
     {
       name: 'missing agreement',
@@ -563,6 +605,15 @@ test('agreement link resend rejects missing, signed, paid, voided, and canceled 
         public_purchase_intents: [intent({ id: 'intent-missing-agreement', status: 'agreement_pending' })],
       }),
       id: 'intent-missing-agreement',
+    },
+    {
+      name: 'non-current',
+      message: /Only unsigned agreements can be resent/,
+      db: makeDb({
+        public_purchase_intents: [intent({ id: 'intent-non-current-agreement', status: 'agreement_pending', agreement_id: 'agreement-non-current' })],
+        membership_agreements: [agreement({ id: 'agreement-non-current', status: 'sent', is_current: false })],
+      }),
+      id: 'intent-non-current-agreement',
     },
     {
       name: 'signed',

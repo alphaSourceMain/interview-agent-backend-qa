@@ -83,9 +83,13 @@ const {
 } = require('./src/lib/adminPublicAnalyticsService')
 const {
   buildAdminPublicPurchasesPayload,
+  resendPublicPurchaseCheckoutLink,
+  resendPublicPurchaseSetupEmail,
+  resendPublicPurchaseWelcomeEmail,
+  safePublicPurchaseActionErrorBody,
   safePublicPurchasesErrorBody,
 } = require('./src/lib/adminPublicPurchasesService')
-const { sendSubscriptionCheckoutEmail, sendMemberRecoveryEmail } = require('./utils/mailer')
+const { sendSubscriptionCheckoutEmail, sendMemberRecoveryEmail, sendAlphaScreenWelcomeEmail } = require('./utils/mailer')
 const {
   frontendUrl: FRONTEND_URL,
   interviewAppBase: INTERVIEW_APP_BASE,
@@ -2386,6 +2390,82 @@ adminRouter.get('/public-purchases', requireAuth, requireAdmin, async (req, res)
     const body = safePublicPurchasesErrorBody(error, request_id)
     console.error('[admin/public-purchases] failed', {
       request_id,
+      code: body.code,
+      detail: body.detail
+    })
+    return sendAdminError(res, error?.status || 500, body)
+  }
+})
+
+adminRouter.post('/public-purchases/:id/resend-setup-email', requireAuth, requireAdmin, async (req, res) => {
+  const request_id = req.request_id || null
+  try {
+    const payload = await resendPublicPurchaseSetupEmail({
+      db: supabaseAdmin,
+      authAdmin: supabaseAdmin.auth?.admin,
+      purchaseIntentId: req.params.id,
+      actorEmail: req.user?.email || null,
+      requestId: request_id,
+      sendRecoveryEmail: sendMemberRecoveryEmail,
+      logger: console
+    })
+    return res.json(payload)
+  } catch (error) {
+    const body = safePublicPurchaseActionErrorBody(error, request_id)
+    console.error('[admin/public-purchases/resend-setup-email] failed', {
+      request_id,
+      purchase_intent_id: req.params.id,
+      actor: req.user?.email || null,
+      code: body.code,
+      detail: body.detail
+    })
+    return sendAdminError(res, error?.status || 500, body)
+  }
+})
+
+adminRouter.post('/public-purchases/:id/resend-welcome-email', requireAuth, requireAdmin, async (req, res) => {
+  const request_id = req.request_id || null
+  try {
+    const payload = await resendPublicPurchaseWelcomeEmail({
+      db: supabaseAdmin,
+      purchaseIntentId: req.params.id,
+      actorEmail: req.user?.email || null,
+      requestId: request_id,
+      sendWelcomeEmail: sendAlphaScreenWelcomeEmail,
+      logger: console
+    })
+    return res.json(payload)
+  } catch (error) {
+    const body = safePublicPurchaseActionErrorBody(error, request_id)
+    console.error('[admin/public-purchases/resend-welcome-email] failed', {
+      request_id,
+      purchase_intent_id: req.params.id,
+      actor: req.user?.email || null,
+      code: body.code,
+      detail: body.detail
+    })
+    return sendAdminError(res, error?.status || 500, body)
+  }
+})
+
+adminRouter.post('/public-purchases/:id/resend-checkout-link', requireAuth, requireAdmin, async (req, res) => {
+  const request_id = req.request_id || null
+  try {
+    const payload = await resendPublicPurchaseCheckoutLink({
+      db: supabaseAdmin,
+      purchaseIntentId: req.params.id,
+      actorEmail: req.user?.email || null,
+      requestId: request_id,
+      sendCheckoutEmail: sendSubscriptionCheckoutEmail,
+      logger: console
+    })
+    return res.json(payload)
+  } catch (error) {
+    const body = safePublicPurchaseActionErrorBody(error, request_id)
+    console.error('[admin/public-purchases/resend-checkout-link] failed', {
+      request_id,
+      purchase_intent_id: req.params.id,
+      actor: req.user?.email || null,
       code: body.code,
       detail: body.detail
     })

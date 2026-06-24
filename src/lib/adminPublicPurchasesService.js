@@ -1,12 +1,17 @@
 'use strict';
 
+const crypto = require('crypto');
 const { buildAlphaScreenPackageSnapshot, normalizeAlphaScreenPlanKey, normalizeBillingInterval } = require('./alphaScreenPackages');
+const { buildClientPwResetUrl, buildMembershipAgreementSignUrl } = require('../../config/urlConfig');
 
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 365;
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 const READ_LIMIT = 1000;
+const SIGNING_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const RECOVERY_ACTION_WINDOW_MS = 60 * 1000;
+const recoveryActionRateBuckets = new Map();
 const VALID_STATUS_KEYS = new Set([
   'signup_started',
   'agreement_pending',
@@ -71,6 +76,7 @@ const AGREEMENT_SELECT_COLUMNS = [
   'opened_at',
   'signed_at',
   'voided_at',
+  'superseded_by_agreement_id',
   'created_at',
   'updated_at'
 ].join(',');
@@ -97,6 +103,23 @@ function trimText(value, max = 300) {
 
 function lowerText(value, max = 300) {
   return trimText(value, max).toLowerCase();
+}
+
+function redactEmail(email) {
+  try {
+    if (!email) return '';
+    const [user, domain] = String(email).split('@');
+    if (!domain) return trimText(email, 80);
+    if (user.length <= 3) return `${user[0] || ''}***@${domain}`;
+    return `${user.slice(0, 2)}***@${domain}`;
+  } catch (_) {
+    return trimText(email, 80);
+  }
+}
+
+function defaultEnsureRecovery(args) {
+  const { ensureUserAndSendRecovery } = require('./recoveryHelper');
+  return ensureUserAndSendRecovery(args);
 }
 
 function titleCase(value) {
@@ -185,6 +208,77 @@ async function runQuery(builder, code, message = 'Could not load public purchase
     throw serviceError;
   }
   return Array.isArray(data) ? data : [];
+}
+
+async function runMaybeSingle(builder, code, message = 'Could not load public purchase record.') {
+  const { data, error } = await builder.maybeSingle();
+  if (error) {
+    const serviceError = new Error(message);
+    serviceError.code = code;
+    serviceError.status = 503;
+    serviceError.detail = error.message || null;
+    throw serviceError;
+  }
+  return data || null;
+}
+
+function makeActionError(status, code, detail) {
+  const error = new Error(detail || code);
+  error.status = status;
+  error.code = code;
+  error.detail = detail || code;
+  return error;
+}
+
+function enforceRecoveryRateLimit({ action, purchaseIntentId, actorEmail, now = new Date(), store = recoveryActionRateBuckets } = {}) {
+  const safeAction = trimText(action, 80) || 'unknown';
+  const safeIntentId = trimText(purchaseIntentId, 120) || 'unknown';
+  const safeActor = lowerText(actorEmail, 254) || 'unknown';
+  const key = `${safeActor}:${safeAction}:${safeIntentId}`;
+  const nowMs = now instanceof Date && Number.isFinite(now.getTime()) ? now.getTime() : Date.now();
+  const existing = store.get(key);
+  if (existing && existing > nowMs) {
+    throw makeActionError(429, 'recovery_action_rate_limited', 'This recovery action was just sent. Wait a minute before trying again.');
+  }
+  store.set(key, nowMs + RECOVERY_ACTION_WINDOW_MS);
+}
+
+function clearRecoveryRateLimit({ action, purchaseIntentId, actorEmail, store = recoveryActionRateBuckets } = {}) {
+  const key = `${lowerText(actorEmail, 254) || 'unknown'}:${trimText(action, 80) || 'unknown'}:${trimText(purchaseIntentId, 120) || 'unknown'}`;
+  store.delete(key);
+}
+
+function emailSendSucceeded(result) {
+  return result?.statusCode === 202;
+}
+
+function ensureEmailSent(result, code = 'recovery_email_send_failed') {
+  if (emailSendSucceeded(result)) return;
+  const detail = result?.skipped ? 'Email delivery is not configured.' : 'Email provider did not accept the recovery email.';
+  throw makeActionError(503, code, detail);
+}
+
+function appendQueryParam(url, key, value) {
+  const raw = trimText(url, 2000);
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    parsed.searchParams.set(key, value);
+    return parsed.toString();
+  } catch (_) {
+    const separator = raw.includes('?') ? '&' : '?';
+    return `${raw}${separator}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+  }
+}
+
+function generateSigningRecoveryLink() {
+  const token = crypto.randomBytes(32).toString('hex');
+  return {
+    token,
+    tokenHash: crypto.createHash('sha256').update(token).digest('hex'),
+    expiresAt: new Date(Date.now() + SIGNING_LINK_TTL_MS).toISOString(),
+    url: appendQueryParam(buildMembershipAgreementSignUrl(token), 'checkout', 'recover')
+  };
 }
 
 async function readIntentRows(db, filters) {
@@ -390,13 +484,33 @@ function matchesSearch(item, search) {
   ].some((value) => lowerText(value, 300).includes(needle));
 }
 
+function buildSupportSummary(item) {
+  const lines = [
+    'alphaScreen public purchase support summary',
+    `Status: ${trimText(item?.status?.label || item?.status?.key, 80) || 'Unknown'}`,
+    `Company: ${trimText(item?.company?.legal_name, 160) || 'Not available'}`,
+    item?.company?.dba ? `DBA: ${trimText(item.company.dba, 160)}` : '',
+    `Buyer email: ${trimText(item?.buyer?.email, 254) || 'Not available'}`,
+    `Membership: ${trimText(item?.membership?.display_name, 80) || trimText(item?.membership?.key, 40) || 'Not available'}`,
+    `Cadence: ${trimText(item?.membership?.billing_cadence, 40) || 'Not available'}`,
+    `Agreement status: ${trimText(item?.agreement?.status, 80) || 'Not available'}`,
+    `Payment status: ${trimText(item?.payment?.checkout_status || item?.payment?.billing_status, 80) || 'Not available'}`,
+    `Setup status: ${item?.account_setup?.member_user_linked ? 'member linked' : item?.account_setup?.member_found ? 'member pending user link' : 'member not found'}`,
+    `Last updated: ${trimText(item?.updated_at || item?.created_at, 40) || 'Not available'}`,
+    `Purchase intent ID: ${trimText(item?.purchase_intent_id, 120) || 'Not available'}`,
+    `Agreement ID: ${trimText(item?.agreement?.id, 120) || 'Not available'}`,
+    `Client ID: ${trimText(item?.account_setup?.client_id, 120) || 'Not available'}`
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
 function sanitizePurchaseItem({ intent, agreement, client, member, emailSummary }) {
   const buyerFirst = trimText(intent?.buyer_first_name, 80);
   const buyerLast = trimText(intent?.buyer_last_name, 80);
   const buyerName = [buyerFirst, buyerLast].filter(Boolean).join(' ');
   const membership = buildMembershipSummary(intent);
   const status = mapPublicPurchaseStatus({ intent, agreement, client, member });
-  return {
+  const item = {
     id: trimText(intent?.id, 120),
     purchase_intent_id: trimText(intent?.id, 120),
     status,
@@ -456,6 +570,8 @@ function sanitizePurchaseItem({ intent, agreement, client, member, emailSummary 
     created_at: trimText(intent?.created_at, 40) || null,
     updated_at: trimText(intent?.updated_at, 40) || null
   };
+  item.support_summary = buildSupportSummary(item);
+  return item;
 }
 
 function buildSummary(items) {
@@ -496,6 +612,306 @@ function paginate(items, page, limit) {
     has_more: offset + pageItems.length < total,
     items: pageItems
   };
+}
+
+async function loadPublicPurchaseRecoveryContext(db, purchaseIntentId) {
+  const id = trimText(purchaseIntentId, 120);
+  if (!id) throw makeActionError(400, 'purchase_intent_id_required', 'Purchase intent id is required.');
+
+  const intent = await runMaybeSingle(
+    db.from('public_purchase_intents').select(INTENT_SELECT_COLUMNS).eq('id', id),
+    'public_purchase_intent_lookup_failed',
+    'Could not load public purchase.'
+  );
+  if (!intent) throw makeActionError(404, 'public_purchase_not_found', 'Public purchase was not found.');
+
+  let agreement = null;
+  if (trimText(intent.agreement_id, 120)) {
+    agreement = await runMaybeSingle(
+      db.from('membership_agreements').select(`${AGREEMENT_SELECT_COLUMNS},signer_token_expires_at`).eq('id', intent.agreement_id),
+      'public_purchase_agreement_lookup_failed',
+      'Could not load purchase agreement.'
+    );
+  }
+
+  const clientId = trimText(intent.client_id || agreement?.client_id, 120);
+  let client = null;
+  if (clientId) {
+    client = await runMaybeSingle(
+      db.from('clients').select(CLIENT_SELECT_COLUMNS).eq('id', clientId),
+      'public_purchase_client_lookup_failed',
+      'Could not load purchase client.'
+    );
+  }
+
+  const members = clientId
+    ? await readMemberRows(db, [clientId])
+    : [];
+  const member = chooseBuyerMember(members, intent.buyer_email || agreement?.admin_email || client?.email);
+  const item = sanitizePurchaseItem({ intent, agreement, client, member, emailSummary: null });
+
+  return { intent, agreement, client, members, member, item };
+}
+
+function requirePaidPurchaseContext(context) {
+  const checkoutPaid = lowerText(context?.agreement?.checkout_status, 80) === 'paid';
+  const intentCompleted = lowerText(context?.intent?.status, 80) === 'completed';
+  if (!checkoutPaid && !intentCompleted) {
+    throw makeActionError(409, 'purchase_not_paid', 'This recovery action requires a paid public purchase.');
+  }
+  if (!trimText(context?.client?.id || context?.intent?.client_id || context?.agreement?.client_id, 120)) {
+    throw makeActionError(409, 'purchase_client_missing', 'This purchase is not linked to a client yet.');
+  }
+}
+
+function requireSetupEmailEligible(context) {
+  requirePaidPurchaseContext(context);
+  const statusKey = context?.item?.status?.key || 'unknown';
+  if (!['setup_pending', 'completed'].includes(statusKey)) {
+    throw makeActionError(409, 'setup_email_not_eligible', 'Password setup email can only be resent after payment is complete.');
+  }
+  if (!context?.member) {
+    throw makeActionError(409, 'setup_member_missing', 'No buyer member record was found for this paid purchase.');
+  }
+  const email = lowerText(context?.member?.email || context?.intent?.buyer_email || context?.agreement?.admin_email, 254);
+  if (!email) throw makeActionError(409, 'setup_recipient_missing', 'No setup email recipient was found for this purchase.');
+  return email;
+}
+
+function requireWelcomeEmailEligible(context) {
+  requirePaidPurchaseContext(context);
+  const statusKey = context?.item?.status?.key || 'unknown';
+  if (!['setup_pending', 'completed'].includes(statusKey)) {
+    throw makeActionError(409, 'welcome_email_not_eligible', 'Welcome email can only be resent after payment is complete.');
+  }
+  if (!context?.client?.id) {
+    throw makeActionError(409, 'welcome_client_missing', 'No client record was found for this public purchase.');
+  }
+  const email = lowerText(context?.intent?.buyer_email || context?.agreement?.admin_email || context?.client?.email, 254);
+  if (!email) throw makeActionError(409, 'welcome_recipient_missing', 'No welcome email recipient was found for this purchase.');
+  return email;
+}
+
+function requireCheckoutLinkEligible(context) {
+  const agreement = context?.agreement;
+  if (!agreement?.id) throw makeActionError(409, 'agreement_missing', 'This purchase does not have an agreement yet.');
+  if (lowerText(agreement.status, 80) !== 'signed' || agreement.is_current !== true) {
+    throw makeActionError(409, 'agreement_not_signed', 'Checkout recovery link can only be sent for a signed current agreement.');
+  }
+  if (lowerText(agreement.checkout_status, 80) === 'paid') {
+    throw makeActionError(409, 'agreement_already_paid', 'Checkout is already completed for this agreement.');
+  }
+  if (trimText(agreement.voided_at, 40) || lowerText(agreement.status, 80) === 'voided' || trimText(agreement.superseded_by_agreement_id, 120)) {
+    throw makeActionError(409, 'agreement_not_current', 'This agreement is voided or superseded.');
+  }
+  if (!context?.intent?.id) {
+    throw makeActionError(409, 'purchase_intent_missing', 'This checkout recovery action requires a linked public purchase intent.');
+  }
+  const email = lowerText(context?.intent?.buyer_email || agreement.admin_email, 254);
+  if (!email) throw makeActionError(409, 'checkout_recipient_missing', 'No checkout email recipient was found for this purchase.');
+  return email;
+}
+
+async function recordAdminRecoveryEmailEvent({ db, context, action, email, status, result, actorEmail, nowIso }) {
+  try {
+    const { error } = await db
+      .from('email_delivery_events')
+      .insert({
+        event_type: `admin_${action}`,
+        event_at: nowIso,
+        email,
+        category: action,
+        email_category: action.includes('welcome') ? 'public_purchase_welcome' : action,
+        custom_args: {
+          source: 'admin_public_purchase_recovery',
+          action,
+          actor_email: lowerText(actorEmail, 254) || null,
+          purchase_intent_id: trimText(context?.intent?.id, 120) || null,
+          agreement_id: trimText(context?.agreement?.id, 120) || null,
+          client_id: trimText(context?.client?.id || context?.intent?.client_id || context?.agreement?.client_id, 120) || null
+        },
+        status,
+        response: result?.skipped ? 'skipped' : result?.statusCode ? `status:${result.statusCode}` : null,
+        raw_payload: {
+          source: 'admin_public_purchase_recovery',
+          action,
+          purchase_intent_id: trimText(context?.intent?.id, 120) || null,
+          agreement_id: trimText(context?.agreement?.id, 120) || null,
+          client_id: trimText(context?.client?.id || context?.intent?.client_id || context?.agreement?.client_id, 120) || null
+        },
+        is_problem: status !== 'sent',
+        is_time_sensitive: false
+      });
+    return error ? { recorded: false, error: error.message || 'email_event_insert_failed' } : { recorded: true };
+  } catch (error) {
+    return { recorded: false, error: error?.message || 'email_event_insert_failed' };
+  }
+}
+
+async function resendPublicPurchaseSetupEmail(options = {}) {
+  const db = options.db;
+  const authAdmin = options.authAdmin;
+  const purchaseIntentId = trimText(options.purchaseIntentId, 120);
+  const actorEmail = lowerText(options.actorEmail, 254);
+  const requestId = trimText(options.requestId, 120) || null;
+  const logger = options.logger || console;
+  const ensureRecovery = options.ensureRecovery || defaultEnsureRecovery;
+  const sendRecoveryEmail = options.sendRecoveryEmail;
+  const rateLimitStore = options.rateLimitStore || recoveryActionRateBuckets;
+  if (!db || typeof db.from !== 'function') throw makeActionError(500, 'database_client_required', 'Database client is required.');
+  if (!authAdmin && !options.ensureRecovery) throw makeActionError(500, 'auth_admin_required', 'Auth admin client is required.');
+  if (typeof sendRecoveryEmail !== 'function') throw makeActionError(500, 'recovery_mailer_required', 'Recovery email sender is required.');
+
+  enforceRecoveryRateLimit({ action: 'resend_setup_email', purchaseIntentId, actorEmail, store: rateLimitStore });
+  try {
+    const context = await loadPublicPurchaseRecoveryContext(db, purchaseIntentId);
+    const recipient = requireSetupEmailEligible(context);
+    const clientId = trimText(context.client?.id || context.intent.client_id || context.agreement?.client_id, 120);
+    const redirectTo = buildClientPwResetUrl({
+      origin: 'admin_public_purchase_recovery',
+      checkout: 'success',
+      client_id: clientId
+    });
+    const ensured = await ensureRecovery({
+      email: recipient,
+      redirectTo,
+      request_id: requestId,
+      loggerPrefix: '[admin/public-purchases/resend-setup-email]'
+    });
+    const userId = trimText(ensured?.userId, 120);
+    if (userId && context.member && !trimText(context.member.user_id, 120)) {
+      const { error } = await db
+        .from('client_members')
+        .update({ user_id: userId })
+        .eq('client_id', clientId)
+        .eq('email', recipient);
+      if (error) throw makeActionError(503, 'setup_member_link_failed', 'Could not link the buyer member to the recovered user.');
+    }
+    const actionLink = trimText(ensured?.actionLink, 2000);
+    if (!actionLink) throw makeActionError(503, 'setup_link_unavailable', 'Could not create a password setup link.');
+    const emailResult = await sendRecoveryEmail(recipient, actionLink, context.item?.buyer?.name || recipient);
+    ensureEmailSent(emailResult, 'setup_email_send_failed');
+    logger.info?.('[admin/public-purchases] setup_email_resent', {
+      request_id: requestId,
+      purchase_intent_id: purchaseIntentId,
+      recipient: redactEmail(recipient),
+      actor: redactEmail(actorEmail)
+    });
+    return {
+      ok: true,
+      sent: true,
+      recipient,
+      message: 'Password setup email sent.',
+      request_id: requestId
+    };
+  } catch (error) {
+    clearRecoveryRateLimit({ action: 'resend_setup_email', purchaseIntentId, actorEmail, store: rateLimitStore });
+    throw error;
+  }
+}
+
+async function resendPublicPurchaseWelcomeEmail(options = {}) {
+  const db = options.db;
+  const purchaseIntentId = trimText(options.purchaseIntentId, 120);
+  const actorEmail = lowerText(options.actorEmail, 254);
+  const requestId = trimText(options.requestId, 120) || null;
+  const logger = options.logger || console;
+  const sendWelcomeEmail = options.sendWelcomeEmail;
+  const rateLimitStore = options.rateLimitStore || recoveryActionRateBuckets;
+  if (!db || typeof db.from !== 'function') throw makeActionError(500, 'database_client_required', 'Database client is required.');
+  if (typeof sendWelcomeEmail !== 'function') throw makeActionError(500, 'welcome_mailer_required', 'Welcome email sender is required.');
+
+  enforceRecoveryRateLimit({ action: 'resend_welcome_email', purchaseIntentId, actorEmail, store: rateLimitStore });
+  try {
+    const context = await loadPublicPurchaseRecoveryContext(db, purchaseIntentId);
+    const recipient = requireWelcomeEmailEligible(context);
+    const emailResult = await sendWelcomeEmail(recipient, {
+      firstName: context.intent?.buyer_first_name || context.item?.buyer?.name || '',
+      clientId: context.client?.id || context.intent?.client_id || context.agreement?.client_id || '',
+      agreementId: context.agreement?.id || '',
+      purchaseIntentId: context.intent?.id || ''
+    });
+    ensureEmailSent(emailResult, 'welcome_email_send_failed');
+    const nowIso = new Date().toISOString();
+    const ledger = await recordAdminRecoveryEmailEvent({
+      db,
+      context,
+      action: 'admin_public_purchase_welcome_resend',
+      email: recipient,
+      status: 'sent',
+      result: emailResult,
+      actorEmail,
+      nowIso
+    });
+    logger.info?.('[admin/public-purchases] welcome_email_resent', {
+      request_id: requestId,
+      purchase_intent_id: purchaseIntentId,
+      recipient: redactEmail(recipient),
+      actor: redactEmail(actorEmail),
+      ledger_recorded: ledger.recorded
+    });
+    return {
+      ok: true,
+      sent: true,
+      recipient,
+      message: 'Welcome email sent.',
+      email_event_recorded: ledger.recorded,
+      request_id: requestId
+    };
+  } catch (error) {
+    clearRecoveryRateLimit({ action: 'resend_welcome_email', purchaseIntentId, actorEmail, store: rateLimitStore });
+    throw error;
+  }
+}
+
+async function resendPublicPurchaseCheckoutLink(options = {}) {
+  const db = options.db;
+  const purchaseIntentId = trimText(options.purchaseIntentId, 120);
+  const actorEmail = lowerText(options.actorEmail, 254);
+  const requestId = trimText(options.requestId, 120) || null;
+  const logger = options.logger || console;
+  const sendCheckoutEmail = options.sendCheckoutEmail;
+  const rateLimitStore = options.rateLimitStore || recoveryActionRateBuckets;
+  if (!db || typeof db.from !== 'function') throw makeActionError(500, 'database_client_required', 'Database client is required.');
+  if (typeof sendCheckoutEmail !== 'function') throw makeActionError(500, 'checkout_mailer_required', 'Checkout email sender is required.');
+
+  enforceRecoveryRateLimit({ action: 'resend_checkout_link', purchaseIntentId, actorEmail, store: rateLimitStore });
+  try {
+    const context = await loadPublicPurchaseRecoveryContext(db, purchaseIntentId);
+    const recipient = requireCheckoutLinkEligible(context);
+    const recovery = generateSigningRecoveryLink();
+    const { error: updateError } = await db
+      .from('membership_agreements')
+      .update({
+        signer_token_hash: recovery.tokenHash,
+        signer_token_expires_at: recovery.expiresAt,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', context.agreement.id)
+      .eq('status', 'signed');
+    if (updateError) throw makeActionError(503, 'checkout_link_refresh_failed', 'Could not prepare the checkout recovery link.');
+
+    const emailResult = await sendCheckoutEmail(recipient, recovery.url, context.item?.buyer?.name || recipient);
+    ensureEmailSent(emailResult, 'checkout_link_email_send_failed');
+    logger.info?.('[admin/public-purchases] checkout_link_resent', {
+      request_id: requestId,
+      purchase_intent_id: purchaseIntentId,
+      agreement_id: context.agreement.id,
+      recipient: redactEmail(recipient),
+      actor: redactEmail(actorEmail)
+    });
+    return {
+      ok: true,
+      sent: true,
+      recipient,
+      message: 'Checkout recovery link sent.',
+      expires_at: recovery.expiresAt,
+      request_id: requestId
+    };
+  } catch (error) {
+    clearRecoveryRateLimit({ action: 'resend_checkout_link', purchaseIntentId, actorEmail, store: rateLimitStore });
+    throw error;
+  }
 }
 
 async function buildAdminPublicPurchasesPayload({ db, query = {}, now = new Date(), requestId = null } = {}) {
@@ -582,9 +998,30 @@ function safePublicPurchasesErrorBody(error, requestId = null) {
   };
 }
 
+function scrubActionDetail(value) {
+  return trimText(value, 500)
+    .replace(/https?:\/\/[^\s]+/gi, '[redacted-link]')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/sk_[A-Za-z0-9._-]+/gi, '[redacted]')
+    .replace(/[A-Fa-f0-9]{64,}/g, '[redacted-token]');
+}
+
+function safePublicPurchaseActionErrorBody(error, requestId = null) {
+  return {
+    error: trimText(error?.code, 80) || 'public_purchase_recovery_failed',
+    code: trimText(error?.code, 80) || 'public_purchase_recovery_failed',
+    detail: scrubActionDetail(error?.detail || error?.message || 'Public purchase recovery action failed.'),
+    request_id: requestId || null
+  };
+}
+
 module.exports = {
   buildAdminPublicPurchasesPayload,
   mapPublicPurchaseStatus,
   parseFilters,
+  resendPublicPurchaseCheckoutLink,
+  resendPublicPurchaseSetupEmail,
+  resendPublicPurchaseWelcomeEmail,
+  safePublicPurchaseActionErrorBody,
   safePublicPurchasesErrorBody
 };

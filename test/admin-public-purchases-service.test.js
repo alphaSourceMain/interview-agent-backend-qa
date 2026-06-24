@@ -376,6 +376,47 @@ test('support summary is returned with safe fields only', async () => {
   assert.doesNotMatch(summary, /raw_payload|signer_token|signature_hash|draft_pdf|secret|Bearer/i);
 });
 
+test('agreement-pending row summary and resend action use the same unsigned agreement', async () => {
+  const db = makeDb({
+    public_purchase_intents: [
+      intent({ id: 'intent-row-resend', status: 'agreement_pending', agreement_id: 'agreement-row-resend', created_at: '2026-06-24T10:00:00.000Z' }),
+    ],
+    membership_agreements: [
+      agreement({ id: 'agreement-row-resend', status: 'sent', checkout_status: null, is_current: false, signed_at: null }),
+    ],
+  });
+
+  const payload = await buildAdminPublicPurchasesPayload({ db, now: NOW, query: { days: '7' } });
+  const row = payload.purchases.items[0];
+  assert.equal(row.status.key, 'agreement_pending');
+  assert.equal(row.agreement.id, 'agreement-row-resend');
+  assert.equal(row.agreement.status, 'sent');
+  assert.equal(row.agreement.signed_at, null);
+  assert.equal(row.recovery_actions.resend_agreement_link.eligible, true);
+  assert.equal(row.recovery_actions.resend_agreement_link.reason, 'eligible');
+
+  const sent = [];
+  const result = await resendPublicPurchaseAgreementLink({
+    db,
+    purchaseIntentId: row.purchase_intent_id,
+    actorEmail: 'admin@example.com',
+    logger: silentLogger,
+    rateLimitStore: new Map(),
+    sendAgreementEmail: async (to, link) => {
+      sent.push({ to, link });
+      return { statusCode: 202 };
+    },
+  });
+
+  assert.equal(result.sent, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to, 'alex@example.com');
+  assert.match(sent[0].link, /\/membership-agreement\/sign\//);
+  assert.equal(db.tables.membership_agreements[0].id, 'agreement-row-resend');
+  assert.equal(String(db.tables.membership_agreements[0].signer_token_hash || '').length, 64);
+  assert.doesNotMatch(JSON.stringify(result), /membership-agreement\/sign|signer_token|tokenHash|raw_payload|secret/i);
+});
+
 test('setup email resend is allowed for paid setup-pending purchase and does not expose token', async () => {
   const db = makeDb({
     public_purchase_intents: [
@@ -525,7 +566,7 @@ test('agreement link resend is allowed for sent agreement and returns no link', 
       intent({ id: 'intent-agreement-link', status: 'agreement_pending', agreement_id: 'agreement-link' }),
     ],
     membership_agreements: [
-      agreement({ id: 'agreement-link', status: 'sent', checkout_status: null, is_current: null }),
+      agreement({ id: 'agreement-link', status: 'sent', checkout_status: null, is_current: false }),
     ],
   });
   const sent = [];
@@ -596,28 +637,21 @@ test('agreement link resend reports safe send failure and allows retry after fai
   assert.equal(sendCount, 2);
 });
 
-test('agreement link resend rejects missing, non-current, signed, paid, voided, and canceled agreements', async () => {
+test('agreement link resend rejects with safe machine-readable reasons', async () => {
   const cases = [
     {
       name: 'missing agreement',
       message: /does not have an agreement/,
+      code: 'agreement_missing',
       db: makeDb({
         public_purchase_intents: [intent({ id: 'intent-missing-agreement', status: 'agreement_pending' })],
       }),
       id: 'intent-missing-agreement',
     },
     {
-      name: 'non-current',
-      message: /Only unsigned agreements can be resent/,
-      db: makeDb({
-        public_purchase_intents: [intent({ id: 'intent-non-current-agreement', status: 'agreement_pending', agreement_id: 'agreement-non-current' })],
-        membership_agreements: [agreement({ id: 'agreement-non-current', status: 'sent', is_current: false })],
-      }),
-      id: 'intent-non-current-agreement',
-    },
-    {
       name: 'signed',
       message: /before signature/,
+      code: 'agreement_already_signed',
       db: makeDb({
         public_purchase_intents: [intent({ id: 'intent-signed-agreement', status: 'signed_unpaid', agreement_id: 'agreement-signed' })],
         membership_agreements: [agreement({ id: 'agreement-signed', status: 'signed', signed_at: '2026-06-24T10:10:00.000Z' })],
@@ -627,6 +661,7 @@ test('agreement link resend rejects missing, non-current, signed, paid, voided, 
     {
       name: 'paid',
       message: /completed checkout/,
+      code: 'agreement_paid',
       db: makeDb({
         public_purchase_intents: [intent({ id: 'intent-paid-agreement', status: 'completed', agreement_id: 'agreement-paid', client_id: 'client-paid' })],
         membership_agreements: [agreement({ id: 'agreement-paid', status: 'sent', checkout_status: 'paid', checkout_paid_at: '2026-06-24T10:20:00.000Z' })],
@@ -635,7 +670,8 @@ test('agreement link resend rejects missing, non-current, signed, paid, voided, 
     },
     {
       name: 'voided',
-      message: /voided, canceled, or superseded/,
+      message: /voided/,
+      code: 'agreement_voided',
       db: makeDb({
         public_purchase_intents: [intent({ id: 'intent-voided-agreement', status: 'canceled', agreement_id: 'agreement-voided' })],
         membership_agreements: [agreement({ id: 'agreement-voided', status: 'voided', voided_at: '2026-06-24T10:20:00.000Z' })],
@@ -644,28 +680,66 @@ test('agreement link resend rejects missing, non-current, signed, paid, voided, 
     },
     {
       name: 'canceled',
-      message: /voided, canceled, or superseded/,
+      message: /canceled/,
+      code: 'agreement_canceled',
       db: makeDb({
         public_purchase_intents: [intent({ id: 'intent-canceled-agreement', status: 'canceled', agreement_id: 'agreement-canceled' })],
         membership_agreements: [agreement({ id: 'agreement-canceled', status: 'canceled' })],
       }),
       id: 'intent-canceled-agreement',
     },
+    {
+      name: 'superseded',
+      message: /superseded/,
+      code: 'agreement_superseded',
+      db: makeDb({
+        public_purchase_intents: [intent({ id: 'intent-superseded-agreement', status: 'agreement_pending', agreement_id: 'agreement-superseded' })],
+        membership_agreements: [{ ...agreement({ id: 'agreement-superseded', status: 'sent' }), superseded_by_agreement_id: 'agreement-new' }],
+      }),
+      id: 'intent-superseded-agreement',
+    },
+    {
+      name: 'not pending',
+      message: /agreement-pending/,
+      code: 'not_agreement_pending',
+      db: makeDb({
+        public_purchase_intents: [intent({ id: 'intent-draft-agreement', status: 'agreement_pending', agreement_id: 'agreement-draft' })],
+        membership_agreements: [agreement({ id: 'agreement-draft', status: 'draft' })],
+      }),
+      id: 'intent-draft-agreement',
+    },
+    {
+      name: 'recipient missing',
+      message: /recipient/,
+      code: 'recipient_missing',
+      db: makeDb({
+        public_purchase_intents: [{ ...intent({ id: 'intent-missing-recipient', status: 'agreement_pending', agreement_id: 'agreement-missing-recipient' }), buyer_email: '' }],
+        membership_agreements: [{ ...agreement({ id: 'agreement-missing-recipient', status: 'sent' }), admin_email: '' }],
+      }),
+      id: 'intent-missing-recipient',
+    },
   ];
 
   for (const item of cases) {
-    await assert.rejects(
-      () => resendPublicPurchaseAgreementLink({
+    let failure;
+    try {
+      await resendPublicPurchaseAgreementLink({
         db: item.db,
         purchaseIntentId: item.id,
         actorEmail: 'admin@example.com',
         logger: silentLogger,
         rateLimitStore: new Map(),
         sendAgreementEmail: async () => ({ statusCode: 202 }),
-      }),
-      item.message,
-      item.name
-    );
+      });
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok(failure, item.name);
+    assert.equal(failure.code, item.code, item.name);
+    assert.match(failure.message, item.message, item.name);
+    const body = safePublicPurchaseActionErrorBody(failure, 'req-ineligible');
+    assert.equal(body.code, item.code, item.name);
+    assert.doesNotMatch(JSON.stringify(body), /membership-agreement\/sign|signer_token|tokenHash|raw_payload|secret/i);
   }
 });
 
@@ -762,9 +836,14 @@ test('agreement link resend guards rapid duplicate sends', async () => {
 
   const first = await resendPublicPurchaseAgreementLink(options);
   assert.equal(first.sent, true);
-  await assert.rejects(
-    () => resendPublicPurchaseAgreementLink(options),
-    /just sent/
-  );
+  let failure;
+  try {
+    await resendPublicPurchaseAgreementLink(options);
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure);
+  assert.equal(failure.code, 'rate_limited');
+  assert.match(failure.message, /just sent/);
   assert.equal(sendCount, 1);
 });

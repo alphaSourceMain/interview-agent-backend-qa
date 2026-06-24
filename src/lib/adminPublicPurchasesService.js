@@ -240,7 +240,7 @@ function enforceRecoveryRateLimit({ action, purchaseIntentId, actorEmail, now = 
   const nowMs = now instanceof Date && Number.isFinite(now.getTime()) ? now.getTime() : Date.now();
   const existing = store.get(key);
   if (existing && existing > nowMs) {
-    throw makeActionError(429, 'recovery_action_rate_limited', 'This recovery action was just sent. Wait a minute before trying again.');
+    throw makeActionError(429, 'rate_limited', 'This recovery action was just sent. Wait a minute before trying again.');
   }
   store.set(key, nowMs + RECOVERY_ACTION_WINDOW_MS);
 }
@@ -461,7 +461,7 @@ function mapPublicPurchaseStatus({ intent, agreement, client, member } = {}) {
     key = 'checkout_pending';
   } else if (agreementStatus === 'signed') {
     key = 'signed_unpaid';
-  } else if (intentStatus === 'agreement_pending' || agreementStatus === 'sent' || agreementStatus === 'draft') {
+  } else if (intentStatus === 'agreement_pending' || AGREEMENT_LINK_RESEND_STATUSES.has(agreementStatus) || agreementStatus === 'draft') {
     key = 'agreement_pending';
   } else if (intentStatus === 'pending') {
     key = 'signup_started';
@@ -470,6 +470,84 @@ function mapPublicPurchaseStatus({ intent, agreement, client, member } = {}) {
   return {
     key,
     label: STATUS_LABELS[key] || STATUS_LABELS.unknown
+  };
+}
+
+function buildAgreementLinkResendEligibility({ intent, agreement, item } = {}) {
+  if (!agreement?.id) {
+    return {
+      eligible: false,
+      code: 'agreement_missing',
+      detail: 'This purchase does not have an agreement yet.'
+    };
+  }
+
+  const status = lowerText(agreement.status, 80);
+  const mappedStatus = lowerText(item?.status?.key || mapPublicPurchaseStatus({ intent, agreement }).key, 80);
+  if (trimText(agreement.voided_at, 40) || status === 'voided') {
+    return {
+      eligible: false,
+      code: 'agreement_voided',
+      detail: 'This agreement is voided.'
+    };
+  }
+  if (status === 'canceled' || status === 'cancelled') {
+    return {
+      eligible: false,
+      code: 'agreement_canceled',
+      detail: 'This agreement is canceled.'
+    };
+  }
+  if (trimText(agreement.superseded_by_agreement_id, 120)) {
+    return {
+      eligible: false,
+      code: 'agreement_superseded',
+      detail: 'This agreement is superseded.'
+    };
+  }
+  if (status === 'signed' || trimText(agreement.signed_at, 40)) {
+    return {
+      eligible: false,
+      code: 'agreement_already_signed',
+      detail: 'Agreement link can only be resent before signature.'
+    };
+  }
+  if (lowerText(agreement.checkout_status, 80) === 'paid' || trimText(agreement.checkout_paid_at, 40)) {
+    return {
+      eligible: false,
+      code: 'agreement_paid',
+      detail: 'This agreement has already completed checkout.'
+    };
+  }
+  if (mappedStatus && mappedStatus !== 'agreement_pending') {
+    return {
+      eligible: false,
+      code: 'not_agreement_pending',
+      detail: 'Agreement link can only be resent for an agreement-pending public purchase.'
+    };
+  }
+  if (!AGREEMENT_LINK_RESEND_STATUSES.has(status)) {
+    return {
+      eligible: false,
+      code: 'not_agreement_pending',
+      detail: 'Agreement link can only be resent for an agreement-pending sent agreement awaiting signature.'
+    };
+  }
+
+  const recipient = lowerText(intent?.buyer_email || agreement.admin_email, 254);
+  if (!recipient) {
+    return {
+      eligible: false,
+      code: 'recipient_missing',
+      detail: 'No agreement email recipient was found for this purchase.'
+    };
+  }
+
+  return {
+    eligible: true,
+    code: 'eligible',
+    detail: 'Agreement link can be resent.',
+    recipient
   };
 }
 
@@ -579,6 +657,13 @@ function sanitizePurchaseItem({ intent, agreement, client, member, emailSummary 
     expires_at: trimText(intent?.expires_at, 40) || null,
     created_at: trimText(intent?.created_at, 40) || null,
     updated_at: trimText(intent?.updated_at, 40) || null
+  };
+  const agreementLinkEligibility = buildAgreementLinkResendEligibility({ intent, agreement, item });
+  item.recovery_actions = {
+    resend_agreement_link: {
+      eligible: agreementLinkEligibility.eligible === true,
+      reason: agreementLinkEligibility.code
+    }
   };
   item.support_summary = buildSupportSummary(item);
   return item;
@@ -723,27 +808,11 @@ function requireCheckoutLinkEligible(context) {
 }
 
 function requireAgreementLinkEligible(context) {
-  const agreement = context?.agreement;
-  if (!agreement?.id) throw makeActionError(409, 'agreement_missing', 'This purchase does not have an agreement yet.');
-  const status = lowerText(agreement.status, 80);
-  if (agreement.is_current === false) {
-    throw makeActionError(409, 'agreement_not_current', 'Only unsigned agreements can be resent.');
+  const eligibility = buildAgreementLinkResendEligibility(context);
+  if (!eligibility.eligible) {
+    throw makeActionError(409, eligibility.code, eligibility.detail);
   }
-  if (trimText(agreement.voided_at, 40) || status === 'voided' || status === 'canceled' || status === 'cancelled' || trimText(agreement.superseded_by_agreement_id, 120)) {
-    throw makeActionError(409, 'agreement_not_current', 'This agreement is voided, canceled, or superseded.');
-  }
-  if (status === 'signed' || trimText(agreement.signed_at, 40)) {
-    throw makeActionError(409, 'agreement_already_signed', 'Agreement link can only be resent before signature.');
-  }
-  if (lowerText(agreement.checkout_status, 80) === 'paid' || trimText(agreement.checkout_paid_at, 40)) {
-    throw makeActionError(409, 'agreement_already_paid', 'This agreement has already completed checkout.');
-  }
-  if (!AGREEMENT_LINK_RESEND_STATUSES.has(status)) {
-    throw makeActionError(409, 'agreement_link_not_eligible', 'Agreement link can only be resent for a sent agreement awaiting signature.');
-  }
-  const email = lowerText(context?.intent?.buyer_email || agreement.admin_email, 254);
-  if (!email) throw makeActionError(409, 'agreement_recipient_missing', 'No agreement email recipient was found for this purchase.');
-  return email;
+  return eligibility.recipient;
 }
 
 async function recordAdminRecoveryEmailEvent({ db, context, action, email, status, result, actorEmail, nowIso }) {

@@ -36,6 +36,8 @@ const STATUS_LABELS = Object.freeze({
 });
 const LIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
 const FAILED_SUBSCRIPTION_STATUSES = new Set(['past_due', 'unpaid', 'incomplete_expired']);
+const AGREEMENT_LINK_RESEND_STATUS_VALUES = ['sent', 'pending_signature', 'signature_pending'];
+const AGREEMENT_LINK_RESEND_STATUSES = new Set(AGREEMENT_LINK_RESEND_STATUS_VALUES);
 const INTENT_SELECT_COLUMNS = [
   'id',
   'status',
@@ -271,13 +273,14 @@ function appendQueryParam(url, key, value) {
   }
 }
 
-function generateSigningRecoveryLink() {
+function generateSigningLink({ checkoutRecovery = false } = {}) {
   const token = crypto.randomBytes(32).toString('hex');
+  const signingUrl = buildMembershipAgreementSignUrl(token);
   return {
     token,
     tokenHash: crypto.createHash('sha256').update(token).digest('hex'),
     expiresAt: new Date(Date.now() + SIGNING_LINK_TTL_MS).toISOString(),
-    url: appendQueryParam(buildMembershipAgreementSignUrl(token), 'checkout', 'recover')
+    url: checkoutRecovery ? appendQueryParam(signingUrl, 'checkout', 'recover') : signingUrl
   };
 }
 
@@ -485,6 +488,12 @@ function matchesSearch(item, search) {
 }
 
 function buildSupportSummary(item) {
+  const statusKey = lowerText(item?.status?.key, 80);
+  const workflowNote = statusKey === 'agreement_pending'
+    ? 'Next step: agreement sent; buyer signature is pending. Checkout is unavailable until the agreement is signed.'
+    : statusKey === 'setup_pending'
+      ? 'Next step: payment appears complete; password setup or member user linking is pending.'
+      : '';
   const lines = [
     'alphaScreen public purchase support summary',
     `Status: ${trimText(item?.status?.label || item?.status?.key, 80) || 'Unknown'}`,
@@ -496,6 +505,7 @@ function buildSupportSummary(item) {
     `Agreement status: ${trimText(item?.agreement?.status, 80) || 'Not available'}`,
     `Payment status: ${trimText(item?.payment?.checkout_status || item?.payment?.billing_status, 80) || 'Not available'}`,
     `Setup status: ${item?.account_setup?.member_user_linked ? 'member linked' : item?.account_setup?.member_found ? 'member pending user link' : 'member not found'}`,
+    workflowNote,
     `Last updated: ${trimText(item?.updated_at || item?.created_at, 40) || 'Not available'}`,
     `Purchase intent ID: ${trimText(item?.purchase_intent_id, 120) || 'Not available'}`,
     `Agreement ID: ${trimText(item?.agreement?.id, 120) || 'Not available'}`,
@@ -712,6 +722,30 @@ function requireCheckoutLinkEligible(context) {
   return email;
 }
 
+function requireAgreementLinkEligible(context) {
+  const agreement = context?.agreement;
+  if (!agreement?.id) throw makeActionError(409, 'agreement_missing', 'This purchase does not have an agreement yet.');
+  const status = lowerText(agreement.status, 80);
+  if (agreement.is_current !== true) {
+    throw makeActionError(409, 'agreement_not_current', 'Only a current agreement link can be resent.');
+  }
+  if (trimText(agreement.voided_at, 40) || status === 'voided' || status === 'canceled' || status === 'cancelled' || trimText(agreement.superseded_by_agreement_id, 120)) {
+    throw makeActionError(409, 'agreement_not_current', 'This agreement is voided, canceled, or superseded.');
+  }
+  if (status === 'signed' || trimText(agreement.signed_at, 40)) {
+    throw makeActionError(409, 'agreement_already_signed', 'Agreement link can only be resent before signature.');
+  }
+  if (lowerText(agreement.checkout_status, 80) === 'paid' || trimText(agreement.checkout_paid_at, 40)) {
+    throw makeActionError(409, 'agreement_already_paid', 'This agreement has already completed checkout.');
+  }
+  if (!AGREEMENT_LINK_RESEND_STATUSES.has(status)) {
+    throw makeActionError(409, 'agreement_link_not_eligible', 'Agreement link can only be resent for a sent agreement awaiting signature.');
+  }
+  const email = lowerText(context?.intent?.buyer_email || agreement.admin_email, 254);
+  if (!email) throw makeActionError(409, 'agreement_recipient_missing', 'No agreement email recipient was found for this purchase.');
+  return email;
+}
+
 async function recordAdminRecoveryEmailEvent({ db, context, action, email, status, result, actorEmail, nowIso }) {
   try {
     const { error } = await db
@@ -879,7 +913,7 @@ async function resendPublicPurchaseCheckoutLink(options = {}) {
   try {
     const context = await loadPublicPurchaseRecoveryContext(db, purchaseIntentId);
     const recipient = requireCheckoutLinkEligible(context);
-    const recovery = generateSigningRecoveryLink();
+    const recovery = generateSigningLink({ checkoutRecovery: true });
     const { error: updateError } = await db
       .from('membership_agreements')
       .update({
@@ -910,6 +944,61 @@ async function resendPublicPurchaseCheckoutLink(options = {}) {
     };
   } catch (error) {
     clearRecoveryRateLimit({ action: 'resend_checkout_link', purchaseIntentId, actorEmail, store: rateLimitStore });
+    throw error;
+  }
+}
+
+async function resendPublicPurchaseAgreementLink(options = {}) {
+  const db = options.db;
+  const purchaseIntentId = trimText(options.purchaseIntentId, 120);
+  const actorEmail = lowerText(options.actorEmail, 254);
+  const requestId = trimText(options.requestId, 120) || null;
+  const logger = options.logger || console;
+  const sendAgreementEmail = options.sendAgreementEmail;
+  const rateLimitStore = options.rateLimitStore || recoveryActionRateBuckets;
+  if (!db || typeof db.from !== 'function') throw makeActionError(500, 'database_client_required', 'Database client is required.');
+  if (typeof sendAgreementEmail !== 'function') throw makeActionError(500, 'agreement_mailer_required', 'Agreement email sender is required.');
+
+  enforceRecoveryRateLimit({ action: 'resend_agreement_link', purchaseIntentId, actorEmail, store: rateLimitStore });
+  try {
+    const context = await loadPublicPurchaseRecoveryContext(db, purchaseIntentId);
+    const recipient = requireAgreementLinkEligible(context);
+    const recovery = generateSigningLink();
+    const { error: updateError } = await db
+      .from('membership_agreements')
+      .update({
+        signer_token_hash: recovery.tokenHash,
+        signer_token_expires_at: recovery.expiresAt,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', context.agreement.id)
+      .in('status', AGREEMENT_LINK_RESEND_STATUS_VALUES);
+    if (updateError) throw makeActionError(503, 'agreement_link_refresh_failed', 'Could not prepare the agreement link.');
+
+    const emailResult = await sendAgreementEmail(recipient, recovery.url, {
+      clientLegalName: context.agreement.client_legal_name || context.intent.company_legal_name,
+      primaryAdmin: context.agreement.primary_admin_name || context.item?.buyer?.name || '',
+      membershipTier: context.agreement.membership_tier || context.intent.selected_plan_key,
+      expiresOn: recovery.expiresAt
+    });
+    ensureEmailSent(emailResult, 'agreement_link_email_send_failed');
+    logger.info?.('[admin/public-purchases] agreement_link_resent', {
+      request_id: requestId,
+      purchase_intent_id: purchaseIntentId,
+      agreement_id: context.agreement.id,
+      recipient: redactEmail(recipient),
+      actor: redactEmail(actorEmail)
+    });
+    return {
+      ok: true,
+      sent: true,
+      recipient,
+      message: 'Agreement link sent.',
+      expires_at: recovery.expiresAt,
+      request_id: requestId
+    };
+  } catch (error) {
+    clearRecoveryRateLimit({ action: 'resend_agreement_link', purchaseIntentId, actorEmail, store: rateLimitStore });
     throw error;
   }
 }
@@ -1019,6 +1108,7 @@ module.exports = {
   buildAdminPublicPurchasesPayload,
   mapPublicPurchaseStatus,
   parseFilters,
+  resendPublicPurchaseAgreementLink,
   resendPublicPurchaseCheckoutLink,
   resendPublicPurchaseSetupEmail,
   resendPublicPurchaseWelcomeEmail,

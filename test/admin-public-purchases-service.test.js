@@ -243,6 +243,7 @@ function agreement(overrides = {}) {
 test('admin public purchases route is registered behind admin auth', () => {
   const appSource = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
   assert.match(appSource, /adminRouter\.get\('\/public-purchases', requireAuth, requireAdmin/);
+  assert.match(appSource, /adminRouter\.get\('\/public-purchases\/playbook\.pdf', requireAuth, requireAdmin/);
   assert.match(appSource, /adminRouter\.post\('\/public-purchases\/:id\/resend-setup-email', requireAuth, requireAdmin/);
   assert.match(appSource, /adminRouter\.post\('\/public-purchases\/:id\/resend-welcome-email', requireAuth, requireAdmin/);
   assert.match(appSource, /adminRouter\.post\('\/public-purchases\/:id\/resend-agreement-link', requireAuth, requireAdmin/);
@@ -250,6 +251,9 @@ test('admin public purchases route is registered behind admin auth', () => {
   assert.match(appSource, /buildAdminPublicPurchasesPayload/);
   assert.match(appSource, /safePublicPurchasesErrorBody/);
   assert.match(appSource, /safePublicPurchaseActionErrorBody/);
+  assert.match(appSource, /Content-Type', 'application\/pdf'/);
+  assert.match(appSource, /Content-Disposition', 'attachment; filename="alphascreen-public-purchase-support-playbook\.pdf"'/);
+  assert.match(appSource, /Cache-Control', 'private, no-store'/);
 });
 
 test('public purchase status mapping covers key workflow states', () => {

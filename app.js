@@ -46,6 +46,7 @@ if (SENTRY_ENABLED) {
 const express = require('express')
 const cors = require('cors')
 const crypto = require('crypto')
+const fs = require('fs')
 const multer = require('multer')
 const path = require('path')
 const { supabaseAdmin } = require('./src/lib/supabaseClient')
@@ -1559,6 +1560,7 @@ async function requireAdmin(req, res, next) {
 }
 
 const adminRouter = express.Router()
+const PUBLIC_PURCHASE_PLAYBOOK_PDF_PATH = path.join(__dirname, 'templates', 'pdf', 'alphascreen-public-purchase-support-playbook.pdf')
 
 // Helper: ensure a user exists/invite; return user_id + optional action_link
 async function ensureUserIdAndInvite(email, redirectTo, opts = {}) {
@@ -2400,6 +2402,24 @@ adminRouter.get('/public-purchases', requireAuth, requireAdmin, async (req, res)
       detail: body.detail
     })
     return sendAdminError(res, error?.status || 500, body)
+  }
+})
+
+adminRouter.get('/public-purchases/playbook.pdf', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    if (!fs.existsSync(PUBLIC_PURCHASE_PLAYBOOK_PDF_PATH)) {
+      return res.status(404).json({ error: 'playbook_pdf_not_found' })
+    }
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', 'attachment; filename="alphascreen-public-purchase-support-playbook.pdf"')
+    res.setHeader('Cache-Control', 'private, no-store')
+    return res.sendFile(PUBLIC_PURCHASE_PLAYBOOK_PDF_PATH)
+  } catch (error) {
+    console.error('[admin/public-purchases/playbook.pdf] failed', {
+      request_id: _req.request_id || null,
+      message: error?.message || 'unknown_error'
+    })
+    return res.status(500).json({ error: 'playbook_pdf_failed' })
   }
 })
 

@@ -282,6 +282,50 @@ def draw_aligned_bullets(
     return current_y
 
 
+def font_visual_center_offset(font: str, size: float) -> float:
+    ascent = pdfmetrics.getAscent(font) * size / 1000
+    descent = pdfmetrics.getDescent(font) * size / 1000
+    return (ascent + descent) / 2
+
+
+def draw_card_bullets(
+    c: canvas.Canvas,
+    items: Iterable[str],
+    x: float,
+    y: float,
+    width: float,
+    *,
+    text_size: float,
+    leading: float,
+    bullet_radius: float,
+    bullet_color=PURPLE,
+    text_color=TEXT,
+    bullet_center_x_offset: float = 10,
+    text_x_offset: float = 26,
+    item_gap: float = 2,
+    font: str = "Helvetica",
+) -> float:
+    current_top_y = y
+    text_x = x + text_x_offset
+    max_width = width - text_x_offset
+    visual_center_offset = font_visual_center_offset(font, text_size)
+    for item in items:
+        lines = wrap_text(item, font, text_size, max_width)
+        if not lines:
+            continue
+        first_row_center_y = current_top_y - leading / 2
+        c.setFillColor(bullet_color)
+        c.circle(x + bullet_center_x_offset, first_row_center_y, bullet_radius, fill=1, stroke=0)
+        c.setFont(font, text_size)
+        c.setFillColor(text_color)
+        for line_index, line in enumerate(lines):
+            row_center_y = current_top_y - leading * (line_index + 0.5)
+            baseline_y = row_center_y - visual_center_offset
+            c.drawString(text_x, baseline_y, clean(line))
+        current_top_y -= leading * len(lines) + item_gap
+    return current_top_y
+
+
 def draw_bullets(c: canvas.Canvas, items: Iterable[str], x: float, y: float, w: float, *, bullet_color=PURPLE, size: float = 9.2, gap: float = 12) -> float:
     current_y = draw_aligned_bullets(
         c,
@@ -342,6 +386,45 @@ def draw_section_box(
         text_x_offset=list_text_x_offset,
         bullet_radius=list_bullet_radius,
         bullet_y_offset=list_bullet_y_offset,
+    )
+
+
+def draw_card_bullet_section_box(
+    c: canvas.Canvas,
+    label: str,
+    items: Sequence[str],
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    *,
+    fill=PANEL_SOFT,
+    accent=PURPLE,
+    text_size: float = 7,
+    leading: float = 8,
+    item_gap: float = 1.5,
+    bullet_radius: float = 2,
+    bullet_center_x_offset: float = 8,
+    text_x_offset: float = 24,
+    list_top_offset: float = 24,
+) -> None:
+    rounded_rect(c, x, y, w, h, 9, fill=fill, stroke=fill)
+    c.setFillColor(accent)
+    c.roundRect(x, y, 3.5, h, 2, fill=1, stroke=0)
+    draw_text(c, label.upper(), x + 12, y + h - 15, size=6.7, font="Helvetica-Bold", color=accent)
+    draw_card_bullets(
+        c,
+        items,
+        x + 12,
+        y + h - list_top_offset,
+        w - 24,
+        text_size=text_size,
+        leading=leading,
+        item_gap=item_gap,
+        bullet_radius=bullet_radius,
+        bullet_color=accent,
+        bullet_center_x_offset=bullet_center_x_offset,
+        text_x_offset=text_x_offset,
     )
 
 
@@ -412,7 +495,7 @@ def draw_compact_scenario_card(
     c.setFillColor(accent)
     c.roundRect(x, y + h - 4, w, 4, 2, fill=1, stroke=0)
     draw_text(c, title, x + 13, y + h - 23, size=10.5, font="Helvetica-Bold", color=NAVY, max_width=w - 26, leading=11.5)
-    draw_section_box(
+    draw_card_bullet_section_box(
         c,
         "Symptoms",
         symptoms,
@@ -422,13 +505,13 @@ def draw_compact_scenario_card(
         47,
         fill=BLUE_SOFT,
         accent=BLUE,
-        body_size=6.2,
-        list_bullet_x_offset=4.5,
-        list_text_x_offset=16.5,
-        list_bullet_radius=1.8,
-        list_bullet_y_offset=2.25,
-        list_leading=7.7,
-        list_item_gap=1.05,
+        text_size=6.2,
+        leading=7.0,
+        item_gap=0.8,
+        bullet_radius=1.8,
+        bullet_center_x_offset=8,
+        text_x_offset=24,
+        list_top_offset=24,
     )
     draw_section_box(c, "Support action", action, x + 13, y + h - 139, w - 26, 43, fill=LAVENDER_SOFT, accent=PURPLE, body_size=6.4)
     draw_section_box(c, "Do not", avoid, x + 13, y + h - 187, w - 26, 39, fill=RED_SOFT, accent=RED, body_size=6.4)
@@ -773,24 +856,23 @@ def page_billing_mismatch(c: canvas.Canvas, total_pages: int) -> None:
     draw_card(c, "Webhook or payment mismatch", "If buyer-reported payment, Stripe indicators, and setup state do not agree, refresh, copy the support summary, and escalate before asking for another payment step.", 416, 342, 330, 124, accent=BLUE, title_size=12, body_size=9.3)
     rounded_rect(c, 46, 228, 700, 76, 14, fill=RED_SOFT, stroke=RED_SOFT)
     draw_text(c, "AVOID THIS", 70, 278, size=7.7, font="Helvetica-Bold", color=RED)
-    draw_aligned_bullets(
+    draw_card_bullets(
         c,
         [
             "Do not promise refund, cancellation, membership change, or billing cadence outcome.",
             "Do not ask the buyer to repeat checkout until review confirms it is safe.",
             "Do not edit Stripe subscriptions directly from this workflow.",
         ],
-        76,
-        258,
-        628,
+        70,
+        266,
+        650,
         bullet_color=RED,
-        size=8.5,
+        text_size=8.5,
         leading=10.7,
-        item_gap=3,
-        bullet_x_offset=4,
-        text_x_offset=20,
         bullet_radius=3,
-        bullet_y_offset=2.9,
+        bullet_center_x_offset=12,
+        text_x_offset=32,
+        item_gap=3,
     )
     draw_callout(c, "Customer wording", "I received your request and will route it for billing review. We will confirm the next step after the purchase and payment status have been reviewed.", 46, 125, 700, 72, accent=PURPLE, fill=PANEL_SOFT)
 

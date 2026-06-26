@@ -33,6 +33,7 @@ MINT_SOFT = colors.HexColor("#E9FBF7")
 AMBER_SOFT = colors.HexColor("#FFF6DF")
 RED_SOFT = colors.HexColor("#FFF0F3")
 BLUE_SOFT = colors.HexColor("#EAF7FC")
+LAVENDER_SOFT = colors.HexColor("#F0EAFF")
 
 
 def clean(text: str) -> str:
@@ -200,6 +201,11 @@ def draw_numbered_item(c: canvas.Canvas, number: int, title: str, body: str, x: 
     return draw_text(c, body, x + 28, y - 15, size=8.8, color=MUTED, max_width=w - 28, leading=11) - 5
 
 
+def draw_pill(c: canvas.Canvas, text: str, x: float, y: float, w: float, *, fill=PANEL_SOFT, stroke=BORDER, text_color=NAVY, font_size: float = 7.5) -> None:
+    rounded_rect(c, x, y, w, 20, 10, fill=fill, stroke=stroke)
+    draw_centered(c, text, x + 6, y + 10, w - 12, size=font_size, font="Helvetica-Bold", color=text_color)
+
+
 def draw_flow(c: canvas.Canvas, labels: Sequence[str], x: float, y: float, max_width: float, *, active_index: int = 0) -> None:
     cursor_x = x
     cursor_y = y
@@ -221,6 +227,25 @@ def draw_flow(c: canvas.Canvas, labels: Sequence[str], x: float, y: float, max_w
             cursor_x += 12
 
 
+def draw_stage_flow_cards(c: canvas.Canvas, stages: Sequence[tuple[str, str]], x: float, y: float, w: float) -> None:
+    card_gap = 10
+    card_w = (w - card_gap * (len(stages) - 1)) / len(stages)
+    for index, (label, detail) in enumerate(stages, start=1):
+        card_x = x + (index - 1) * (card_w + card_gap)
+        rounded_rect(c, card_x, y, card_w, 66, 12, fill=PANEL, stroke=BORDER)
+        c.setFillColor(PURPLE if index == 1 else NAVY)
+        c.circle(card_x + 17, y + 47, 10, fill=1, stroke=0)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 7.5)
+        c.drawCentredString(card_x + 17, y + 44, str(index))
+        draw_text(c, label, card_x + 34, y + 52, size=8.3, font="Helvetica-Bold", color=NAVY, max_width=card_w - 40, leading=9.5)
+        draw_text(c, detail, card_x + 12, y + 28, size=6.7, color=MUTED, max_width=card_w - 24, leading=8.4)
+        if index < len(stages):
+            c.setFont("Helvetica-Bold", 10)
+            c.setFillColor(MUTED)
+            c.drawString(card_x + card_w + 2, y + 31, ">")
+
+
 def draw_bullets(c: canvas.Canvas, items: Iterable[str], x: float, y: float, w: float, *, bullet_color=PURPLE, size: float = 9.2, gap: float = 12) -> float:
     current_y = y
     for item in items:
@@ -229,6 +254,35 @@ def draw_bullets(c: canvas.Canvas, items: Iterable[str], x: float, y: float, w: 
         new_y = draw_text(c, item, x + 15, current_y, size=size, color=TEXT, max_width=w - 15, leading=size + 3.5)
         current_y = new_y - gap
     return current_y
+
+
+def draw_section_box(
+    c: canvas.Canvas,
+    label: str,
+    body: str | Sequence[str],
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    *,
+    fill=PANEL_SOFT,
+    accent=PURPLE,
+    body_size: float = 7.4,
+) -> None:
+    rounded_rect(c, x, y, w, h, 9, fill=fill, stroke=fill)
+    c.setFillColor(accent)
+    c.roundRect(x, y, 3.5, h, 2, fill=1, stroke=0)
+    draw_text(c, label.upper(), x + 12, y + h - 15, size=6.7, font="Helvetica-Bold", color=accent)
+    body_y = y + h - 30
+    if isinstance(body, str):
+        draw_text(c, body, x + 12, body_y, size=body_size, color=TEXT, max_width=w - 24, leading=body_size + 2.1)
+        return
+    cursor_y = body_y
+    for item in body:
+        c.setFillColor(accent)
+        c.circle(x + 15, cursor_y - 3, 2.4, fill=1, stroke=0)
+        next_y = draw_text(c, item, x + 24, cursor_y, size=body_size, color=TEXT, max_width=w - 32, leading=body_size + 2)
+        cursor_y = next_y - 2
 
 
 def draw_table(c: canvas.Canvas, x: float, y: float, w: float, headers: Sequence[str], rows: Sequence[Sequence[str]], col_widths: Sequence[float], *, row_height: float = 45) -> float:
@@ -255,37 +309,107 @@ def draw_table(c: canvas.Canvas, x: float, y: float, w: float, headers: Sequence
     return current_y
 
 
+def draw_quick_reference_table(c: canvas.Canvas, rows: Sequence[tuple[str, str, str, str, object]], x: float, y: float, w: float) -> None:
+    col_widths = [138, 178, 268, 116]
+    header_h = 30
+    rounded_rect(c, x, y - header_h, w, header_h, 11, fill=NAVY, stroke=NAVY)
+    headers = ["Status", "What it means", "Correct action", "Customer-facing link?"]
+    cursor_x = x
+    for header, col_w in zip(headers, col_widths):
+        draw_text(c, header.upper(), cursor_x + 10, y - 19, size=7.1, font="Helvetica-Bold", color=colors.white)
+        cursor_x += col_w
+
+    current_y = y - header_h
+    row_h = 51
+    for index, (status, meaning, action, link, accent) in enumerate(rows):
+        fill = colors.white if index % 2 == 0 else colors.HexColor("#F8F9FD")
+        c.setFillColor(fill)
+        c.roundRect(x, current_y - row_h, w, row_h, 4, fill=1, stroke=0)
+        c.setStrokeColor(BORDER)
+        c.line(x, current_y - row_h, x + w, current_y - row_h)
+        draw_pill(c, status, x + 10, current_y - 32, 112, fill=colors.white, stroke=accent, text_color=NAVY, font_size=6.5)
+        draw_text(c, meaning, x + col_widths[0] + 10, current_y - 17, size=7.2, color=TEXT, max_width=col_widths[1] - 20, leading=9.2)
+        draw_text(c, action, x + col_widths[0] + col_widths[1] + 10, current_y - 17, size=7.2, color=TEXT, max_width=col_widths[2] - 20, leading=9.2)
+        draw_text(c, link, x + col_widths[0] + col_widths[1] + col_widths[2] + 10, current_y - 17, size=7.2, color=TEXT, max_width=col_widths[3] - 20, leading=9.2)
+        current_y -= row_h
+
+
+def draw_compact_scenario_card(
+    c: canvas.Canvas,
+    title: str,
+    symptoms: Sequence[str],
+    action: str,
+    avoid: str,
+    wording: str,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    *,
+    accent=PURPLE,
+) -> None:
+    rounded_rect(c, x, y, w, h, 12, fill=PANEL, stroke=BORDER)
+    c.setFillColor(accent)
+    c.roundRect(x, y + h - 4, w, 4, 2, fill=1, stroke=0)
+    draw_text(c, title, x + 13, y + h - 23, size=10.5, font="Helvetica-Bold", color=NAVY, max_width=w - 26, leading=11.5)
+    draw_section_box(c, "Symptoms", symptoms, x + 13, y + h - 86, w - 26, 47, fill=BLUE_SOFT, accent=BLUE, body_size=6.2)
+    draw_section_box(c, "Support action", action, x + 13, y + h - 139, w - 26, 43, fill=LAVENDER_SOFT, accent=PURPLE, body_size=6.4)
+    draw_section_box(c, "Do not", avoid, x + 13, y + h - 187, w - 26, 39, fill=RED_SOFT, accent=RED, body_size=6.4)
+    draw_section_box(c, "Suggested wording", wording, x + 13, y + h - 244, w - 26, 53, fill=MINT_SOFT, accent=TEAL, body_size=6.1)
+
+
+def draw_snippet_rows(c: canvas.Canvas, rows: Sequence[tuple[str, str, object]], x: float, y: float, w: float) -> None:
+    rounded_rect(c, x, y - 32, w, 32, 12, fill=NAVY, stroke=NAVY)
+    draw_text(c, "SITUATION", x + 16, y - 20, size=7.2, font="Helvetica-Bold", color=colors.white)
+    draw_text(c, "USE THIS WORDING", x + 170, y - 20, size=7.2, font="Helvetica-Bold", color=colors.white)
+    current_y = y - 32
+    row_h = 47
+    for index, (label, copy, accent) in enumerate(rows):
+        fill = colors.white if index % 2 == 0 else colors.HexColor("#F8F9FD")
+        c.setFillColor(fill)
+        c.roundRect(x, current_y - row_h, w, row_h, 3, fill=1, stroke=0)
+        c.setStrokeColor(BORDER)
+        c.line(x, current_y - row_h, x + w, current_y - row_h)
+        draw_pill(c, label, x + 14, current_y - 31, 118, fill=colors.white, stroke=accent, text_color=NAVY, font_size=6.2)
+        draw_text(c, copy, x + 170, current_y - 16, size=7.25, color=TEXT, max_width=w - 190, leading=9.2)
+        current_y -= row_h
+
+
 def draw_dashboard_placeholder(c: canvas.Canvas, x: float, y: float, w: float, h: float) -> None:
     rounded_rect(c, x, y, w, h, 14, fill=colors.white, stroke=BORDER)
     c.setFillColor(colors.HexColor("#F6F2FF"))
-    c.rect(x + 1, y + 1, 88, h - 2, fill=1, stroke=0)
+    c.roundRect(x + 1, y + 1, 94, h - 2, 12, fill=1, stroke=0)
     c.setFillColor(TEAL)
-    c.circle(x + 17, y + h - 19, 5, fill=1, stroke=0)
-    draw_text(c, "Admin", x + 31, y + h - 16, size=6.2, font="Helvetica-Bold", color=MUTED)
-    nav_items = ["Purchases", "Analytics", "Metrics", "Support"]
+    c.circle(x + 18, y + h - 20, 5.5, fill=1, stroke=0)
+    draw_text(c, "alphaSource admin", x + 32, y + h - 17, size=6, font="Helvetica-Bold", color=MUTED)
+    nav_items = ["Overview", "Metrics", "Public Purchases", "Clients"]
     for index, item in enumerate(nav_items):
-        item_y = y + h - 47 - index * 24
-        rounded_rect(c, x + 14, item_y, 58, 13, 6, fill=colors.HexColor("#EDE7FF") if index == 0 else colors.white, stroke=colors.HexColor("#EDE7FF"))
-        draw_text(c, item, x + 21, item_y + 4, size=4.8, font="Helvetica-Bold", color=NAVY if index == 0 else MUTED)
-    draw_text(c, "Admin Public Purchases", x + 112, y + h - 42, size=10, font="Helvetica-Bold", color=NAVY)
+        item_y = y + h - 50 - index * 24
+        active = item == "Public Purchases"
+        rounded_rect(c, x + 14, item_y, 68, 14, 7, fill=colors.HexColor("#EDE7FF") if active else colors.white, stroke=colors.HexColor("#EDE7FF"))
+        draw_text(c, item, x + 21, item_y + 4, size=4.9, font="Helvetica-Bold", color=NAVY if active else MUTED)
+    draw_text(c, "Admin Public Purchases", x + 118, y + h - 38, size=11, font="Helvetica-Bold", color=NAVY)
+    draw_text(c, "Self-serve membership purchase review", x + 118, y + h - 55, size=6.4, color=MUTED)
     for i, (label, value, accent) in enumerate([
         ("Started", "18", PURPLE),
-        ("Agreement", "4", AMBER),
-        ("Setup", "2", BLUE),
+        ("Agreement pending", "4", AMBER),
+        ("Setup pending", "2", BLUE),
+        ("Completed", "12", TEAL),
     ]):
-        card_x = x + 112 + i * 78
-        rounded_rect(c, card_x, y + h - 92, 66, 45, 8, fill=colors.white, stroke=BORDER)
-        draw_text(c, label, card_x + 8, y + h - 63, size=5.8, font="Helvetica-Bold", color=MUTED)
-        draw_text(c, value, card_x + 8, y + h - 82, size=15, font="Helvetica-Bold", color=NAVY)
+        card_x = x + 118 + i * 77
+        rounded_rect(c, card_x, y + h - 104, 66, 50, 8, fill=colors.white, stroke=BORDER)
+        draw_text(c, label, card_x + 8, y + h - 70, size=5.6, font="Helvetica-Bold", color=MUTED, max_width=50, leading=6.4)
+        draw_text(c, value, card_x + 8, y + h - 92, size=15, font="Helvetica-Bold", color=NAVY)
         c.setFillColor(accent)
-        c.circle(card_x + 52, y + h - 66, 5, fill=1, stroke=0)
+        c.circle(card_x + 52, y + h - 68, 4.8, fill=1, stroke=0)
+    draw_text(c, "RECENT PURCHASE ROWS", x + 118, y + 58, size=5.8, font="Helvetica-Bold", color=MUTED)
     for index in range(4):
-        row_y = y + 28 + index * 21
+        row_y = y + 9 + index * 11
         c.setStrokeColor(colors.HexColor("#ECF0F7"))
-        c.line(x + 112, row_y, x + w - 24, row_y)
-        rounded_rect(c, x + 112, row_y + 5, 82, 8, 4, fill=colors.HexColor("#F0F3FA"), stroke=colors.HexColor("#F0F3FA"))
-        rounded_rect(c, x + 216, row_y + 5, 44, 8, 4, fill=colors.HexColor("#F0F3FA"), stroke=colors.HexColor("#F0F3FA"))
-        rounded_rect(c, x + 286, row_y + 5, 64, 8, 4, fill=colors.HexColor("#F0F3FA"), stroke=colors.HexColor("#F0F3FA"))
+        c.line(x + 118, row_y, x + w - 24, row_y)
+        rounded_rect(c, x + 118, row_y + 4, 78, 6, 3, fill=colors.HexColor("#F0F3FA"), stroke=colors.HexColor("#F0F3FA"))
+        rounded_rect(c, x + 220, row_y + 4, 58, 6, 3, fill=colors.HexColor("#F0F3FA"), stroke=colors.HexColor("#F0F3FA"))
+        rounded_rect(c, x + 305, row_y + 4, 80, 6, 3, fill=colors.HexColor("#F0F3FA"), stroke=colors.HexColor("#F0F3FA"))
 
 
 def draw_scenario_card(
@@ -306,27 +430,24 @@ def draw_scenario_card(
     c.setFillColor(accent)
     c.roundRect(x, y + h - 4, w, 4, 2, fill=1, stroke=0)
     draw_text(c, title, x + 16, y + h - 24, size=12, font="Helvetica-Bold", color=NAVY, max_width=w - 32)
-    draw_text(c, "Symptoms", x + 16, y + h - 51, size=7.5, font="Helvetica-Bold", color=MUTED)
-    cursor_y = draw_bullets(c, symptoms, x + 18, y + h - 66, w - 32, bullet_color=accent, size=7.5, gap=3)
-    draw_text(c, "Support action", x + 16, cursor_y, size=7.5, font="Helvetica-Bold", color=MUTED)
-    cursor_y = draw_text(c, action, x + 16, cursor_y - 13, size=8, color=TEXT, max_width=w - 32, leading=10.2)
-    draw_callout(c, "Do not", avoid, x + 16, y + 50, w - 32, 43, accent=RED, fill=RED_SOFT)
-    draw_text(c, "Suggested wording", x + 16, y + 34, size=7.5, font="Helvetica-Bold", color=MUTED)
-    draw_text(c, wording, x + 16, y + 21, size=7.2, color=TEXT, max_width=w - 32, leading=9)
+    draw_section_box(c, "Symptoms", symptoms, x + 16, y + h - 110, w - 32, 66, fill=BLUE_SOFT, accent=BLUE, body_size=7.2)
+    draw_section_box(c, "Support action", action, x + 16, y + h - 185, w - 32, 63, fill=LAVENDER_SOFT, accent=PURPLE, body_size=7.4)
+    draw_section_box(c, "Do not", avoid, x + 16, y + h - 255, w - 32, 58, fill=RED_SOFT, accent=RED, body_size=7.4)
+    draw_section_box(c, "Suggested wording", wording, x + 16, y + 16, w - 32, 64, fill=MINT_SOFT, accent=TEAL, body_size=7.1)
 
 
 def draw_cover(c: canvas.Canvas, total_pages: int) -> None:
     c.setFillColor(BG)
     c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
-    draw_text(c, "alphaScreen by alphaSource", 48, 520, size=12, color=TEXT)
-    draw_badge(c, "ADMIN ONLY", 646, 524, fill=NAVY, font_size=8.5, min_width=92)
-    draw_text(c, "alphaScreen Public Purchase", 48, 474, size=30, font="Helvetica-Bold", color=NAVY)
-    draw_text(c, "Support Playbook", 48, 439, size=30, font="Helvetica-Bold", color=NAVY)
+    draw_text(c, "alphaScreen by alphaSource", 48, 522, size=12, color=TEXT)
+    draw_badge(c, "ADMIN ONLY", 646, 526, fill=NAVY, font_size=8.5, min_width=92)
+    draw_text(c, "alphaScreen Public Purchase", 48, 476, size=31, font="Helvetica-Bold", color=NAVY)
+    draw_text(c, "Support Playbook", 48, 439, size=31, font="Helvetica-Bold", color=NAVY)
     draw_text(
         c,
         "Internal support guide for self-serve alphaScreen membership purchases.",
         48,
-        405,
+        402,
         size=13,
         color=MUTED,
         max_width=610,
@@ -336,22 +457,23 @@ def draw_cover(c: canvas.Canvas, total_pages: int) -> None:
         "Support standard",
         "Every purchase row should be triaged from Admin Public Purchases. Do not manually mark agreements, payments, billing, or account activation outside an approved escalation.",
         48,
-        335,
+        326,
         650,
-        58,
+        62,
         accent=PURPLE,
         fill=PANEL_SOFT,
     )
     card_w = 210
-    draw_card(c, "Source of truth", "Use Admin Public Purchases to review agreement, checkout, setup, and email state.", 48, 220, card_w, 82, accent=TEAL)
-    draw_card(c, "Recovery actions", "Resend the correct agreement, checkout, setup, or welcome email only when the row allows it.", 286, 220, card_w, 82, accent=PURPLE)
-    draw_card(c, "Escalation boundary", "Do not manually change agreement, payment, billing, or account activation state.", 524, 220, card_w, 82, accent=BLUE)
-    draw_text(c, "PUBLIC PURCHASE FLOW", 48, 155, size=8.5, font="Helvetica-Bold", color=NAVY)
+    draw_card(c, "Source of truth", "Use Admin Public Purchases to review agreement, Stripe Checkout, setup, and email state.", 48, 216, card_w, 84, accent=TEAL)
+    draw_card(c, "Recovery actions", "Resend the correct agreement, checkout, setup, or welcome email only when the row allows it.", 286, 216, card_w, 84, accent=PURPLE)
+    draw_card(c, "Escalation boundary", "Do not manually change agreement, payment, billing, or account activation state.", 524, 216, card_w, 84, accent=BLUE)
+    rounded_rect(c, 48, 95, 700, 74, 16, fill=colors.white, stroke=BORDER)
+    draw_text(c, "PUBLIC PURCHASE FLOW", 72, 146, size=8.2, font="Helvetica-Bold", color=NAVY)
     draw_flow(
         c,
         ["Pricing", "Signup", "Agreement", "Checkout", "Activation", "Setup", "Dashboard"],
-        48,
-        118,
+        58,
+        111,
         690,
         active_index=0,
     )
@@ -369,6 +491,7 @@ def page_support_scope(c: canvas.Canvas, total_pages: int) -> None:
         ("Avoid manual mutation", "Do not mark agreements, payments, billing, or activation by hand."),
         ("Escalate mismatches", "Copy a sanitized support summary when status signals conflict."),
         ("Use safe wording", "Give the next step without sharing private links or provider data."),
+        ("Confirm escalation path", "Route payment, identity, duplicate, or delivery mismatches for approved review."),
     ], start=1):
         y = draw_numbered_item(c, index, title, body, 532, y, 210)
     draw_callout(
@@ -386,33 +509,28 @@ def page_support_scope(c: canvas.Canvas, total_pages: int) -> None:
 
 def page_lifecycle(c: canvas.Canvas, total_pages: int) -> None:
     draw_header(c, 3, "Public purchase lifecycle", "SEVEN STAGES / TWO GATES", total_pages)
-    draw_text(c, "Agreement signing gates checkout. Stripe confirmation gates setup and dashboard access.", 46, 500, size=11, color=MUTED, max_width=690)
-    draw_flow(
-        c,
-        ["Pricing", "Signup", "Agreement", "Stripe Checkout", "Activation", "Setup email", "Dashboard"],
-        46,
-        450,
-        700,
-        active_index=0,
-    )
-    draw_bullets(
+    draw_text(c, "Support should resume the buyer's current step without skipping the agreement, payment, or setup gates.", 46, 498, size=10.5, color=MUTED, max_width=690)
+    draw_stage_flow_cards(
         c,
         [
-            "Help the buyer resume the next safe step for the current row state.",
-            "Do not skip agreement signing, bypass Stripe Checkout, or override webhook activation.",
-            "Password setup and dashboard access only follow confirmed activation and member linking.",
+            ("Pricing", "Buyer chooses membership."),
+            ("Signup", "Intent and buyer details."),
+            ("Agreement", "Buyer reviews and signs."),
+            ("Stripe Checkout", "Secure payment step."),
+            ("Activation", "Webhook confirms payment."),
+            ("Setup email", "Password setup begins."),
+            ("Dashboard", "Access after setup."),
         ],
         46,
-        370,
+        415,
         700,
-        bullet_color=PURPLE,
-        size=10,
-        gap=14,
     )
-    draw_text(c, "WHERE THE WORK LIVES", 46, 228, size=8.5, font="Helvetica-Bold", color=NAVY)
+    draw_callout(c, "Gate 1", "Agreement signing gates Stripe Checkout.", 46, 322, 330, 60, accent=PURPLE, fill=PANEL_SOFT)
+    draw_callout(c, "Gate 2", "Stripe confirmation gates setup and dashboard access.", 416, 322, 330, 60, accent=TEAL, fill=MINT_SOFT)
+    draw_text(c, "WHERE THE WORK LIVES", 46, 252, size=8.5, font="Helvetica-Bold", color=NAVY)
     c.setStrokeColor(TEAL)
     c.setLineWidth(1.5)
-    c.line(46, 217, 746, 217)
+    c.line(46, 241, 746, 241)
     stage_cards = [
         ("Buyer details", "Name, company, membership, cadence, and source path."),
         ("Agreement", "Sent, opened, signed, and checkout gating state."),
@@ -420,32 +538,34 @@ def page_lifecycle(c: canvas.Canvas, total_pages: int) -> None:
         ("Setup", "Client, member, password setup, and welcome email state."),
     ]
     for index, (title, body) in enumerate(stage_cards):
-        draw_card(c, title, body, 46 + index * 176, 120, 154, 72, accent=[TEAL, PURPLE, BLUE, AMBER][index], title_size=10, body_size=8)
+        draw_card(c, title, body, 46 + index * 176, 132, 154, 78, accent=[TEAL, PURPLE, BLUE, AMBER][index], title_size=10, body_size=8)
 
 
 def page_quick_reference(c: canvas.Canvas, total_pages: int) -> None:
     draw_header(c, 4, "Admin Public Purchases quick reference", "STATUS TRIAGE / CORRECT ACTION", total_pages)
     rows = [
-        ("Agreement pending", "Agreement not signed yet.", "Resend agreement link if available.", "Agreement only"),
-        ("Signed / checkout pending", "Agreement signed; payment unpaid or in progress.", "Resend checkout link after confirming no paid state.", "Checkout only"),
-        ("Setup pending", "Payment appears complete; setup or member linking incomplete.", "Resend setup email if available; escalate if stuck.", "Setup only"),
-        ("Completed", "Billing and member access are active and linked.", "Guide buyer to login or resend welcome email if needed.", "Login/support"),
-        ("Canceled / failed", "Payment failed, expired, or purchase canceled.", "Confirm state; escalate billing requests.", "No payment promise"),
-        ("Unknown / mismatch", "Signals do not map cleanly.", "Copy support summary and escalate.", "No direct link"),
+        ("Agreement pending", "Agreement not signed yet.", "Resend agreement link if available.", "Agreement only", PURPLE),
+        ("Checkout pending", "Agreement signed; payment unpaid or in progress.", "Resend checkout link after confirming no paid state.", "Checkout only", TEAL),
+        ("Setup pending", "Payment appears complete; setup state incomplete.", "Resend setup email if available; escalate if stuck.", "Setup only", BLUE),
+        ("Completed", "Billing and member access are active and linked.", "Guide buyer to login or resend welcome email if needed.", "Login/support", TEAL),
+        ("Canceled / failed", "Payment failed, expired, or purchase canceled.", "Confirm state; escalate billing requests.", "No payment promise", RED),
+        ("Unknown / mismatch", "Signals do not map cleanly.", "Copy support summary and escalate.", "No direct link", AMBER),
     ]
-    draw_table(c, 46, 478, 700, ["Status", "What it means", "Correct action", "Customer-facing link?"], rows, [145, 195, 245, 115], row_height=53)
-    draw_callout(c, "Important distinction", "Email sends do not change payment, billing, agreement, or access status. They only help the buyer resume the allowed next step.", 46, 76, 700, 62, accent=AMBER, fill=AMBER_SOFT)
+    draw_quick_reference_table(c, rows, 46, 486, 700)
+    draw_callout(c, "Important distinction", "Email sends do not change payment, billing, agreement, or access status. They only help the buyer resume the allowed next step.", 46, 80, 700, 58, accent=AMBER, fill=AMBER_SOFT)
 
 
 def page_controls(c: canvas.Canvas, total_pages: int) -> None:
     draw_header(c, 5, "Admin page controls", "ROW REVIEW / RECOVERY ACTIONS", total_pages)
-    draw_card(c, "What the page shows", "Buyer and company details, membership and cadence, source path, agreement status, checkout signals, setup state, and email delivery state.", 46, 355, 215, 120, accent=TEAL, title_size=12, body_size=9)
-    draw_card(c, "Row actions", "Open Details before acting. Resend agreement, checkout, setup, or welcome email only when the row allows that action. Copy support summary for escalation.", 288, 355, 215, 120, accent=PURPLE, title_size=12, body_size=9)
-    draw_card(c, "What it cannot do", "It cannot mark an agreement signed, mark checkout paid, activate billing, edit Stripe subscriptions, delete records, or override member state.", 531, 355, 215, 120, accent=RED, title_size=12, body_size=9)
-    draw_callout(c, "Standing rule", "If the row is not clearly complete, describe the current state and next step. Do not promise activation, refund, cancellation, or billing changes without confirmation.", 46, 245, 700, 72, accent=PURPLE, fill=PANEL_SOFT)
-    draw_text(c, "SAFE OPERATING LOOP", 46, 190, size=8.5, font="Helvetica-Bold", color=NAVY)
-    draw_flow(c, ["Search row", "Open details", "Confirm state", "Use allowed action", "Refresh", "Escalate if mismatched"], 46, 154, 700, active_index=0)
-    draw_callout(c, "Avoid this", "Do not use spreadsheets, inbox notes, or memory as the daily source of truth for purchase status.", 46, 80, 700, 54, accent=RED, fill=RED_SOFT)
+    draw_card(c, "What the page shows", "Buyer and company details, membership and cadence, source path, agreement status, Stripe Checkout signals, setup state, and email delivery state.", 46, 352, 215, 124, accent=TEAL, title_size=12, body_size=8.8)
+    draw_card(c, "Row actions", "Open Details before acting. Resend agreement, checkout, setup, or welcome email only when the row allows that action. Copy support summary for escalation.", 288, 352, 215, 124, accent=PURPLE, title_size=12, body_size=8.8)
+    draw_card(c, "What it cannot do", "It cannot mark an agreement signed, mark checkout paid, activate billing, edit Stripe subscriptions, delete records, or override member state.", 531, 352, 215, 124, accent=RED, title_size=12, body_size=8.8)
+    draw_callout(c, "Standing rule", "If the row is not clearly complete, describe the current state and next step. Do not promise activation, refund, cancellation, or billing changes without confirmation.", 46, 258, 700, 64, accent=PURPLE, fill=PANEL_SOFT)
+    draw_text(c, "ROW REVIEW LOOP", 46, 205, size=8.5, font="Helvetica-Bold", color=NAVY)
+    draw_flow(c, ["Search row", "Open details", "Confirm state", "Use allowed action", "Refresh", "Escalate if mismatched"], 46, 169, 700, active_index=0)
+    rounded_rect(c, 46, 78, 700, 60, 14, fill=NAVY, stroke=NAVY)
+    draw_text(c, "AVOID THIS", 70, 115, size=7.7, font="Helvetica-Bold", color=AMBER)
+    draw_text(c, "Do not use spreadsheets, inbox notes, or memory as the daily source of truth for purchase status. Use Admin Public Purchases and escalate mismatches with sanitized context.", 70, 96, size=10, font="Helvetica-Bold", color=colors.white, max_width=650, leading=12.5)
 
 
 def page_agreement_checkout(c: canvas.Canvas, total_pages: int) -> None:
@@ -510,30 +630,34 @@ def page_stripe_setup(c: canvas.Canvas, total_pages: int) -> None:
 
 def page_existing_email(c: canvas.Canvas, total_pages: int) -> None:
     draw_header(c, 8, "Scenario group: existing user and email recovery", "LOGIN STATE / EMAIL STATE", total_pages)
-    cards = [
-        ("Existing user purchase", "Buyer already has an alphaScreen login. Confirm linked member state, then direct them to sign in with the existing account.", "Do not create a duplicate user.", PURPLE),
-        ("Welcome email not received", "If setup exists and the row allows it, resend welcome email. Welcome email should not block working dashboard access.", "Do not paste provider payloads into notes.", TEAL),
-        ("Setup email not received", "Confirm payment and setup state, then resend setup email if available. Ask the buyer to use the newest setup email.", "Do not share password setup tokens.", BLUE),
+    scenarios = [
+        (
+            "Existing user purchase",
+            ["Buyer already has alphaScreen login", "Payment completed", "Member may already be linked"],
+            "Confirm row status and member linking. If linked, direct the buyer to login with the existing account.",
+            "Do not create a duplicate user.",
+            "Please sign in with your existing account first. If the new membership is not visible, we will review the account link.",
+            PURPLE,
+        ),
+        (
+            "Welcome email not received",
+            ["Setup exists", "Welcome email missing or failed", "Dashboard access may already work"],
+            "Check welcome email status. Resend welcome email only when the row allows it.",
+            "Do not make welcome email delivery a blocker if account access works.",
+            "I resent the alphaScreen welcome email. You can still sign in if password setup is complete.",
+            TEAL,
+        ),
+        (
+            "Setup email not received",
+            ["Payment appears complete", "Buyer cannot set password", "Setup email missing or failed"],
+            "Confirm setup state, then resend setup email if available. Ask the buyer to use the newest setup email.",
+            "Do not share password setup tokens.",
+            "I resent the password setup email. Please use the newest email to finish account access.",
+            BLUE,
+        ),
     ]
-    for index, (title, body, avoid, accent) in enumerate(cards):
-        x = 46 + index * 235
-        draw_card(c, title, body, x, 315, 205, 150, accent=accent, title_size=12, body_size=9)
-        draw_callout(c, "Do not", avoid, x, 230, 205, 58, accent=RED, fill=RED_SOFT)
-    draw_text(c, "CUSTOMER WORDING", 46, 178, size=8.5, font="Helvetica-Bold", color=NAVY)
-    draw_table(
-        c,
-        46,
-        155,
-        700,
-        ["Situation", "Use this wording"],
-        [
-            ("Existing login", "Please sign in with your existing account first. If the new membership is not visible, we will review the account link."),
-            ("Welcome email", "I resent the alphaScreen welcome email. You can still sign in if password setup is complete."),
-            ("Setup email", "I resent the password setup email. Please use the newest email to finish account access."),
-        ],
-        [150, 550],
-        row_height=42,
-    )
+    for index, scenario in enumerate(scenarios):
+        draw_compact_scenario_card(c, *scenario[:-1], 46 + index * 235, 170, 205, 286, accent=scenario[-1])
 
 
 def page_identity_duplicates(c: canvas.Canvas, total_pages: int) -> None:
@@ -568,35 +692,48 @@ def page_identity_duplicates(c: canvas.Canvas, total_pages: int) -> None:
 
 def page_billing_mismatch(c: canvas.Canvas, total_pages: int) -> None:
     draw_header(c, 10, "Billing requests and payment mismatch", "ESCALATION REQUIRED / NO MANUAL STRIPE MUTATION", total_pages)
-    draw_card(c, "Cancellation, refund, or membership change", "Locate the row, copy the support summary, acknowledge the request without promising the outcome, and route it to the approved billing/admin owner.", 46, 335, 330, 130, accent=AMBER, title_size=12, body_size=9.3)
-    draw_card(c, "Webhook or payment mismatch", "If buyer-reported payment, Stripe indicators, and setup state do not agree, refresh, copy the support summary, and escalate before asking for another payment step.", 416, 335, 330, 130, accent=BLUE, title_size=12, body_size=9.3)
-    draw_callout(c, "Avoid this", "Do not promise a refund, cancellation, membership change, or billing cadence change. Do not edit Stripe subscriptions directly from this workflow.", 46, 230, 700, 72, accent=RED, fill=RED_SOFT)
+    draw_card(c, "Cancellation, refund, or membership change", "Locate the row, copy the support summary, acknowledge the request without promising the outcome, and route it to the approved billing/admin owner.", 46, 342, 330, 124, accent=AMBER, title_size=12, body_size=9.3)
+    draw_card(c, "Webhook or payment mismatch", "If buyer-reported payment, Stripe indicators, and setup state do not agree, refresh, copy the support summary, and escalate before asking for another payment step.", 416, 342, 330, 124, accent=BLUE, title_size=12, body_size=9.3)
+    rounded_rect(c, 46, 228, 700, 76, 14, fill=RED_SOFT, stroke=RED_SOFT)
+    draw_text(c, "AVOID THIS", 70, 278, size=7.7, font="Helvetica-Bold", color=RED)
+    draw_bullets(
+        c,
+        [
+            "Do not promise refund, cancellation, membership change, or billing cadence outcome.",
+            "Do not ask the buyer to repeat checkout until review confirms it is safe.",
+            "Do not edit Stripe subscriptions directly from this workflow.",
+        ],
+        70,
+        258,
+        650,
+        bullet_color=RED,
+        size=8.5,
+        gap=3,
+    )
     draw_callout(c, "Customer wording", "I received your request and will route it for billing review. We will confirm the next step after the purchase and payment status have been reviewed.", 46, 125, 700, 72, accent=PURPLE, fill=PANEL_SOFT)
 
 
 def page_email_escalation(c: canvas.Canvas, total_pages: int) -> None:
     draw_header(c, 11, "Email delivery issues and escalation rules", "ONE SAFE RESEND / SANITIZED ESCALATION", total_pages)
-    draw_card(c, "Email delivery issue", "Confirm the needed email, use the correct resend action once if available, ask the buyer to check spam and quarantine, then wait for delivery state to update.", 46, 360, 330, 105, accent=TEAL, title_size=12, body_size=9)
-    draw_card(c, "Escalate immediately", "Payment/state mismatch, signed agreement blocked from checkout, setup stuck after payment, wrong buyer email after signing or payment, possible duplicate billing, or repeated delivery failure.", 416, 360, 330, 105, accent=AMBER, title_size=12, body_size=9)
-    draw_text(c, "INCLUDE", 46, 300, size=8.5, font="Helvetica-Bold", color=NAVY)
-    draw_bullets(c, ["Sanitized support summary", "Current status label and buyer-reported problem", "Recovery action already attempted and approximate time"], 46, 275, 315, bullet_color=TEAL, size=9, gap=8)
-    draw_text(c, "DO NOT INCLUDE", 416, 300, size=8.5, font="Helvetica-Bold", color=NAVY)
-    draw_bullets(c, ["Secrets, tokens, auth headers, or webhook signing details", "Full signing, setup, or password reset URLs", "Raw provider payloads or unnecessary private data"], 416, 275, 315, bullet_color=RED, size=9, gap=8)
-    draw_callout(c, "Safe wording", "I resent the correct alphaScreen email for your current setup step. If it still does not arrive, we will escalate the delivery check.", 46, 94, 700, 68, accent=PURPLE, fill=PANEL_SOFT)
+    draw_card(c, "Email delivery issue", "Confirm the needed email, use the correct resend action once if available, ask the buyer to check spam and quarantine, then wait for delivery state to update.", 46, 366, 330, 100, accent=TEAL, title_size=12, body_size=9)
+    draw_card(c, "Escalate immediately", "Payment/state mismatch, signed agreement blocked from checkout, setup stuck after payment, wrong buyer email after signing or payment, possible duplicate billing, or repeated delivery failure.", 416, 366, 330, 100, accent=AMBER, title_size=12, body_size=9)
+    draw_section_box(c, "Include", ["Sanitized support summary", "Current status label", "Buyer-reported problem", "Attempted recovery action and approximate time"], 46, 194, 330, 132, fill=MINT_SOFT, accent=TEAL, body_size=8.2)
+    draw_section_box(c, "Do not include", ["Secrets, tokens, or auth headers", "Signing, setup, or password reset URLs", "Webhook signing details or raw payloads", "Unnecessary customer private data"], 416, 194, 330, 132, fill=RED_SOFT, accent=RED, body_size=8.2)
+    draw_callout(c, "Safe wording", "I resent the correct alphaScreen email for your current setup step. If it still does not arrive, we will escalate the delivery check.", 46, 92, 700, 66, accent=PURPLE, fill=PANEL_SOFT)
 
 
 def page_snippets(c: canvas.Canvas, total_pages: int) -> None:
     draw_header(c, 12, "Safe support language snippets", "CUSTOMER WORDING / NO PROMISES", total_pages)
     rows = [
-        ("Agreement link", "I resent the alphaScreen membership agreement to the buyer address on file. Please use the newest email to review and sign before checkout."),
-        ("Checkout link", "Your agreement appears to be signed. I resent the secure checkout recovery email so payment can continue from the current signup."),
-        ("Password setup", "Payment appears complete, and the remaining step is password setup. I resent the setup email to the buyer address on file."),
-        ("Existing account login", "This purchase appears tied to an existing alphaScreen login. Please sign in with your existing account first."),
-        ("Payment under review", "I do not want to ask you to repeat checkout until the current payment state is verified. We are reviewing the purchase status."),
-        ("Billing request", "I received your request and will route it for billing review. We will confirm the next step after the purchase and payment status have been reviewed."),
-        ("Escalation", "This needs internal review before we can safely change the purchase path. I am escalating the current status and will follow up."),
+        ("Agreement link", "I resent the alphaScreen membership agreement to the buyer address on file. Please use the newest email to review and sign before checkout.", PURPLE),
+        ("Checkout link", "Your agreement appears to be signed. I resent the secure checkout recovery email so payment can continue from the current signup.", TEAL),
+        ("Password setup", "Payment appears complete, and the remaining step is password setup. I resent the setup email to the buyer address on file.", BLUE),
+        ("Existing login", "This purchase appears tied to an existing alphaScreen login. Please sign in with your existing account first.", PURPLE),
+        ("Payment review", "I do not want to ask you to repeat checkout until the current payment state is verified. We are reviewing the purchase status.", AMBER),
+        ("Billing request", "I received your request and will route it for billing review. We will confirm the next step after review.", RED),
+        ("Escalation", "This needs internal review before we can safely change the purchase path. I am escalating the current status and will follow up.", AMBER),
     ]
-    draw_table(c, 46, 492, 700, ["Situation", "Use this wording"], rows, [155, 545], row_height=48)
+    draw_snippet_rows(c, rows, 46, 488, 700)
 
 
 def page_glossary(c: canvas.Canvas, total_pages: int) -> None:
@@ -611,30 +748,22 @@ def page_glossary(c: canvas.Canvas, total_pages: int) -> None:
     ]
     for index, (term, definition) in enumerate(glossary):
         x = 46 + (index % 2) * 350
-        y = 438 - (index // 2) * 82
-        draw_card(c, term, definition, x, y, 320, 58, accent=[PURPLE, TEAL, BLUE, AMBER, PURPLE, TEAL][index], title_size=10.5, body_size=8.5)
+        y = 420 - (index // 2) * 70
+        draw_card(c, term, definition, x, y, 320, 56, accent=[PURPLE, TEAL, BLUE, AMBER, PURPLE, TEAL][index], title_size=10.5, body_size=8.3)
     draw_callout(
         c,
         "Production use note",
         "After launch, use the production Admin Public Purchases page for live customers. Do not use QA links, QA records, or QA screenshots when supporting a live buyer.",
         46,
-        154,
+        158,
         700,
-        68,
+        62,
         accent=AMBER,
         fill=AMBER_SOFT,
     )
-    draw_callout(
-        c,
-        "Final standard",
-        "Each buyer should receive the next safe step for their current purchase state. Admin recovery actions help the buyer resume agreement, checkout, or setup. They do not replace agreement signing, payment confirmation, or account activation.",
-        46,
-        74,
-        700,
-        68,
-        accent=TEAL,
-        fill=MINT_SOFT,
-    )
+    rounded_rect(c, 46, 70, 700, 68, 16, fill=NAVY, stroke=NAVY)
+    draw_text(c, "FINAL STANDARD", 72, 113, size=7.8, font="Helvetica-Bold", color=TEAL)
+    draw_text(c, "Each buyer should receive the next safe step for their current purchase state. Admin recovery actions help the buyer resume agreement, Stripe Checkout, or setup. They do not replace agreement signing, payment confirmation, or account activation.", 72, 94, size=10, font="Helvetica-Bold", color=colors.white, max_width=650, leading=12.5)
 
 
 def generate() -> None:

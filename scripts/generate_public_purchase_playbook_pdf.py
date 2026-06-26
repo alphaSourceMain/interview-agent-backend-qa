@@ -246,13 +246,55 @@ def draw_stage_flow_cards(c: canvas.Canvas, stages: Sequence[tuple[str, str]], x
             c.drawString(card_x + card_w + 2, y + 31, ">")
 
 
-def draw_bullets(c: canvas.Canvas, items: Iterable[str], x: float, y: float, w: float, *, bullet_color=PURPLE, size: float = 9.2, gap: float = 12) -> float:
+def draw_aligned_bullets(
+    c: canvas.Canvas,
+    items: Iterable[str],
+    x: float,
+    y: float,
+    w: float,
+    *,
+    bullet_color=PURPLE,
+    text_color=TEXT,
+    size: float = 9.2,
+    leading: float | None = None,
+    item_gap: float = 4,
+    bullet_x_offset: float = 5,
+    text_x_offset: float = 18,
+    bullet_radius: float = 2.8,
+) -> float:
+    line_height = leading or size + 3
     current_y = y
     for item in items:
+        text_x = x + text_x_offset
+        max_width = w - text_x_offset
+        lines = wrap_text(item, "Helvetica", size, max_width)
+        if not lines:
+            continue
         c.setFillColor(bullet_color)
-        c.circle(x + 3, current_y - 3, 3, fill=1, stroke=0)
-        new_y = draw_text(c, item, x + 15, current_y, size=size, color=TEXT, max_width=w - 15, leading=size + 3.5)
-        current_y = new_y - gap
+        c.circle(x + bullet_x_offset, current_y + size * 0.28, bullet_radius, fill=1, stroke=0)
+        c.setFont("Helvetica", size)
+        c.setFillColor(text_color)
+        for line_index, line in enumerate(lines):
+            c.drawString(text_x, current_y - line_index * line_height, clean(line))
+        current_y -= line_height * len(lines) + item_gap
+    return current_y
+
+
+def draw_bullets(c: canvas.Canvas, items: Iterable[str], x: float, y: float, w: float, *, bullet_color=PURPLE, size: float = 9.2, gap: float = 12) -> float:
+    current_y = draw_aligned_bullets(
+        c,
+        items,
+        x,
+        y,
+        w,
+        bullet_color=bullet_color,
+        size=size,
+        leading=size + 2.2,
+        item_gap=gap,
+        bullet_x_offset=5,
+        text_x_offset=18,
+        bullet_radius=3,
+    )
     return current_y
 
 
@@ -277,12 +319,20 @@ def draw_section_box(
     if isinstance(body, str):
         draw_text(c, body, x + 12, body_y, size=body_size, color=TEXT, max_width=w - 24, leading=body_size + 2.1)
         return
-    cursor_y = body_y
-    for item in body:
-        c.setFillColor(accent)
-        c.circle(x + 15, cursor_y - 3, 2.4, fill=1, stroke=0)
-        next_y = draw_text(c, item, x + 24, cursor_y, size=body_size, color=TEXT, max_width=w - 32, leading=body_size + 2)
-        cursor_y = next_y - 2
+    draw_aligned_bullets(
+        c,
+        body,
+        x + 12,
+        body_y,
+        w - 24,
+        bullet_color=accent,
+        size=body_size,
+        leading=body_size + 2.1,
+        item_gap=1.6,
+        bullet_x_offset=4,
+        text_x_offset=15,
+        bullet_radius=2.2,
+    )
 
 
 def draw_table(c: canvas.Canvas, x: float, y: float, w: float, headers: Sequence[str], rows: Sequence[Sequence[str]], col_widths: Sequence[float], *, row_height: float = 45) -> float:

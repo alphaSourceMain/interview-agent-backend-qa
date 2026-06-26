@@ -261,6 +261,7 @@ def draw_aligned_bullets(
     bullet_x_offset: float = 5,
     text_x_offset: float = 18,
     bullet_radius: float = 2.8,
+    bullet_y_offset: float | None = None,
 ) -> float:
     line_height = leading or size + 3
     current_y = y
@@ -271,7 +272,8 @@ def draw_aligned_bullets(
         if not lines:
             continue
         c.setFillColor(bullet_color)
-        c.circle(x + bullet_x_offset, current_y + size * 0.28, bullet_radius, fill=1, stroke=0)
+        marker_y = current_y + (bullet_y_offset if bullet_y_offset is not None else size * 0.34)
+        c.circle(x + bullet_x_offset, marker_y, bullet_radius, fill=1, stroke=0)
         c.setFont("Helvetica", size)
         c.setFillColor(text_color)
         for line_index, line in enumerate(lines):
@@ -294,6 +296,7 @@ def draw_bullets(c: canvas.Canvas, items: Iterable[str], x: float, y: float, w: 
         bullet_x_offset=5,
         text_x_offset=18,
         bullet_radius=3,
+        bullet_y_offset=size * 0.34,
     )
     return current_y
 
@@ -310,6 +313,12 @@ def draw_section_box(
     fill=PANEL_SOFT,
     accent=PURPLE,
     body_size: float = 7.4,
+    list_bullet_x_offset: float = 4,
+    list_text_x_offset: float = 15,
+    list_bullet_radius: float = 2.2,
+    list_bullet_y_offset: float | None = None,
+    list_leading: float | None = None,
+    list_item_gap: float = 1.6,
 ) -> None:
     rounded_rect(c, x, y, w, h, 9, fill=fill, stroke=fill)
     c.setFillColor(accent)
@@ -327,11 +336,12 @@ def draw_section_box(
         w - 24,
         bullet_color=accent,
         size=body_size,
-        leading=body_size + 2.1,
-        item_gap=1.6,
-        bullet_x_offset=4,
-        text_x_offset=15,
-        bullet_radius=2.2,
+        leading=list_leading or body_size + 2.1,
+        item_gap=list_item_gap,
+        bullet_x_offset=list_bullet_x_offset,
+        text_x_offset=list_text_x_offset,
+        bullet_radius=list_bullet_radius,
+        bullet_y_offset=list_bullet_y_offset,
     )
 
 
@@ -402,7 +412,24 @@ def draw_compact_scenario_card(
     c.setFillColor(accent)
     c.roundRect(x, y + h - 4, w, 4, 2, fill=1, stroke=0)
     draw_text(c, title, x + 13, y + h - 23, size=10.5, font="Helvetica-Bold", color=NAVY, max_width=w - 26, leading=11.5)
-    draw_section_box(c, "Symptoms", symptoms, x + 13, y + h - 86, w - 26, 47, fill=BLUE_SOFT, accent=BLUE, body_size=6.2)
+    draw_section_box(
+        c,
+        "Symptoms",
+        symptoms,
+        x + 13,
+        y + h - 86,
+        w - 26,
+        47,
+        fill=BLUE_SOFT,
+        accent=BLUE,
+        body_size=6.2,
+        list_bullet_x_offset=4.5,
+        list_text_x_offset=16.5,
+        list_bullet_radius=1.8,
+        list_bullet_y_offset=2.25,
+        list_leading=7.7,
+        list_item_gap=1.05,
+    )
     draw_section_box(c, "Support action", action, x + 13, y + h - 139, w - 26, 43, fill=LAVENDER_SOFT, accent=PURPLE, body_size=6.4)
     draw_section_box(c, "Do not", avoid, x + 13, y + h - 187, w - 26, 39, fill=RED_SOFT, accent=RED, body_size=6.4)
     draw_section_box(c, "Suggested wording", wording, x + 13, y + h - 244, w - 26, 53, fill=MINT_SOFT, accent=TEAL, body_size=6.1)
@@ -746,19 +773,24 @@ def page_billing_mismatch(c: canvas.Canvas, total_pages: int) -> None:
     draw_card(c, "Webhook or payment mismatch", "If buyer-reported payment, Stripe indicators, and setup state do not agree, refresh, copy the support summary, and escalate before asking for another payment step.", 416, 342, 330, 124, accent=BLUE, title_size=12, body_size=9.3)
     rounded_rect(c, 46, 228, 700, 76, 14, fill=RED_SOFT, stroke=RED_SOFT)
     draw_text(c, "AVOID THIS", 70, 278, size=7.7, font="Helvetica-Bold", color=RED)
-    draw_bullets(
+    draw_aligned_bullets(
         c,
         [
             "Do not promise refund, cancellation, membership change, or billing cadence outcome.",
             "Do not ask the buyer to repeat checkout until review confirms it is safe.",
             "Do not edit Stripe subscriptions directly from this workflow.",
         ],
-        70,
+        76,
         258,
-        650,
+        628,
         bullet_color=RED,
         size=8.5,
-        gap=3,
+        leading=10.7,
+        item_gap=3,
+        bullet_x_offset=4,
+        text_x_offset=20,
+        bullet_radius=3,
+        bullet_y_offset=2.9,
     )
     draw_callout(c, "Customer wording", "I received your request and will route it for billing review. We will confirm the next step after the purchase and payment status have been reviewed.", 46, 125, 700, 72, accent=PURPLE, fill=PANEL_SOFT)
 

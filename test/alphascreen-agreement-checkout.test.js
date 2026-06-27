@@ -127,7 +127,7 @@ class FakeQuery {
   }
 }
 
-function makeSnapshot(plan, cadence) {
+function makeSnapshot(plan, cadence, firstRolePrepaySelected = false) {
   const basic = plan === 'basic'
   const annual = cadence === 'annual'
   return {
@@ -145,7 +145,17 @@ function makeSnapshot(plan, cadence) {
     additional_interview_price: basic ? 30 : 35,
     additional_interview_fee: basic ? 30 : 35,
     overage_price: basic ? 30 : 35,
-    per_role_fee: basic ? 399 : 699
+    per_role_fee: basic ? 399 : 699,
+    first_role_prepay: {
+      enabled: true,
+      credit_type: 'first_role_prepay',
+      normal_role_fee_cents: basic ? 39900 : 69900,
+      discounted_credit_amount_cents: basic ? 35900 : 62900,
+      discount_percent: 10,
+      non_refundable: true,
+      expires: false,
+      selected: firstRolePrepaySelected === true
+    }
   }
 }
 
@@ -154,7 +164,7 @@ function agreement(overrides = {}) {
   const cadence = overrides.cadence || 'monthly'
   const snapshot = Object.prototype.hasOwnProperty.call(overrides, 'packageSnapshot')
     ? overrides.packageSnapshot
-    : makeSnapshot(plan, cadence)
+    : makeSnapshot(plan, cadence, overrides.firstRolePrepaySelected)
   const values = snapshot
     ? {
         client_id: null,
@@ -220,7 +230,12 @@ function intent(overrides = {}) {
     status: overrides.status || 'agreement_pending',
     selected_plan_key: plan,
     selected_billing_cadence: cadence,
-    package_snapshot: overrides.package_snapshot || makeSnapshot(plan, cadence),
+    package_snapshot: overrides.package_snapshot || makeSnapshot(plan, cadence, overrides.firstRolePrepaySelected),
+    first_role_prepay_selected: overrides.firstRolePrepaySelected === true,
+    first_role_prepay_amount_cents: overrides.firstRolePrepaySelected === true ? (plan === 'basic' ? 35900 : 62900) : null,
+    first_role_normal_role_fee_cents: overrides.firstRolePrepaySelected === true ? (plan === 'basic' ? 39900 : 69900) : null,
+    first_role_prepay_discount_percent: overrides.firstRolePrepaySelected === true ? 10 : null,
+    first_role_prepay_credit_type: overrides.firstRolePrepaySelected === true ? 'first_role_prepay' : null,
     company_legal_name: 'Acme Dental Group',
     company_dba: 'Acme Dental',
     buyer_first_name: 'Alex',
@@ -371,6 +386,7 @@ test('signed public purchase agreements create hosted checkout for Basic/Pro mon
     assert.match(call.cancelUrl, /checkout=cancel/)
     assert.match(call.idempotencyKey, new RegExp(`agreement_checkout:${AGREEMENT_ID}:${plan}:${cadence}`))
     assert.deepEqual(call.enterpriseFees, null)
+    assert.equal(call.firstRolePrepay, null)
     assert.equal(call.metadata.agreement_id, AGREEMENT_ID)
     assert.equal(call.metadata.purchase_intent_id, INTENT_ID)
     assert.equal(call.metadata.package_plan_key, plan)
@@ -380,6 +396,7 @@ test('signed public purchase agreements create hosted checkout for Basic/Pro mon
     assert.equal(call.metadata.included_interviews_per_role, included)
     assert.equal(call.metadata.max_interview_minutes, minutes)
     assert.equal(call.metadata.additional_interview_fee, overage)
+    assert.equal(call.metadata.first_role_prepay_selected, undefined)
 
     const clientInsert = db.inserts.find((entry) => entry.table === 'clients')
     assert.ok(clientInsert)
@@ -401,6 +418,32 @@ test('signed public purchase agreements create hosted checkout for Basic/Pro mon
     assert.doesNotMatch(serialized, /sk_test|sk_live|STRIPE_PRICE|price_/i)
     assert.deepEqual(Array.from(new Set(db.touchedTables)).sort(), ['clients', 'membership_agreements', 'public_purchase_intents'])
   }
+})
+
+test('signed public purchase checkout passes first-role prepay line item metadata when selected', async () => {
+  const db = makeDb({
+    membershipAgreements: [agreement({ plan: 'pro', cadence: 'annual', firstRolePrepaySelected: true })],
+    purchaseIntents: [intent({ plan: 'pro', cadence: 'annual', firstRolePrepaySelected: true })]
+  })
+  const response = await postCheckout(buildApp(db))
+
+  assert.equal(response.status, 200)
+  assert.equal(db.checkoutCalls.length, 1)
+  const call = db.checkoutCalls[0]
+  assert.deepEqual(call.firstRolePrepay, {
+    selected: true,
+    credit_type: 'first_role_prepay',
+    amount_cents: 62900,
+    normal_role_fee_cents: 69900,
+    discount_percent: 10
+  })
+  assert.equal(call.metadata.first_role_prepay_selected, 'true')
+  assert.equal(call.metadata.first_role_prepay_credit_type, 'first_role_prepay')
+  assert.equal(call.metadata.first_role_prepay_amount_cents, 62900)
+  assert.equal(call.metadata.first_role_prepay_normal_role_fee_cents, 69900)
+  assert.equal(call.metadata.first_role_prepay_discount_percent, 10)
+  assert.equal(call.metadata.public_purchase_intent_id, INTENT_ID)
+  assert.equal(call.metadata.membership_agreement_id, AGREEMENT_ID)
 })
 
 test('unsigned public agreement cannot start checkout and creates no access records', async () => {

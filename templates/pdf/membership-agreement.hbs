@@ -366,6 +366,13 @@
           </td>
         </tr>
       </table>
+      {{#if show_first_role_prepay_terms}}
+        {{#if first_role_prepay_selected}}
+          <p class="section-paragraph">Client selected the optional discounted first-role prepayment of {{first_role_prepay_amount}}. The prepaid first-role credit is non-refundable, has no expiration, and applies to the first role opened under the billing entity. Additional roles are billed at the standard per-role fee of {{first_role_normal_role_fee}}. Membership changes require client success/support review to apply or adjust the credit.</p>
+        {{else}}
+          <p class="section-paragraph">Client did not prepay the first role. The standard per-role fee is charged when Client opens a role.</p>
+        {{/if}}
+      {{/if}}
     {{/if}}
 
     <h2 class="ack-title">Membership Acknowledgments</h2>

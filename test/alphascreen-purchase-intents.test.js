@@ -188,6 +188,8 @@ test('valid Basic monthly intent creates pending intent with central package sna
   assert.equal(response.body.selected_package.interview_duration_minutes, 10)
   assert.equal(response.body.selected_package.additional_interview_price, 30)
   assert.equal(response.body.selected_package.per_role_fee, 399)
+  assert.equal(response.body.selected_package.first_role_prepay.selected, false)
+  assert.equal(response.body.selected_package.first_role_prepay.discounted_credit_amount_cents, 35900)
 
   assert.equal(db.inserts.length, 1)
   const row = db.inserts[0].row
@@ -198,6 +200,9 @@ test('valid Basic monthly intent creates pending intent with central package sna
   assert.equal(row.agreement_id, null)
   assert.equal(row.stripe_checkout_session_id, null)
   assert.equal(row.client_id, null)
+  assert.equal(row.first_role_prepay_selected, false)
+  assert.equal(row.first_role_prepay_amount_cents, null)
+  assert.equal(row.first_role_normal_role_fee_cents, null)
   assert.equal(row.package_snapshot.included_interviews, 20)
   assert.equal(row.package_snapshot.platform_fee, 299)
   assert.equal(row.package_snapshot.platform_fee_cents, 29900)
@@ -206,6 +211,9 @@ test('valid Basic monthly intent creates pending intent with central package sna
   assert.equal(row.package_snapshot.platform_annual_fee, 3299)
   assert.equal(row.package_snapshot.annual_platform_fee_note, 'Discounted annual platform fee')
   assert.equal(row.package_snapshot.per_role_fee, 399)
+  assert.equal(row.package_snapshot.first_role_prepay.selected, false)
+  assert.equal(row.package_snapshot.first_role_prepay.normal_role_fee_cents, 39900)
+  assert.equal(row.package_snapshot.first_role_prepay.discounted_credit_amount_cents, 35900)
   assertNoStaleAnnualPricingPayload(response.body.selected_package)
   assertNoStaleAnnualPricingPayload(row.package_snapshot)
 })
@@ -229,12 +237,72 @@ test('valid Pro annual intent creates pending intent when annual cadence is supp
   assert.equal(response.body.selected_package.included_interviews, 30)
   assert.equal(response.body.selected_package.max_interview_minutes, 12)
   assert.equal(response.body.selected_package.additional_interview_fee, 35)
+  assert.equal(response.body.selected_package.first_role_prepay.selected, false)
+  assert.equal(response.body.selected_package.first_role_prepay.discounted_credit_amount_cents, 62900)
   assert.equal(db.inserts[0].row.package_snapshot.per_role_fee, 699)
   assert.equal(db.inserts[0].row.package_snapshot.platform_fee, 6499)
   assert.equal(db.inserts[0].row.package_snapshot.platform_fee_cents, 649900)
   assert.equal(db.inserts[0].row.package_snapshot.platform_fee_billing_cadence, 'annual')
   assertNoStaleAnnualPricingPayload(response.body.selected_package)
   assertNoStaleAnnualPricingPayload(db.inserts[0].row.package_snapshot)
+})
+
+test('purchase intent with selected first-role prepay snapshots immutable Basic credit values', async () => {
+  const db = makeDb({ nextId: 'intent-basic-prepay' })
+  const response = await request(buildApp(db), validBody({
+    first_role_prepay_selected: true
+  }))
+
+  assert.equal(response.status, 201)
+  assert.equal(response.body.selected_package.first_role_prepay.selected, true)
+  assert.equal(response.body.selected_package.first_role_prepay.credit_type, 'first_role_prepay')
+  assert.equal(response.body.selected_package.first_role_prepay.normal_role_fee_cents, 39900)
+  assert.equal(response.body.selected_package.first_role_prepay.discounted_credit_amount_cents, 35900)
+  assert.equal(response.body.selected_package.first_role_prepay.discount_percent, 10)
+  assert.equal(response.body.selected_package.first_role_prepay.non_refundable, true)
+  assert.equal(response.body.selected_package.first_role_prepay.expires, false)
+
+  const row = db.inserts[0].row
+  assert.equal(row.first_role_prepay_selected, true)
+  assert.equal(row.first_role_prepay_amount_cents, 35900)
+  assert.equal(row.first_role_normal_role_fee_cents, 39900)
+  assert.equal(row.first_role_prepay_discount_percent, 10)
+  assert.equal(row.first_role_prepay_credit_type, 'first_role_prepay')
+  assert.deepEqual(row.package_snapshot.first_role_prepay, {
+    enabled: true,
+    credit_type: 'first_role_prepay',
+    normal_role_fee_cents: 39900,
+    discounted_credit_amount_cents: 35900,
+    discount_percent: 10,
+    non_refundable: true,
+    expires: false,
+    selected: true
+  })
+})
+
+test('purchase intent accepts nested selected first-role prepay for Pro and malformed input falls back to pay-later', async () => {
+  const proDb = makeDb({ nextId: 'intent-pro-prepay' })
+  const proResponse = await request(buildApp(proDb), validBody({
+    plan_key: 'pro',
+    billing_cadence: 'annual',
+    buyer_email: 'pro-prepay@company.example',
+    first_role_prepay: { selected: true }
+  }))
+
+  assert.equal(proResponse.status, 201)
+  assert.equal(proDb.inserts[0].row.first_role_prepay_selected, true)
+  assert.equal(proDb.inserts[0].row.first_role_prepay_amount_cents, 62900)
+  assert.equal(proDb.inserts[0].row.first_role_normal_role_fee_cents, 69900)
+
+  const malformedDb = makeDb({ nextId: 'intent-malformed-prepay' })
+  const malformedResponse = await request(buildApp(malformedDb), validBody({
+    buyer_email: 'malformed-prepay@company.example',
+    first_role_prepay: 'yes please'
+  }))
+
+  assert.equal(malformedResponse.status, 201)
+  assert.equal(malformedDb.inserts[0].row.first_role_prepay_selected, false)
+  assert.equal(malformedDb.inserts[0].row.package_snapshot.first_role_prepay.selected, false)
 })
 
 test('purchase intent accepts personal email domains and normalizes email', async () => {

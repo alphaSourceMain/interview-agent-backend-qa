@@ -155,6 +155,7 @@ function makeDb(tables = {}) {
       clients: [],
       client_members: [],
       email_delivery_events: [],
+      client_role_credits: [],
       ...tables,
     },
     selects: [],
@@ -169,7 +170,7 @@ function makeDb(tables = {}) {
 const NOW = new Date('2026-06-24T12:00:00.000Z');
 const silentLogger = { info() {}, warn() {}, error() {} };
 
-function packageSnapshot(plan = 'basic', cadence = 'monthly') {
+function packageSnapshot(plan = 'basic', cadence = 'monthly', firstRolePrepaySelected = false) {
   const isPro = plan === 'pro';
   const isAnnual = cadence === 'annual';
   return {
@@ -185,6 +186,16 @@ function packageSnapshot(plan = 'basic', cadence = 'monthly') {
     included_interviews: isPro ? 30 : 20,
     interview_duration_minutes: isPro ? 12 : 10,
     additional_interview_price: isPro ? 35 : 30,
+    first_role_prepay: {
+      enabled: true,
+      credit_type: 'first_role_prepay',
+      normal_role_fee_cents: isPro ? 69900 : 39900,
+      discounted_credit_amount_cents: isPro ? 62900 : 35900,
+      discount_percent: 10,
+      non_refundable: true,
+      expires: false,
+      selected: firstRolePrepaySelected === true,
+    },
   };
 }
 
@@ -194,7 +205,12 @@ function intent(overrides = {}) {
     status: overrides.status || 'pending',
     selected_plan_key: overrides.plan || 'basic',
     selected_billing_cadence: overrides.cadence || 'monthly',
-    package_snapshot: overrides.package_snapshot || packageSnapshot(overrides.plan || 'basic', overrides.cadence || 'monthly'),
+    package_snapshot: overrides.package_snapshot || packageSnapshot(overrides.plan || 'basic', overrides.cadence || 'monthly', overrides.firstRolePrepaySelected === true),
+    first_role_prepay_selected: overrides.firstRolePrepaySelected === true,
+    first_role_prepay_amount_cents: overrides.firstRolePrepaySelected === true ? (overrides.plan === 'pro' ? 62900 : 35900) : null,
+    first_role_normal_role_fee_cents: overrides.firstRolePrepaySelected === true ? (overrides.plan === 'pro' ? 69900 : 39900) : null,
+    first_role_prepay_discount_percent: overrides.firstRolePrepaySelected === true ? 10 : null,
+    first_role_prepay_credit_type: overrides.firstRolePrepaySelected === true ? 'first_role_prepay' : null,
     company_legal_name: overrides.company || 'Acme Dental LLC',
     company_dba: overrides.dba || 'Acme Dental',
     buyer_first_name: overrides.first || 'Alex',
@@ -273,7 +289,7 @@ test('admin public purchases payload summarizes rows and returns sanitized detai
       intent({ id: 'intent-started', status: 'pending', created_at: '2026-06-24T10:00:00.000Z' }),
       intent({ id: 'intent-agreement', status: 'agreement_pending', agreement_id: 'agreement-sent', created_at: '2026-06-24T09:00:00.000Z' }),
       intent({ id: 'intent-checkout', status: 'checkout_pending', agreement_id: 'agreement-checkout', client_id: 'client-checkout', created_at: '2026-06-24T08:00:00.000Z' }),
-      intent({ id: 'intent-complete', status: 'completed', plan: 'pro', cadence: 'annual', agreement_id: 'agreement-paid', client_id: 'client-paid', created_at: '2026-06-24T07:00:00.000Z' }),
+      intent({ id: 'intent-complete', status: 'completed', plan: 'pro', cadence: 'annual', agreement_id: 'agreement-paid', client_id: 'client-paid', firstRolePrepaySelected: true, created_at: '2026-06-24T07:00:00.000Z' }),
     ],
     membership_agreements: [
       agreement({ id: 'agreement-sent', status: 'sent' }),
@@ -301,6 +317,25 @@ test('admin public purchases payload summarizes rows and returns sanitized detai
         raw_payload: { secret: 'do-not-return' },
       },
     ],
+    client_role_credits: [
+      {
+        id: 'credit-unused',
+        billing_client_id: 'client-paid',
+        source_client_id: 'client-paid',
+        source_public_purchase_intent_id: 'intent-complete',
+        source_membership_agreement_id: 'agreement-paid',
+        source_stripe_checkout_session_id: 'cs_test_paid',
+        credit_type: 'first_role_prepay',
+        membership_key: 'pro',
+        normal_role_fee_cents: 69900,
+        discounted_credit_amount_cents: 62900,
+        discount_percent: 10,
+        status: 'unused',
+        used_at: null,
+        used_by_role_id: null,
+        created_at: '2026-06-24T07:31:00.000Z',
+      },
+    ],
   });
 
   const payload = await buildAdminPublicPurchasesPayload({ db, now: NOW, query: { days: '7', limit: '10' } });
@@ -318,7 +353,16 @@ test('admin public purchases payload summarizes rows and returns sanitized detai
   assert.equal(completed.membership.platform_fee, 6499);
   assert.equal(completed.account_setup.member_user_linked, true);
   assert.equal(completed.email_delivery.welcome_email.status, 'sent');
-  assert.deepEqual(Array.from(new Set(db.reads)).sort(), ['client_members', 'clients', 'email_delivery_events', 'membership_agreements', 'public_purchase_intents']);
+  assert.equal(completed.first_role_prepay.first_role_prepay_selected, true);
+  assert.equal(completed.first_role_prepay.first_role_prepay_amount_cents, 62900);
+  assert.equal(completed.first_role_prepay.first_role_normal_role_fee_cents, 69900);
+  assert.equal(completed.first_role_prepay.first_role_credit_status, 'unused');
+  assert.equal(completed.first_role_prepay.used_by_role_id, null);
+  assert.match(completed.support_summary, /First role prepay: Selected - \$629 credit unused/);
+  const started = payload.purchases.items.find((item) => item.purchase_intent_id === 'intent-started');
+  assert.equal(started.first_role_prepay.first_role_credit_status, 'not_selected');
+  assert.match(started.support_summary, /First role prepay: Not selected/);
+  assert.deepEqual(Array.from(new Set(db.reads)).sort(), ['client_members', 'client_role_credits', 'clients', 'email_delivery_events', 'membership_agreements', 'public_purchase_intents']);
   assert.equal(db.writes.length, 0);
 
   const serialized = JSON.stringify(payload);
@@ -375,9 +419,60 @@ test('support summary is returned with safe fields only', async () => {
   const summary = payload.purchases.items[0].support_summary;
   assert.match(summary, /Purchase intent ID: intent-summary/);
   assert.match(summary, /Agreement ID: agreement-summary/);
+  assert.match(summary, /First role prepay: Not selected/);
   assert.match(summary, /buyer signature is pending/i);
   assert.match(summary, /Checkout is unavailable until the agreement is signed/i);
   assert.doesNotMatch(summary, /raw_payload|signer_token|signature_hash|draft_pdf|secret|Bearer/i);
+});
+
+test('admin public purchases payload summarizes used first-role prepay credit', async () => {
+  const db = makeDb({
+    public_purchase_intents: [
+      intent({
+        id: 'intent-used-credit',
+        status: 'completed',
+        plan: 'basic',
+        agreement_id: 'agreement-used-credit',
+        client_id: 'client-used-credit',
+        firstRolePrepaySelected: true,
+      }),
+    ],
+    membership_agreements: [
+      agreement({ id: 'agreement-used-credit', status: 'signed', checkout_status: 'paid', client_id: 'client-used-credit' }),
+    ],
+    clients: [
+      { id: 'client-used-credit', name: 'Used Credit Co', email: 'alex@example.com', billing_status: 'active', subscription_status: 'active', plan_tier: 'basic', billing_interval: 'monthly' },
+    ],
+    client_members: [
+      { client_id: 'client-used-credit', user_id: 'user-used-credit', email: 'alex@example.com', name: 'Alex Buyer', role: 'admin' },
+    ],
+    client_role_credits: [
+      {
+        id: 'credit-used',
+        billing_client_id: 'client-used-credit',
+        source_client_id: 'client-used-credit',
+        source_public_purchase_intent_id: 'intent-used-credit',
+        source_membership_agreement_id: 'agreement-used-credit',
+        credit_type: 'first_role_prepay',
+        membership_key: 'basic',
+        normal_role_fee_cents: 39900,
+        discounted_credit_amount_cents: 35900,
+        discount_percent: 10,
+        status: 'used',
+        used_by_role_id: 'role-used-credit',
+        used_at: '2026-06-25T12:30:00.000Z',
+        created_at: '2026-06-24T10:30:00.000Z',
+      },
+    ],
+  });
+
+  const payload = await buildAdminPublicPurchasesPayload({ db, now: NOW, query: { days: '7' } });
+  const item = payload.purchases.items[0];
+
+  assert.equal(item.first_role_prepay.first_role_credit_status, 'used');
+  assert.equal(item.first_role_prepay.used_by_role_id, 'role-used-credit');
+  assert.equal(item.first_role_prepay.used_at, '2026-06-25T12:30:00.000Z');
+  assert.match(item.support_summary, /First role prepay: Selected - \$359 credit used by role role-used-credit on 2026-06-25T12:30:00.000Z/);
 });
 
 test('agreement-pending row summary and resend action use the same unsigned agreement', async () => {

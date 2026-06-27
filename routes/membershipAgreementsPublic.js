@@ -19,7 +19,8 @@ const { createSubscriptionCheckoutSession } = require('../src/lib/subscriptionCh
 const {
   normalizeAlphaScreenPlanKey,
   normalizeBillingInterval,
-  getAlphaScreenPlatformFee
+  getAlphaScreenPlatformFee,
+  getAlphaScreenFirstRolePrepayConfig
 } = require('../src/lib/alphaScreenPackages');
 
 const router = express.Router();
@@ -224,12 +225,33 @@ function packageNumber(snapshot, ...keys) {
   return null;
 }
 
+function firstRolePrepaySnapshot(packageSnapshot) {
+  return packageSnapshot?.first_role_prepay && typeof packageSnapshot.first_role_prepay === 'object'
+    ? packageSnapshot.first_role_prepay
+    : null;
+}
+
+function buildFirstRolePrepayCheckout(packageSnapshot) {
+  const prepay = firstRolePrepaySnapshot(packageSnapshot);
+  if (!prepay?.selected) return null;
+  return {
+    selected: true,
+    credit_type: prepay.credit_type || 'first_role_prepay',
+    amount_cents: Number(prepay.discounted_credit_amount_cents),
+    normal_role_fee_cents: Number(prepay.normal_role_fee_cents),
+    discount_percent: Number(prepay.discount_percent)
+  };
+}
+
 function buildPublicAgreementCheckoutMetadata({ agreement, agreementInput, intent, packageSnapshot }) {
   const planTier = normalizeAlphaScreenPlanKey(packageSnapshot?.plan_key || agreementInput?.membership_tier);
   const billingInterval = normalizeBillingInterval(packageSnapshot?.billing_cadence || agreementInput?.billing_option);
-  return {
+  const firstRolePrepay = buildFirstRolePrepayCheckout(packageSnapshot);
+  const metadata = {
     agreement_id: agreement.id,
     purchase_intent_id: intent?.id || undefined,
+    public_purchase_intent_id: intent?.id || undefined,
+    membership_agreement_id: agreement.id,
     agreement_checkout: 'true',
     checkout_status: 'pending_payment',
     package_plan_key: planTier,
@@ -240,6 +262,14 @@ function buildPublicAgreementCheckoutMetadata({ agreement, agreementInput, inten
     additional_interview_fee: packageNumber(packageSnapshot, 'additional_interview_fee', 'additional_interview_price', 'overage_price'),
     max_interview_minutes: packageNumber(packageSnapshot, 'max_interview_minutes', 'interview_duration_minutes')
   };
+  if (firstRolePrepay?.selected) {
+    metadata.first_role_prepay_selected = 'true';
+    metadata.first_role_prepay_credit_type = firstRolePrepay.credit_type;
+    metadata.first_role_prepay_amount_cents = firstRolePrepay.amount_cents;
+    metadata.first_role_prepay_normal_role_fee_cents = firstRolePrepay.normal_role_fee_cents;
+    metadata.first_role_prepay_discount_percent = firstRolePrepay.discount_percent;
+  }
+  return metadata;
 }
 
 function validatePublicPurchaseIntentForCheckout({ agreement, agreementInput, intent }) {
@@ -286,6 +316,9 @@ function validatePublicPurchaseIntentForCheckout({ agreement, agreementInput, in
   const includedInterviews = packageNumber(packageSnapshot, 'included_interviews_per_role', 'included_interviews');
   const additionalInterviewFee = packageNumber(packageSnapshot, 'additional_interview_fee', 'additional_interview_price', 'overage_price');
   const maxInterviewMinutes = packageNumber(packageSnapshot, 'max_interview_minutes', 'interview_duration_minutes');
+  const firstRolePrepay = firstRolePrepaySnapshot(packageSnapshot);
+  const firstRolePrepaySelected = firstRolePrepay?.selected === true;
+  const expectedPrepay = getAlphaScreenFirstRolePrepayConfig(planTier);
   if (
     configuredPlatformFee === null ||
     snapshotPlatformFee === null ||
@@ -296,6 +329,20 @@ function validatePublicPurchaseIntentForCheckout({ agreement, agreementInput, in
     maxInterviewMinutes === null
   ) {
     throw makeCheckoutError(409, 'package_snapshot_invalid', 'Agreement package snapshot is invalid for checkout.');
+  }
+  if (intent.first_role_prepay_selected === true && !firstRolePrepaySelected) {
+    throw makeCheckoutError(409, 'first_role_prepay_snapshot_missing', 'Agreement first-role prepay snapshot is missing.');
+  }
+  if (firstRolePrepaySelected) {
+    if (
+      !expectedPrepay ||
+      firstRolePrepay.credit_type !== expectedPrepay.credit_type ||
+      Number(firstRolePrepay.normal_role_fee_cents) !== Number(expectedPrepay.normal_role_fee_cents) ||
+      Number(firstRolePrepay.discounted_credit_amount_cents) !== Number(expectedPrepay.discounted_credit_amount_cents) ||
+      Number(firstRolePrepay.discount_percent) !== Number(expectedPrepay.discount_percent)
+    ) {
+      throw makeCheckoutError(409, 'first_role_prepay_snapshot_invalid', 'Agreement first-role prepay snapshot is invalid for checkout.');
+    }
   }
 
   return {
@@ -313,7 +360,7 @@ async function loadPublicPurchaseIntentForAgreement(agreement) {
 
   const { data, error } = await supabaseAdmin
     .from('public_purchase_intents')
-    .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,expires_at,created_at')
+    .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,expires_at,created_at')
     .eq('id', purchaseIntentId)
     .maybeSingle();
   if (error) {
@@ -999,6 +1046,9 @@ router.post('/checkout-session', async (req, res) => {
       : {
           agreement_id: agreement.id
         };
+    const firstRolePrepay = publicAgreement
+      ? buildFirstRolePrepayCheckout(publicPackageSnapshot)
+      : null;
     const idempotencyKey = publicAgreement
       ? `agreement_checkout:${agreement.id}:${planTier}:${billingInterval}`
       : '';
@@ -1018,6 +1068,7 @@ router.post('/checkout-session', async (req, res) => {
       billingInterval,
       metadataSource: 'agreement_checkout',
       metadata: checkoutMetadata,
+      firstRolePrepay,
       enterpriseFees,
       embedded: embeddedCheckoutRequested,
       cancelUrl,

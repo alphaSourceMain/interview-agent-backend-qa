@@ -6,6 +6,7 @@ const { requireParentClient } = require('../src/lib/clientBillingScope');
 const { getRoleInterviewAvailability } = require('../src/lib/roleInterviewAvailability');
 const { buildAlphaScreenPlanSettingsPayload } = require('../src/lib/alphaScreenPackages');
 const { activatePublicPurchaseAgreementCheckout } = require('../src/lib/publicPurchaseActivation');
+const { finalizePendingRolePurchase } = require('../src/lib/rolePurchaseFinalizer');
 const router = express.Router();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '');
@@ -567,61 +568,10 @@ router.post('/', async (req, res) => {
             claimedPendingRolePurchase = inProgressPendingRolePurchase || null;
           }
           if (claimedPendingRolePurchase) {
-            const roleTitle = String(claimedPendingRolePurchase.role_title || '').trim();
-            if (!roleTitle) throw new Error('Pending role title missing');
-            const interviewTypeRaw = String(claimedPendingRolePurchase.interview_type || '').trim().toUpperCase();
-            const interviewType = ['BASIC', 'DETAILED', 'TECHNICAL'].includes(interviewTypeRaw) ? interviewTypeRaw : null;
-            const { data: linkedRole, error: linkedRoleErr } = await supabaseAdmin
-              .from('roles')
-              .select('id')
-              .eq('client_id', claimedPendingRolePurchase.client_id)
-              .eq('pending_role_purchase_id', claimedPendingRolePurchase.id)
-              .order('created_at', { ascending: false })
-              .limit(1)
-              .maybeSingle();
-            if (linkedRoleErr) throw new Error(linkedRoleErr.message || 'Role recovery lookup failed');
-            const linkedRoleId = linkedRole?.id || null;
-            let createdRole = linkedRoleId ? { id: linkedRoleId } : null;
-            if (!createdRole) {
-              const { data: insertedRole, error: createdRoleErr } = await supabaseAdmin
-                .from('roles')
-                .insert({
-                  client_id: claimedPendingRolePurchase.client_id,
-                  title: roleTitle,
-                  interview_type: interviewType,
-                  pending_role_purchase_id: claimedPendingRolePurchase.id
-                })
-                .select('id')
-                .single();
-              if (createdRoleErr) throw new Error(createdRoleErr.message || 'Role creation failed');
-              createdRole = insertedRole;
-            }
-
-            const jdStoragePath = String(claimedPendingRolePurchase.jd_storage_path || '').trim();
-            if (jdStoragePath) {
-              const { error: roleJdUpdateErr } = await supabaseAdmin
-                .from('roles')
-                .update({ job_description_url: jdStoragePath })
-                .eq('id', createdRole.id)
-                .eq('client_id', claimedPendingRolePurchase.client_id);
-              if (roleJdUpdateErr) throw new Error(roleJdUpdateErr.message || 'Role JD update failed');
-              const { generateRubricAndKBForRole } = require('../generateRubric');
-              await generateRubricAndKBForRole(createdRole.id);
-            }
-
-            const { data: finalizedPendingRolePurchase, error: finalizeErr } = await supabaseAdmin
-              .from('pending_role_purchases')
-              .update({
-                finalized_role_id: createdRole.id,
-                status: 'finalized',
-                finalized_at: new Date().toISOString()
-              })
-              .eq('id', claimedPendingRolePurchase.id)
-              .is('finalized_role_id', null)
-              .in('status', linkedRoleId ? ['pending', 'paid', 'finalizing'] : ['finalizing'])
-              .select('id')
-              .maybeSingle();
-            if (finalizeErr || !finalizedPendingRolePurchase) throw new Error(finalizeErr?.message || 'Pending role purchase finalize failed');
+            await finalizePendingRolePurchase({
+              db: supabaseAdmin,
+              pendingRolePurchase: claimedPendingRolePurchase
+            });
           }
         }
       } else if (String(eventObject?.mode || '').toLowerCase() === 'subscription') {

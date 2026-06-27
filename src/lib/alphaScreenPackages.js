@@ -3,6 +3,7 @@
 const PUBLIC_PACKAGE_KEYS = Object.freeze(['basic', 'pro'])
 const BILLING_INTERVALS = Object.freeze(['monthly', 'annual'])
 const ANNUAL_PLATFORM_FEE_NOTE = 'Discounted annual platform fee'
+const FIRST_ROLE_PREPAY_CREDIT_TYPE = 'first_role_prepay'
 
 function moneyCents(value) {
   return Math.round(Number(value || 0) * 100)
@@ -22,6 +23,10 @@ const ALPHA_SCREEN_PACKAGES = Object.freeze({
     additional_interview_price: 30,
     additional_interview_fee: 30,
     per_role_fee: 399,
+    first_role_prepay_enabled: true,
+    first_role_prepay_discount_percent: 10,
+    first_role_prepay_price_cents: 35900,
+    first_role_prepay_stripe_price_env: 'STRIPE_PRICE_BASIC_FIRST_ROLE_PREPAY',
     billing_cadences: Object.freeze({
       monthly: Object.freeze({
         key: 'monthly',
@@ -48,6 +53,10 @@ const ALPHA_SCREEN_PACKAGES = Object.freeze({
     additional_interview_price: 35,
     additional_interview_fee: 35,
     per_role_fee: 699,
+    first_role_prepay_enabled: true,
+    first_role_prepay_discount_percent: 10,
+    first_role_prepay_price_cents: 62900,
+    first_role_prepay_stripe_price_env: 'STRIPE_PRICE_PRO_FIRST_ROLE_PREPAY',
     billing_cadences: Object.freeze({
       monthly: Object.freeze({
         key: 'monthly',
@@ -123,16 +132,53 @@ function getAlphaScreenStripePriceId(planKey, billingInterval, env = process.env
   return envName ? String(env?.[envName] || '').trim() : ''
 }
 
+function getAlphaScreenFirstRolePrepayConfig(planKey) {
+  const pkg = getAlphaScreenPackage(planKey)
+  if (!pkg || pkg.first_role_prepay_enabled !== true) return null
+  return {
+    enabled: true,
+    credit_type: FIRST_ROLE_PREPAY_CREDIT_TYPE,
+    normal_role_fee_cents: moneyCents(pkg.per_role_fee),
+    discounted_credit_amount_cents: Number(pkg.first_role_prepay_price_cents),
+    discount_percent: Number(pkg.first_role_prepay_discount_percent),
+    non_refundable: true,
+    expires: false,
+    stripe_price_env_var: pkg.first_role_prepay_stripe_price_env
+  }
+}
+
+function getAlphaScreenFirstRolePrepayStripePriceEnvName(planKey) {
+  return String(getAlphaScreenFirstRolePrepayConfig(planKey)?.stripe_price_env_var || '').trim()
+}
+
+function getAlphaScreenFirstRolePrepayStripePriceId(planKey, env = process.env) {
+  const envName = getAlphaScreenFirstRolePrepayStripePriceEnvName(planKey)
+  return envName ? String(env?.[envName] || '').trim() : ''
+}
+
 function isAlphaScreenBillingCadenceSupported(planKey, billingInterval) {
   const pkg = getAlphaScreenPackage(planKey)
   const interval = normalizeBillingInterval(billingInterval)
   return Boolean(pkg?.billing_cadences?.[interval])
 }
 
-function buildAlphaScreenPackageSnapshot(planKey, billingInterval) {
+function buildAlphaScreenFirstRolePrepaySnapshot(planKey, { selected = false } = {}) {
+  const config = getAlphaScreenFirstRolePrepayConfig(planKey)
+  if (!config) return null
+  const { stripe_price_env_var, ...safeConfig } = config
+  return {
+    ...safeConfig,
+    selected: selected === true
+  }
+}
+
+function buildAlphaScreenPackageSnapshot(planKey, billingInterval, options = {}) {
   const pkg = getAlphaScreenPackage(planKey)
   const interval = normalizeBillingInterval(billingInterval)
   if (!pkg || !interval || !pkg.billing_cadences?.[interval]) return null
+  const firstRolePrepay = buildAlphaScreenFirstRolePrepaySnapshot(pkg.plan_key, {
+    selected: options.firstRolePrepaySelected === true || options.first_role_prepay_selected === true
+  })
 
   return {
     plan_key: pkg.plan_key,
@@ -153,6 +199,7 @@ function buildAlphaScreenPackageSnapshot(planKey, billingInterval) {
     additional_interview_fee: pkg.additional_interview_fee,
     overage_price: pkg.additional_interview_price,
     per_role_fee: pkg.per_role_fee,
+    first_role_prepay: firstRolePrepay,
     billing_cadence: interval,
     billing_cadence_display_name: pkg.billing_cadences[interval].display_name
   }
@@ -177,6 +224,10 @@ function listPublicAlphaScreenPackages({ env = process.env } = {}) {
       additional_interview_fee: pkg.additional_interview_fee,
       overage_price: pkg.additional_interview_price,
       per_role_fee: pkg.per_role_fee,
+      first_role_prepay: {
+        ...buildAlphaScreenFirstRolePrepaySnapshot(pkg.plan_key, { selected: false }),
+        stripe_price_configured: Boolean(String(env?.[pkg.first_role_prepay_stripe_price_env] || '').trim())
+      },
       billing_cadences: BILLING_INTERVALS.map((interval) => {
         const cadence = pkg.billing_cadences[interval]
         return {
@@ -201,7 +252,12 @@ module.exports = {
   buildAlphaScreenPlanSettingsPayload,
   getAlphaScreenStripePriceEnvName,
   getAlphaScreenStripePriceId,
+  getAlphaScreenFirstRolePrepayConfig,
+  getAlphaScreenFirstRolePrepayStripePriceEnvName,
+  getAlphaScreenFirstRolePrepayStripePriceId,
   isAlphaScreenBillingCadenceSupported,
+  buildAlphaScreenFirstRolePrepaySnapshot,
   buildAlphaScreenPackageSnapshot,
+  FIRST_ROLE_PREPAY_CREDIT_TYPE,
   listPublicAlphaScreenPackages
 }

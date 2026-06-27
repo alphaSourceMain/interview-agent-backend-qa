@@ -70,6 +70,10 @@ const { normalizeCriteriaConfig, stableStringify } = require('./src/lib/candidat
 const { getRoleInterviewAvailability } = require('./src/lib/roleInterviewAvailability')
 const { cleanupNoSubstantiveRecordings } = require('./src/lib/recordingCleanup')
 const { createSubscriptionCheckoutSession } = require('./src/lib/subscriptionCheckout')
+const {
+  finalizePrepaidRoleCredit,
+  findUnusedFirstRolePrepayCredit
+} = require('./src/lib/rolePurchaseFinalizer')
 const { processClientEntityImport } = require('./src/lib/clientEntityImportService')
 const { archiveChildClientEntity, restoreChildClientEntity } = require('./src/lib/clientEntityArchive')
 const { buildAdminMetricsPayload, safeErrorBody } = require('./src/lib/adminMetricsService')
@@ -1120,6 +1124,47 @@ app.post('/clients/roles/checkout-session', requireAuth, withClientScope, roleCh
       return res.status(400).json({ error: 'invalid_per_role_fee' })
     }
 
+    let prepayAttemptJdStoragePath = ''
+    const unusedFirstRoleCredit = await findUnusedFirstRolePrepayCredit({
+      db: supabaseAdmin,
+      billingClientId
+    })
+    if (unusedFirstRoleCredit?.id) {
+      const prepayUploadObjectKey = `pending/${clientId}/first-role-credit-${crypto.randomUUID()}/${safeFilename}`
+      const prepayJdUpload = await supabaseAdmin.storage
+        .from(ROLE_CHECKOUT_JD_BUCKET)
+        .upload(prepayUploadObjectKey, jdFile.buffer, { contentType, upsert: true })
+      if (prepayJdUpload.error) {
+        return res.status(500).json({ error: 'prepaid_role_jd_upload_failed', detail: prepayJdUpload.error.message })
+      }
+      prepayAttemptJdStoragePath = `${ROLE_CHECKOUT_JD_BUCKET}/${prepayUploadObjectKey}`
+
+      const prepaidFinalization = await finalizePrepaidRoleCredit({
+        db: supabaseAdmin,
+        billingClientId,
+        clientId,
+        roleTitle,
+        interviewType,
+        jdStoragePath: prepayAttemptJdStoragePath,
+        generateRubricAndKBForRole,
+        throwOnEnrichmentError: false,
+        logger: console
+      })
+      if (prepaidFinalization.applied) {
+        return res.json({
+          ok: true,
+          credit_applied: true,
+          role_id: prepaidFinalization.role_id,
+          message: 'First-role prepay credit applied.'
+        })
+      }
+      console.warn('[role-checkout] first_role_prepay_credit_unavailable_after_lookup', {
+        billing_client_id: billingClientId,
+        client_id: clientId,
+        status: prepaidFinalization.status || 'credit_not_available'
+      })
+    }
+
     const Stripe = require('stripe')
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -1185,15 +1230,18 @@ app.post('/clients/roles/checkout-session', requireAuth, withClientScope, roleCh
       return res.status(500).json({ error: 'create_pending_role_purchase_failed', detail: pendingRolePurchaseErr.message })
     }
 
-    const pendingJdObjectKey = `pending/${clientId}/${pendingRolePurchase.id}/${safeFilename}`
-    const pendingJdUpload = await supabaseAdmin.storage
-      .from(ROLE_CHECKOUT_JD_BUCKET)
-      .upload(pendingJdObjectKey, jdFile.buffer, { contentType, upsert: true })
-    if (pendingJdUpload.error) {
-      return res.status(500).json({ error: 'pending_jd_upload_failed', detail: pendingJdUpload.error.message })
+    let pendingJdStoragePath = prepayAttemptJdStoragePath
+    if (!pendingJdStoragePath) {
+      const pendingJdObjectKey = `pending/${clientId}/${pendingRolePurchase.id}/${safeFilename}`
+      const pendingJdUpload = await supabaseAdmin.storage
+        .from(ROLE_CHECKOUT_JD_BUCKET)
+        .upload(pendingJdObjectKey, jdFile.buffer, { contentType, upsert: true })
+      if (pendingJdUpload.error) {
+        return res.status(500).json({ error: 'pending_jd_upload_failed', detail: pendingJdUpload.error.message })
+      }
+      pendingJdStoragePath = `${ROLE_CHECKOUT_JD_BUCKET}/${pendingJdObjectKey}`
     }
 
-    const pendingJdStoragePath = `${ROLE_CHECKOUT_JD_BUCKET}/${pendingJdObjectKey}`
     const { error: pendingRolePurchaseJdUpdateErr } = await supabaseAdmin
       .from('pending_role_purchases')
       .update({

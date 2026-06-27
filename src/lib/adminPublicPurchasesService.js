@@ -44,6 +44,11 @@ const INTENT_SELECT_COLUMNS = [
   'selected_plan_key',
   'selected_billing_cadence',
   'package_snapshot',
+  'first_role_prepay_selected',
+  'first_role_prepay_amount_cents',
+  'first_role_normal_role_fee_cents',
+  'first_role_prepay_discount_percent',
+  'first_role_prepay_credit_type',
   'company_legal_name',
   'company_dba',
   'buyer_first_name',
@@ -98,6 +103,24 @@ const CLIENT_SELECT_COLUMNS = [
 ].join(',');
 const MEMBER_SELECT_COLUMNS = 'client_id,user_id,email,name,role,created_at';
 const EMAIL_SELECT_COLUMNS = 'id,email,email_category,category,status,event_type,event_at,created_at,is_problem,custom_args';
+const CREDIT_SELECT_COLUMNS = [
+  'id',
+  'billing_client_id',
+  'source_client_id',
+  'source_public_purchase_intent_id',
+  'source_membership_agreement_id',
+  'source_stripe_checkout_session_id',
+  'credit_type',
+  'membership_key',
+  'normal_role_fee_cents',
+  'discounted_credit_amount_cents',
+  'discount_percent',
+  'status',
+  'used_at',
+  'used_by_role_id',
+  'created_at',
+  'updated_at'
+].join(',');
 
 function trimText(value, max = 300) {
   return String(value == null ? '' : value).trim().slice(0, max);
@@ -346,6 +369,26 @@ async function readWelcomeEmailRows(db, emails, warnings = []) {
   }
 }
 
+async function readCreditRows(db, purchaseIntentIds, warnings = []) {
+  const ids = cleanIdList(purchaseIntentIds);
+  if (!ids.length) return [];
+  let query = db
+    .from('client_role_credits')
+    .select(CREDIT_SELECT_COLUMNS)
+    .in('source_public_purchase_intent_id', ids)
+    .limit(READ_LIMIT);
+  try {
+    return await runQuery(query, 'client_role_credits_read_failed');
+  } catch (error) {
+    warnings.push({
+      source: 'client_role_credits',
+      code: trimText(error?.code, 80) || 'client_role_credits_read_failed',
+      detail: 'First role prepay credit summaries are unavailable for this response.'
+    });
+    return [];
+  }
+}
+
 function mapById(rows) {
   const map = new Map();
   for (const row of rows || []) {
@@ -396,6 +439,19 @@ function buildEmailSummaryMap(rows) {
   return { byIntentId, byEmail };
 }
 
+function buildCreditMap(rows) {
+  const byIntentId = new Map();
+  for (const row of rows || []) {
+    const intentId = trimText(row?.source_public_purchase_intent_id, 120);
+    if (!intentId) continue;
+    const existing = byIntentId.get(intentId);
+    if (!existing || String(row?.created_at || '') > String(existing?.created_at || '')) {
+      byIntentId.set(intentId, row);
+    }
+  }
+  return { byIntentId };
+}
+
 function chooseBuyerMember(members, buyerEmail) {
   const email = lowerText(buyerEmail, 254);
   const rows = Array.isArray(members) ? members : [];
@@ -433,6 +489,62 @@ function buildMembershipSummary(intent) {
     included_interviews: Number.isFinite(Number(snapshot.included_interviews || snapshot.included_interviews_per_role)) ? Number(snapshot.included_interviews || snapshot.included_interviews_per_role) : null,
     interview_duration_minutes: Number.isFinite(Number(snapshot.interview_duration_minutes || snapshot.max_interview_minutes)) ? Number(snapshot.interview_duration_minutes || snapshot.max_interview_minutes) : null,
     additional_interview_price: Number.isFinite(Number(snapshot.additional_interview_price || snapshot.additional_interview_fee || snapshot.overage_price)) ? Number(snapshot.additional_interview_price || snapshot.additional_interview_fee || snapshot.overage_price) : null
+  };
+}
+
+function firstRolePrepaySnapshot(intent) {
+  const snapshot = resolvePackageSnapshot(intent);
+  return snapshot.first_role_prepay && typeof snapshot.first_role_prepay === 'object'
+    ? snapshot.first_role_prepay
+    : null;
+}
+
+function numberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatUsdCents(value) {
+  const cents = Number(value);
+  if (!Number.isFinite(cents)) return '';
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0
+  }).format(cents / 100);
+}
+
+function buildFirstRolePrepaySummary(intent, credit) {
+  const snapshot = firstRolePrepaySnapshot(intent);
+  const selected = intent?.first_role_prepay_selected === true || snapshot?.selected === true;
+  if (!selected) {
+    return {
+      first_role_prepay_selected: false,
+      first_role_prepay_amount_cents: null,
+      first_role_normal_role_fee_cents: null,
+      first_role_prepay_discount_percent: null,
+      first_role_prepay_credit_type: null,
+      first_role_credit_status: 'not_selected',
+      credit_id: null,
+      used_by_role_id: null,
+      used_at: null
+    };
+  }
+
+  const creditStatus = lowerText(credit?.status, 40);
+  const mappedStatus = credit?.id
+    ? (creditStatus === 'unused' || creditStatus === 'used' ? creditStatus : 'unknown')
+    : 'unknown';
+  return {
+    first_role_prepay_selected: true,
+    first_role_prepay_amount_cents: numberOrNull(credit?.discounted_credit_amount_cents ?? intent?.first_role_prepay_amount_cents ?? snapshot?.discounted_credit_amount_cents),
+    first_role_normal_role_fee_cents: numberOrNull(credit?.normal_role_fee_cents ?? intent?.first_role_normal_role_fee_cents ?? snapshot?.normal_role_fee_cents),
+    first_role_prepay_discount_percent: numberOrNull(credit?.discount_percent ?? intent?.first_role_prepay_discount_percent ?? snapshot?.discount_percent),
+    first_role_prepay_credit_type: trimText(credit?.credit_type || intent?.first_role_prepay_credit_type || snapshot?.credit_type, 80) || 'first_role_prepay',
+    first_role_credit_status: mappedStatus,
+    credit_id: trimText(credit?.id, 120) || null,
+    used_by_role_id: trimText(credit?.used_by_role_id, 120) || null,
+    used_at: trimText(credit?.used_at, 40) || null
   };
 }
 
@@ -580,6 +692,7 @@ function buildSupportSummary(item) {
     `Buyer email: ${trimText(item?.buyer?.email, 254) || 'Not available'}`,
     `Membership: ${trimText(item?.membership?.display_name, 80) || trimText(item?.membership?.key, 40) || 'Not available'}`,
     `Cadence: ${trimText(item?.membership?.billing_cadence, 40) || 'Not available'}`,
+    firstRolePrepaySupportLine(item?.first_role_prepay),
     `Agreement status: ${trimText(item?.agreement?.status, 80) || 'Not available'}`,
     `Payment status: ${trimText(item?.payment?.checkout_status || item?.payment?.billing_status, 80) || 'Not available'}`,
     `Setup status: ${item?.account_setup?.member_user_linked ? 'member linked' : item?.account_setup?.member_found ? 'member pending user link' : 'member not found'}`,
@@ -592,12 +705,25 @@ function buildSupportSummary(item) {
   return lines.join('\n');
 }
 
-function sanitizePurchaseItem({ intent, agreement, client, member, emailSummary }) {
+function firstRolePrepaySupportLine(prepay) {
+  if (!prepay?.first_role_prepay_selected) return 'First role prepay: Not selected';
+  const amount = formatUsdCents(prepay.first_role_prepay_amount_cents) || 'selected amount';
+  if (prepay.first_role_credit_status === 'unused') return `First role prepay: Selected - ${amount} credit unused`;
+  if (prepay.first_role_credit_status === 'used') {
+    const roleId = trimText(prepay.used_by_role_id, 120) || 'unknown role';
+    const usedAt = trimText(prepay.used_at, 40) || 'date unavailable';
+    return `First role prepay: Selected - ${amount} credit used by role ${roleId} on ${usedAt}`;
+  }
+  return `First role prepay: Selected - ${amount} credit status unknown`;
+}
+
+function sanitizePurchaseItem({ intent, agreement, client, member, emailSummary, firstRoleCredit }) {
   const buyerFirst = trimText(intent?.buyer_first_name, 80);
   const buyerLast = trimText(intent?.buyer_last_name, 80);
   const buyerName = [buyerFirst, buyerLast].filter(Boolean).join(' ');
   const membership = buildMembershipSummary(intent);
   const status = mapPublicPurchaseStatus({ intent, agreement, client, member });
+  const firstRolePrepay = buildFirstRolePrepaySummary(intent, firstRoleCredit);
   const item = {
     id: trimText(intent?.id, 120),
     purchase_intent_id: trimText(intent?.id, 120),
@@ -615,6 +741,7 @@ function sanitizePurchaseItem({ intent, agreement, client, member, emailSummary 
       title: trimText(intent?.buyer_title, 120) || null
     },
     membership,
+    first_role_prepay: firstRolePrepay,
     source: {
       path: trimText(intent?.source_path, 300) || null
     },
@@ -1133,6 +1260,8 @@ async function buildAdminPublicPurchasesPayload({ db, query = {}, now = new Date
   const membersByClientId = buildMemberMap(memberRows);
   const emailRows = await readWelcomeEmailRows(db, intentRows.map((row) => row?.buyer_email), warnings);
   const emailSummaries = buildEmailSummaryMap(emailRows);
+  const creditRows = await readCreditRows(db, intentRows.map((row) => row?.id), warnings);
+  const creditSummaries = buildCreditMap(creditRows);
 
   const allItems = intentRows.map((intent) => {
     const agreement = agreementsById.get(trimText(intent?.agreement_id, 120)) || null;
@@ -1143,7 +1272,8 @@ async function buildAdminPublicPurchasesPayload({ db, query = {}, now = new Date
       emailSummaries.byIntentId.get(trimText(intent?.id, 120)) ||
       emailSummaries.byEmail.get(lowerText(intent?.buyer_email, 254)) ||
       null;
-    return sanitizePurchaseItem({ intent, agreement, client, member, emailSummary });
+    const firstRoleCredit = creditSummaries.byIntentId.get(trimText(intent?.id, 120)) || null;
+    return sanitizePurchaseItem({ intent, agreement, client, member, emailSummary, firstRoleCredit });
   }).filter((item) => {
     if (filters.membership === 'enterprise') return item.membership.key === 'enterprise';
     if (filters.status && item.status.key !== filters.status) return false;

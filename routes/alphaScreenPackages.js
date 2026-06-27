@@ -69,6 +69,11 @@ function cleanLookupId(value) {
   return trimText(value, 200)
 }
 
+function readOptionalBoolean(value) {
+  if (value === true) return true
+  return false
+}
+
 function slugify(value) {
   const slug = String(value || '')
     .trim()
@@ -119,6 +124,9 @@ function normalizePurchaseIntentInput(body = {}) {
   const planKey = normalizeAlphaScreenPlanKey(rawPlanKey)
   const billingCadence = normalizeBillingInterval(rawBillingCadence)
   const buyerEmail = trimText(body.buyer_email || body.email, 254).toLowerCase()
+  const nestedPrepay = body.first_role_prepay && typeof body.first_role_prepay === 'object'
+    ? body.first_role_prepay
+    : {}
 
   return {
     raw_plan_key: rawPlanKey,
@@ -133,6 +141,11 @@ function normalizePurchaseIntentInput(body = {}) {
     buyer_phone: cleanPhone(body.buyer_phone || body.phone),
     buyer_title: trimText(body.buyer_title || body.title, 120),
     source_path: cleanPath(body.source_path || body.path),
+    first_role_prepay_selected: readOptionalBoolean(
+      Object.prototype.hasOwnProperty.call(body, 'first_role_prepay_selected')
+        ? body.first_role_prepay_selected
+        : nestedPrepay.selected
+    ),
     agreement_acknowledged: body.agreement_acknowledged === true,
     contact_acknowledged: body.contact_acknowledged === true
   }
@@ -201,7 +214,41 @@ function safePackageSummary(snapshot = {}) {
     additional_interview_price: snapshot.additional_interview_price ?? null,
     additional_interview_fee: snapshot.additional_interview_fee ?? null,
     overage_price: snapshot.overage_price ?? null,
-    per_role_fee: snapshot.per_role_fee ?? null
+    per_role_fee: snapshot.per_role_fee ?? null,
+    first_role_prepay: snapshot.first_role_prepay && typeof snapshot.first_role_prepay === 'object'
+      ? {
+          enabled: snapshot.first_role_prepay.enabled === true,
+          selected: snapshot.first_role_prepay.selected === true,
+          credit_type: snapshot.first_role_prepay.credit_type || null,
+          normal_role_fee_cents: snapshot.first_role_prepay.normal_role_fee_cents ?? null,
+          discounted_credit_amount_cents: snapshot.first_role_prepay.discounted_credit_amount_cents ?? null,
+          discount_percent: snapshot.first_role_prepay.discount_percent ?? null,
+          non_refundable: snapshot.first_role_prepay.non_refundable === true,
+          expires: snapshot.first_role_prepay.expires === true
+        }
+      : null
+  }
+}
+
+function purchaseIntentPrepayColumns(packageSnapshot = {}) {
+  const prepay = packageSnapshot.first_role_prepay && typeof packageSnapshot.first_role_prepay === 'object'
+    ? packageSnapshot.first_role_prepay
+    : null
+  if (!prepay?.selected) {
+    return {
+      first_role_prepay_selected: false,
+      first_role_prepay_amount_cents: null,
+      first_role_normal_role_fee_cents: null,
+      first_role_prepay_discount_percent: null,
+      first_role_prepay_credit_type: null
+    }
+  }
+  return {
+    first_role_prepay_selected: true,
+    first_role_prepay_amount_cents: Number(prepay.discounted_credit_amount_cents),
+    first_role_normal_role_fee_cents: Number(prepay.normal_role_fee_cents),
+    first_role_prepay_discount_percent: Number(prepay.discount_percent),
+    first_role_prepay_credit_type: prepay.credit_type || 'first_role_prepay'
   }
 }
 
@@ -300,6 +347,9 @@ function buildAgreementInputFromPurchaseIntent(intent) {
     membership_tier: normalizeAlphaScreenPlanKey(snapshot.plan_key),
     platform_fee: platformFee,
     per_role_fee: perRoleFee,
+    first_role_prepay: snapshot.first_role_prepay && typeof snapshot.first_role_prepay === 'object'
+      ? { ...snapshot.first_role_prepay }
+      : null,
     additional_interview_fee: additionalInterviewFee,
     included_interviews_per_role: includedInterviews,
     max_interview_minutes: interviewDuration,
@@ -423,7 +473,9 @@ router.post('/purchase-intents', rateLimit, async (req, res) => {
       return validationError(res, req, validation.code, validation.detail, validation.fields)
     }
 
-    const packageSnapshot = buildAlphaScreenPackageSnapshot(input.selected_plan_key, input.selected_billing_cadence)
+    const packageSnapshot = buildAlphaScreenPackageSnapshot(input.selected_plan_key, input.selected_billing_cadence, {
+      firstRolePrepaySelected: input.first_role_prepay_selected
+    })
     if (!packageSnapshot) {
       return validationError(
         res,
@@ -437,11 +489,12 @@ router.post('/purchase-intents', rateLimit, async (req, res) => {
     const duplicateCutoff = new Date(Date.now() - DUPLICATE_WINDOW_MS).toISOString()
     const { data: existingIntent, error: duplicateErr } = await supabaseAdmin
       .from('public_purchase_intents')
-      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,created_at')
+      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,created_at')
       .eq('buyer_email', input.buyer_email)
       .eq('company_legal_name', input.company_legal_name)
       .eq('selected_plan_key', input.selected_plan_key)
       .eq('selected_billing_cadence', input.selected_billing_cadence)
+      .eq('first_role_prepay_selected', input.first_role_prepay_selected === true)
       .in('status', ['pending'])
       .gte('created_at', duplicateCutoff)
       .order('created_at', { ascending: false })
@@ -464,11 +517,13 @@ router.post('/purchase-intents', rateLimit, async (req, res) => {
     }
 
     const nowIso = new Date().toISOString()
+    const prepayColumns = purchaseIntentPrepayColumns(packageSnapshot)
     const insertPayload = {
       status: 'pending',
       selected_plan_key: input.selected_plan_key,
       selected_billing_cadence: input.selected_billing_cadence,
       package_snapshot: packageSnapshot,
+      ...prepayColumns,
       company_legal_name: input.company_legal_name,
       company_dba: input.company_dba || null,
       buyer_first_name: input.buyer_first_name,
@@ -488,7 +543,7 @@ router.post('/purchase-intents', rateLimit, async (req, res) => {
     const { data: inserted, error: insertErr } = await supabaseAdmin
       .from('public_purchase_intents')
       .insert(insertPayload)
-      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,created_at')
+      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,created_at')
       .single()
 
     if (insertErr) {
@@ -528,7 +583,7 @@ router.post('/purchase-intents/:id/agreement', rateLimit, async (req, res) => {
   try {
     const { data: intent, error: intentErr } = await supabaseAdmin
       .from('public_purchase_intents')
-      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,expires_at,created_at')
+      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,expires_at,created_at')
       .eq('id', intentId)
       .maybeSingle()
 
@@ -640,7 +695,8 @@ router.post('/purchase-intents/:id/agreement', rateLimit, async (req, res) => {
         id: intent.id,
         source_path: intent.source_path || null,
         selected_plan_key: intent.selected_plan_key,
-        selected_billing_cadence: intent.selected_billing_cadence
+        selected_billing_cadence: intent.selected_billing_cadence,
+        first_role_prepay_selected: intent.first_role_prepay_selected === true
       },
       package_snapshot: intentValidation.snapshot,
       values: normalized,

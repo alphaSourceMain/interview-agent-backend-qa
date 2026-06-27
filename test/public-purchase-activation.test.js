@@ -77,6 +77,7 @@ class FakeQuery {
     if (this.table === 'client_members') return this.db.clientMembers
     if (this.table === 'client_plan_settings') return this.db.clientPlanSettings
     if (this.table === 'email_delivery_events') return this.db.emailDeliveryEvents
+    if (this.table === 'client_role_credits') return this.db.clientRoleCredits
     return []
   }
 
@@ -91,6 +92,15 @@ class FakeQuery {
       if (this.table === 'email_delivery_events' && row.sg_event_id) {
         const duplicate = this.rows().find((item) => String(item.sg_event_id || '') === String(row.sg_event_id || ''))
         if (duplicate) return { data: null, error: { message: 'duplicate key value violates unique constraint', code: '23505' } }
+      }
+      if (this.table === 'client_role_credits') {
+        const duplicate = this.rows().find((item) => {
+          const sameIntent = row.source_public_purchase_intent_id && String(item.source_public_purchase_intent_id || '') === String(row.source_public_purchase_intent_id || '')
+          const sameSession = row.source_stripe_checkout_session_id && String(item.source_stripe_checkout_session_id || '') === String(row.source_stripe_checkout_session_id || '')
+          return sameIntent || sameSession
+        })
+        if (duplicate) return { data: null, error: { message: 'duplicate key value violates unique constraint', code: '23505' } }
+        if (!row.id) row.id = `credit-${this.rows().length + 1}`
       }
       if (this.table === 'clients' && !row.id) row.id = CLIENT_ID
       this.rows().push(row)
@@ -132,8 +142,10 @@ class FakeQuery {
   }
 }
 
-function makeAgreement(plan = 'basic', cadence = 'monthly') {
-  const packageSnapshot = buildAlphaScreenPackageSnapshot(plan, cadence)
+function makeAgreement(plan = 'basic', cadence = 'monthly', options = {}) {
+  const packageSnapshot = buildAlphaScreenPackageSnapshot(plan, cadence, {
+    firstRolePrepaySelected: options.firstRolePrepaySelected === true
+  })
   return {
     id: AGREEMENT_ID,
     client_id: CLIENT_ID,
@@ -156,13 +168,21 @@ function makeAgreement(plan = 'basic', cadence = 'monthly') {
   }
 }
 
-function makeIntent(plan = 'basic', cadence = 'monthly') {
+function makeIntent(plan = 'basic', cadence = 'monthly', options = {}) {
+  const packageSnapshot = buildAlphaScreenPackageSnapshot(plan, cadence, {
+    firstRolePrepaySelected: options.firstRolePrepaySelected === true
+  })
   return {
     id: INTENT_ID,
     status: 'checkout_pending',
     selected_plan_key: plan,
     selected_billing_cadence: cadence,
-    package_snapshot: buildAlphaScreenPackageSnapshot(plan, cadence),
+    package_snapshot: packageSnapshot,
+    first_role_prepay_selected: options.firstRolePrepaySelected === true,
+    first_role_prepay_amount_cents: options.firstRolePrepaySelected === true ? packageSnapshot.first_role_prepay.discounted_credit_amount_cents : null,
+    first_role_normal_role_fee_cents: options.firstRolePrepaySelected === true ? packageSnapshot.first_role_prepay.normal_role_fee_cents : null,
+    first_role_prepay_discount_percent: options.firstRolePrepaySelected === true ? packageSnapshot.first_role_prepay.discount_percent : null,
+    first_role_prepay_credit_type: options.firstRolePrepaySelected === true ? packageSnapshot.first_role_prepay.credit_type : null,
     company_legal_name: 'Acme Dental Group',
     company_dba: 'Acme Dental',
     buyer_first_name: 'Alex',
@@ -176,8 +196,8 @@ function makeIntent(plan = 'basic', cadence = 'monthly') {
 
 function makeDb(plan = 'basic', cadence = 'monthly', overrides = {}) {
   return {
-    membershipAgreements: [makeAgreement(plan, cadence)],
-    purchaseIntents: [makeIntent(plan, cadence)],
+    membershipAgreements: [makeAgreement(plan, cadence, overrides)],
+    purchaseIntents: [makeIntent(plan, cadence, overrides)],
     clients: [{
       id: CLIENT_ID,
       name: 'Acme Dental Group',
@@ -191,6 +211,7 @@ function makeDb(plan = 'basic', cadence = 'monthly', overrides = {}) {
     clientMembers: overrides.clientMembers ? [...overrides.clientMembers] : [],
     clientPlanSettings: [],
     emailDeliveryEvents: overrides.emailDeliveryEvents ? [...overrides.emailDeliveryEvents] : [],
+    clientRoleCredits: overrides.clientRoleCredits ? [...overrides.clientRoleCredits] : [],
     inserts: [],
     updates: [],
     upserts: [],
@@ -304,6 +325,7 @@ test('public purchase webhook activation provisions Basic and Pro monthly/annual
     assert.equal(result.client_id, CLIENT_ID)
     assert.equal(result.setup_email_status, 'sent')
     assert.equal(result.welcome_email_status, 'sent')
+    assert.equal(result.first_role_credit_status, 'not_selected')
     assert.equal(recoveryCalls, 1)
     assert.equal(sentEmails.length, 1)
     assert.equal(sentEmails[0].to, BUYER_EMAIL)
@@ -312,6 +334,7 @@ test('public purchase webhook activation provisions Basic and Pro monthly/annual
     assert.equal(db.emailDeliveryEvents.length, 1)
     assert.equal(db.emailDeliveryEvents[0].email_category, 'public_purchase_welcome')
     assert.equal(db.emailDeliveryEvents[0].status, 'sent')
+    assert.equal(db.clientRoleCredits.length, 0)
 
     const agreement = db.membershipAgreements[0]
     assert.equal(agreement.checkout_status, 'paid')
@@ -345,6 +368,50 @@ test('public purchase webhook activation provisions Basic and Pro monthly/annual
     })
     assert.doesNotMatch(JSON.stringify(result), /recovery-token|setup\.example/)
   }
+})
+
+test('public purchase activation creates first-role prepay credit once when selected', async () => {
+  const db = makeDb('basic', 'monthly', { firstRolePrepaySelected: true })
+  const commonOptions = {
+    db,
+    authAdmin: makeAuthAdmin([{ id: 'user-existing', email: BUYER_EMAIL }]),
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('monthly'),
+    requireParentClient: async (_db, clientId) => ({ ok: true, clientId }),
+    ensureRecovery: async () => {
+      throw new Error('should_not_generate_recovery_for_existing_user')
+    },
+    sendRecoveryEmail: async () => {
+      throw new Error('should_not_send_setup_email_for_existing_user')
+    },
+    sendWelcomeEmail: async () => ({ statusCode: 202 }),
+    logger: { error() {}, warn() {}, info() {} }
+  }
+
+  const first = await activatePublicPurchaseAgreementCheckout(commonOptions)
+  const second = await activatePublicPurchaseAgreementCheckout(commonOptions)
+
+  assert.equal(first.first_role_credit_status, 'created')
+  assert.equal(second.first_role_credit_status, 'already_created')
+  assert.equal(db.clientRoleCredits.length, 1)
+  const credit = db.clientRoleCredits[0]
+  assert.equal(credit.billing_client_id, CLIENT_ID)
+  assert.equal(credit.source_client_id, CLIENT_ID)
+  assert.equal(credit.source_public_purchase_intent_id, INTENT_ID)
+  assert.equal(credit.source_membership_agreement_id, AGREEMENT_ID)
+  assert.equal(credit.source_stripe_checkout_session_id, 'cs_test_public')
+  assert.equal(credit.credit_type, 'first_role_prepay')
+  assert.equal(credit.membership_key, 'basic')
+  assert.equal(credit.normal_role_fee_cents, 39900)
+  assert.equal(credit.discounted_credit_amount_cents, 35900)
+  assert.equal(credit.discount_percent, 10)
+  assert.equal(credit.status, 'unused')
+  assert.equal(credit.used_at, undefined)
+  assert.equal(credit.used_by_role_id, undefined)
+  assert.equal(credit.metadata.non_refundable, true)
+  assert.equal(credit.metadata.expires, false)
 })
 
 test('public purchase activation links an existing auth user without sending setup email', async () => {

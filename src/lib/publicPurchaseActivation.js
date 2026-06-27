@@ -62,6 +62,17 @@ function getPackageSnapshot({ agreement, intent }) {
     : null;
 }
 
+function getFirstRolePrepaySnapshot(packageSnapshot) {
+  return packageSnapshot?.first_role_prepay && typeof packageSnapshot.first_role_prepay === 'object'
+    ? packageSnapshot.first_role_prepay
+    : null;
+}
+
+function isDuplicateRecordError(error) {
+  return String(error?.code || '').trim() === '23505' ||
+    String(error?.message || '').toLowerCase().includes('duplicate key');
+}
+
 function publicPurchaseIntentIdFromAgreement(agreement) {
   const snapshot = getTemplateSnapshot(agreement);
   return cleanText(snapshot?.purchase_intent?.id || '');
@@ -348,7 +359,7 @@ async function loadPublicPurchaseIntent(db, agreement) {
   if (snapshotIntentId) {
     const { data, error } = await db
       .from('public_purchase_intents')
-      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,expires_at,created_at,updated_at')
+      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,expires_at,created_at,updated_at')
       .eq('id', snapshotIntentId)
       .maybeSingle();
     if (error) throw new Error(error.message || 'Public purchase intent lookup failed');
@@ -358,11 +369,59 @@ async function loadPublicPurchaseIntent(db, agreement) {
   if (!agreementId) return null;
   const { data, error } = await db
     .from('public_purchase_intents')
-    .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,expires_at,created_at,updated_at')
+    .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,expires_at,created_at,updated_at')
     .eq('agreement_id', agreementId)
     .maybeSingle();
   if (error) throw new Error(error.message || 'Public purchase intent lookup failed');
   return data || null;
+}
+
+async function createFirstRolePrepayCredit({ db, agreement, intent, clientId, billingClientId, packageSnapshot, planKey, checkoutSessionId, nowIso, logger }) {
+  const firstRolePrepay = getFirstRolePrepaySnapshot(packageSnapshot);
+  if (!firstRolePrepay?.selected) return 'not_selected';
+  const purchaseIntentId = cleanText(intent?.id) || null;
+  const agreementId = cleanText(agreement?.id) || null;
+  const safeBillingClientId = cleanText(billingClientId || clientId);
+  if (!safeBillingClientId) return 'billing_client_missing';
+
+  const payload = {
+    billing_client_id: safeBillingClientId,
+    source_client_id: cleanText(clientId) || null,
+    source_public_purchase_intent_id: purchaseIntentId,
+    source_membership_agreement_id: agreementId,
+    source_stripe_checkout_session_id: cleanText(checkoutSessionId || intent?.stripe_checkout_session_id || agreement?.checkout_session_id) || null,
+    credit_type: cleanText(firstRolePrepay.credit_type) || 'first_role_prepay',
+    membership_key: planKey,
+    normal_role_fee_cents: Number(firstRolePrepay.normal_role_fee_cents),
+    discounted_credit_amount_cents: Number(firstRolePrepay.discounted_credit_amount_cents),
+    discount_percent: Number(firstRolePrepay.discount_percent),
+    status: 'unused',
+    metadata: {
+      source: 'public_purchase_activation',
+      non_refundable: firstRolePrepay.non_refundable === true,
+      expires: firstRolePrepay.expires === true,
+      purchase_intent_id: purchaseIntentId,
+      membership_agreement_id: agreementId
+    },
+    created_at: nowIso,
+    updated_at: nowIso
+  };
+
+  const { error } = await db
+    .from('client_role_credits')
+    .insert(payload);
+  if (!error) return 'created';
+  if (isDuplicateRecordError(error)) return 'already_created';
+
+  logger.error?.('[public-purchase-activation] first_role_prepay_credit_create_failed', {
+    agreement_id: agreementId,
+    purchase_intent_id: purchaseIntentId,
+    client_id: cleanText(clientId) || null,
+    billing_client_id: safeBillingClientId,
+    error: error.message || error,
+    code: error.code || null
+  });
+  throw new Error(error.message || 'First-role prepay credit creation failed');
 }
 
 async function ensureLinkedClient({ db, agreement, intent, planKey, billingInterval, fallbackClientId }) {
@@ -727,6 +786,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     err.code = body.code || body.error || 'CLIENT_BILLING_SCOPE_CHECK_FAILED';
     throw err;
   }
+  const billingClientId = cleanText(parentGuard.clientId || clientId) || clientId;
 
   const agreementPaidPayload = {
     checkout_status: 'paid',
@@ -783,6 +843,19 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     .from('client_plan_settings')
     .upsert(planSettingsPayload, { onConflict: 'client_id' });
   if (settingsErr) throw new Error(settingsErr.message || 'Client plan settings upsert failed');
+
+  const firstRoleCreditStatus = await createFirstRolePrepayCredit({
+    db,
+    agreement,
+    intent,
+    clientId,
+    billingClientId,
+    packageSnapshot,
+    planKey,
+    checkoutSessionId,
+    nowIso: paidAt,
+    logger
+  });
 
   const setup = await ensureBuyerAccountSetup({
     db,
@@ -847,7 +920,8 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     member_role: setup.member_role,
     auth_status: setup.auth_status,
     setup_email_status: setup.setup_email_status,
-    welcome_email_status: welcomeEmailStatus
+    welcome_email_status: welcomeEmailStatus,
+    first_role_credit_status: firstRoleCreditStatus
   };
 }
 

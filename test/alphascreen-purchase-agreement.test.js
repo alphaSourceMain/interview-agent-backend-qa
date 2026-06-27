@@ -11,6 +11,7 @@ const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseCli
 const pdfRendererPath = path.join(__dirname, '..', 'utils', 'pdfRenderer.js')
 const urlConfigPath = path.join(__dirname, '..', 'config', 'urlConfig.js')
 const publicPurchaseActivationPath = path.join(__dirname, '..', 'src', 'lib', 'publicPurchaseActivation.js')
+const { buildAlphaScreenPackageSnapshot } = require('../src/lib/alphaScreenPackages')
 
 const BASIC_INTENT_ID = '11111111-1111-4111-8111-111111111111'
 const PRO_INTENT_ID = '22222222-2222-4222-8222-222222222222'
@@ -317,11 +318,59 @@ test('valid pending Basic purchase intent creates a sent agreement from purchase
   assert.match(agreement.template_snapshot.rendered_html, /Included Interviews/)
   assert.match(agreement.template_snapshot.rendered_html, /Interview Duration Cap/)
   assert.match(agreement.template_snapshot.rendered_html, /Additional Interview Fee/)
+  assert.doesNotMatch(agreement.template_snapshot.rendered_html, /first-role prepayment|did not prepay the first role/i)
 
   const intentUpdate = db.updates.find((update) => update.table === 'public_purchase_intents')
   assert.equal(intentUpdate.payload.status, 'agreement_pending')
   assert.equal(intentUpdate.payload.agreement_id, agreement.id)
   assert.deepEqual(Array.from(new Set(db.touchedTables)).sort(), ['membership_agreements', 'public_purchase_intents'])
+})
+
+test('public purchase agreement renders selected first-role prepay terms from snapshot', async () => {
+  const snapshot = buildAlphaScreenPackageSnapshot('basic', 'monthly', { firstRolePrepaySelected: true })
+  const db = makeDb({
+    purchaseIntents: [intent({
+      package_snapshot: snapshot,
+      first_role_prepay_selected: true,
+      first_role_prepay_amount_cents: 35900,
+      first_role_normal_role_fee_cents: 39900,
+      first_role_prepay_discount_percent: 10,
+      first_role_prepay_credit_type: 'first_role_prepay'
+    })]
+  })
+  const response = await postAgreement(buildApp(db), BASIC_INTENT_ID)
+
+  assert.equal(response.status, 201)
+  const agreement = db.inserts[0].row
+  assert.equal(agreement.template_snapshot.purchase_intent.first_role_prepay_selected, true)
+  assert.equal(agreement.template_snapshot.package_snapshot.first_role_prepay.selected, true)
+  assert.equal(agreement.template_snapshot.values.first_role_prepay.selected, true)
+  assert.match(agreement.template_snapshot.rendered_html, /optional discounted first-role prepayment/)
+  assert.match(agreement.template_snapshot.rendered_html, /\$359\.00/)
+  assert.match(agreement.template_snapshot.rendered_html, /non-refundable/)
+  assert.match(agreement.template_snapshot.rendered_html, /no expiration/)
+  assert.match(agreement.template_snapshot.rendered_html, /billing entity/)
+  assert.match(agreement.template_snapshot.rendered_html, /Membership changes require client success\/support review/)
+})
+
+test('public purchase agreement renders pay-later first-role terms when selected false', async () => {
+  const snapshot = buildAlphaScreenPackageSnapshot('pro', 'annual')
+  const db = makeDb({
+    purchaseIntents: [intent({
+      id: PRO_INTENT_ID,
+      selected_plan_key: 'pro',
+      selected_billing_cadence: 'annual',
+      package_snapshot: snapshot,
+      first_role_prepay_selected: false
+    })]
+  })
+  const response = await postAgreement(buildApp(db), PRO_INTENT_ID)
+
+  assert.equal(response.status, 201)
+  const html = db.inserts[0].row.template_snapshot.rendered_html
+  assert.match(html, /Client did not prepay the first role/)
+  assert.match(html, /standard per-role fee is charged/)
+  assert.doesNotMatch(html, /optional discounted first-role prepayment/)
 })
 
 test('valid pending Pro purchase intent creates agreement with Pro snapshot values', async () => {

@@ -275,6 +275,8 @@ function normalizeTenantRole(role) {
   return normalized === 'superadmin' ? 'super_admin' : normalized
 }
 
+const TENANT_ENTITY_MANAGER_ROLES = new Set(['manager', 'admin', 'owner', 'super_admin'])
+
 function findEffectiveClientMembership(req, clientId) {
   const targetClientId = String(clientId || '').trim()
   if (!targetClientId) return null
@@ -288,13 +290,13 @@ function findEffectiveClientMembership(req, clientId) {
   return memberships.find(m => String(m?.client_id || '').trim() === targetClientId) || null
 }
 
-function hasTenantSuperAdminAccess(req, parentClientId) {
+function hasTenantEntityManagementAccess(req, parentClientId) {
   const parentId = String(parentClientId || '').trim()
   if (!parentId) return false
   if (req?.isGlobalAdmin === true || req?.isAdmin === true) return true
 
   const parentMembership = findEffectiveClientMembership(req, parentId)
-  if (normalizeTenantRole(parentMembership?.role) === 'super_admin') return true
+  if (TENANT_ENTITY_MANAGER_ROLES.has(normalizeTenantRole(parentMembership?.role))) return true
 
   const memberships = Array.isArray(req?.clientScope?.memberships)
     ? req.clientScope.memberships
@@ -304,7 +306,7 @@ function hasTenantSuperAdminAccess(req, parentClientId) {
         ? req.memberships
         : []
   return memberships.some(m => (
-    normalizeTenantRole(m?.role) === 'super_admin' &&
+    TENANT_ENTITY_MANAGER_ROLES.has(normalizeTenantRole(m?.role)) &&
     m?.inherited === true &&
     String(m?.inherited_from_client_id || '').trim() === parentId
   ))
@@ -348,7 +350,7 @@ async function resolveTenantEntityParent(req, selectedClientId) {
 
   const selectedParentId = String(selected.parent_client_id || '').trim()
   if (!selectedParentId) {
-    if (!hasTenantSuperAdminAccess(req, selected.id)) {
+    if (!hasTenantEntityManagementAccess(req, selected.id)) {
       return { ok: false, status: 403, body: { error: 'forbidden' } }
     }
     return { ok: true, parent: selected, selected }
@@ -370,7 +372,7 @@ async function resolveTenantEntityParent(req, selectedClientId) {
       body: { error: 'invalid_parent_client', detail: 'Client hierarchy could not be resolved safely.' }
     }
   }
-  if (!hasTenantSuperAdminAccess(req, parent.id)) {
+  if (!hasTenantEntityManagementAccess(req, parent.id)) {
     return { ok: false, status: 403, body: { error: 'forbidden' } }
   }
 
@@ -660,7 +662,7 @@ app.patch('/clients/entities/:entityClientId', requireAuth, withClientScope, asy
         request_id
       })
     }
-    if (!hasTenantSuperAdminAccess(req, parent.id)) {
+    if (!hasTenantEntityManagementAccess(req, parent.id)) {
       return res.status(403).json({ error: 'forbidden', request_id })
     }
 

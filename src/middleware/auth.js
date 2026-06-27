@@ -5,6 +5,7 @@ const { buildClientScopeContext } = require('../lib/clientScope');
 
 const supabase = supabaseAdmin;
 const ROLE_PRIORITY = ['super_admin', 'owner', 'admin', 'manager', 'member', 'tester'];
+const PARENT_CHILD_EXPANSION_ROLES = new Set(['manager', 'admin', 'owner', 'super_admin']);
 
 /**
  * Extract a bearer token from:
@@ -239,17 +240,17 @@ async function withClientScope(req, res, next) {
 
     const ids = uniqueValues(memberships.map(m => m.client_id));
     const directClients = rows.map(r => r.clients).filter(Boolean);
-    const parentSuperAdminIds = uniqueValues(
+    const parentExpansionIds = uniqueValues(
       memberships
-        .filter(m => m.role === 'super_admin' && !m.client?.parent_client_id)
+        .filter(m => PARENT_CHILD_EXPANSION_ROLES.has(m.role) && !m.client?.parent_client_id)
         .map(m => m.client_id)
     );
     let childClients = [];
-    if (parentSuperAdminIds.length) {
+    if (parentExpansionIds.length) {
       const { data: childData, error: childError } = await supabase
         .from('clients')
         .select('id, name, parent_client_id, entity_label, archived_at')
-        .in('parent_client_id', parentSuperAdminIds)
+        .in('parent_client_id', parentExpansionIds)
         .is('archived_at', null)
         .limit(5000);
       if (childError) {

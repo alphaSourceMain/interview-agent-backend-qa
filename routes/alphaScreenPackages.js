@@ -26,6 +26,7 @@ const INTENT_EXPIRATION_MS = 14 * 24 * 60 * 60 * 1000
 const SIGNING_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const BLOCKING_PURCHASE_INTENT_STATUSES = ['pending', 'agreement_pending', 'checkout_pending', 'completed']
 const BLOCKING_AGREEMENT_STATUSES = ['sent', 'signed']
+const SIGNUP_ALREADY_EXISTS_MESSAGE = 'This email is already associated with an alphaScreen account or signup. Sign in, check your email, or contact support for help.'
 const rateBuckets = new Map()
 
 function rateLimit(req, res, next) {
@@ -272,7 +273,8 @@ function duplicateSignupResponse(res, req, reason = 'signup_exists') {
   return res.status(409).json({
     error: 'signup_already_exists',
     code: 'SIGNUP_ALREADY_EXISTS',
-    detail: 'This email is already associated with an alphaScreen account or signup. Sign in, check your email, or contact support for help.',
+    detail: SIGNUP_ALREADY_EXISTS_MESSAGE,
+    message: SIGNUP_ALREADY_EXISTS_MESSAGE,
     next_step: reason === 'active_member'
       ? 'sign_in_or_contact_support'
       : 'check_email_or_contact_support',
@@ -292,7 +294,7 @@ async function findSignupConflictByEmail(email) {
 
   const { data: existingMember, error: memberErr } = await supabaseAdmin
     .from('client_members')
-    .select('client_id,email,user_id,role')
+    .select('client_id,email,role')
     .eq('email', buyerEmail)
     .limit(1)
     .maybeSingle()
@@ -302,7 +304,7 @@ async function findSignupConflictByEmail(email) {
   if (existingMember?.client_id) {
     const { data: client, error: clientErr } = await supabaseAdmin
       .from('clients')
-      .select('id,archived_at,billing_status,subscription_status,status')
+      .select('id,archived_at')
       .eq('id', existingMember.client_id)
       .maybeSingle()
 

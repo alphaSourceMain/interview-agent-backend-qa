@@ -218,6 +218,16 @@ function validBody(overrides = {}) {
   }
 }
 
+function assertSignupAlreadyExistsResponse(response, expectedNextStep = 'check_email_or_contact_support') {
+  const message = 'This email is already associated with an alphaScreen account or signup. Sign in, check your email, or contact support for help.'
+  assert.equal(response.status, 409)
+  assert.equal(response.body.code, 'SIGNUP_ALREADY_EXISTS')
+  assert.equal(response.body.error, 'signup_already_exists')
+  assert.equal(response.body.detail, message)
+  assert.equal(response.body.message, message)
+  assert.equal(response.body.next_step, expectedNextStep)
+}
+
 test('valid Basic monthly intent creates pending intent with central package snapshot', async () => {
   const db = makeDb({ nextId: 'intent-basic' })
   const response = await request(buildApp(db), validBody())
@@ -486,10 +496,7 @@ test('active client member email is blocked from creating a new retail signup', 
 
   const response = await request(buildApp(db), validBody())
 
-  assert.equal(response.status, 409)
-  assert.equal(response.body.code, 'SIGNUP_ALREADY_EXISTS')
-  assert.equal(response.body.error, 'signup_already_exists')
-  assert.equal(response.body.next_step, 'sign_in_or_contact_support')
+  assertSignupAlreadyExistsResponse(response, 'sign_in_or_contact_support')
   assert.equal(db.inserts.length, 0)
 })
 
@@ -509,9 +516,7 @@ test('pending public purchase email is blocked instead of creating duplicate sig
 
   const response = await request(buildApp(db), validBody())
 
-  assert.equal(response.status, 409)
-  assert.equal(response.body.code, 'SIGNUP_ALREADY_EXISTS')
-  assert.equal(response.body.next_step, 'check_email_or_contact_support')
+  assertSignupAlreadyExistsResponse(response)
   assert.equal(db.inserts.length, 0)
 })
 
@@ -529,9 +534,7 @@ test('paid setup-pending public purchase email is blocked from duplicate signup 
 
   const response = await request(buildApp(db), validBody())
 
-  assert.equal(response.status, 409)
-  assert.equal(response.body.code, 'SIGNUP_ALREADY_EXISTS')
-  assert.equal(response.body.detail, 'This email is already associated with an alphaScreen account or signup. Sign in, check your email, or contact support for help.')
+  assertSignupAlreadyExistsResponse(response)
   assert.equal(db.inserts.length, 0)
 })
 
@@ -549,8 +552,7 @@ test('existing membership agreement email is blocked before creating a duplicate
 
   const response = await request(buildApp(db), validBody())
 
-  assert.equal(response.status, 409)
-  assert.equal(response.body.code, 'SIGNUP_ALREADY_EXISTS')
+  assertSignupAlreadyExistsResponse(response)
   assert.equal(db.inserts.length, 0)
 })
 

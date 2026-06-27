@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { test } = require('node:test');
 
 const {
@@ -8,6 +10,21 @@ const {
   finalizePrepaidRoleCredit,
   findUnusedFirstRolePrepayCredit,
 } = require('../src/lib/rolePurchaseFinalizer');
+
+const consumeCreditMigrationPath = path.join(
+  __dirname,
+  '..',
+  'supabase',
+  'migrations',
+  '20260626130000_consume_first_role_prepay_credit.sql'
+);
+const consumeCreditHotfixMigrationPath = path.join(
+  __dirname,
+  '..',
+  'supabase',
+  'migrations',
+  '20260627120000_fix_first_role_prepay_credit_rpc_qualification.sql'
+);
 
 function matchesFilters(row, filters) {
   return filters.every((filter) => {
@@ -190,6 +207,24 @@ test('finalizePendingRolePurchase creates role, updates JD, generates rubric, an
   assert.deepEqual(generated, ['role-1']);
   assert.equal(db.pendingRolePurchases[0].status, 'finalized');
   assert.equal(db.pendingRolePurchases[0].finalized_role_id, 'role-1');
+})
+
+test('consume first-role credit RPC qualifies ambiguous credit columns', () => {
+  for (const filename of [consumeCreditMigrationPath, consumeCreditHotfixMigrationPath]) {
+    const sql = fs.readFileSync(filename, 'utf8');
+
+    assert.match(sql, /from public\.client_role_credits as crc/i);
+    assert.match(sql, /where crc\.billing_client_id = p_billing_client_id/i);
+    assert.match(sql, /and crc\.credit_type = 'first_role_prepay'/i);
+    assert.match(sql, /and crc\.status = 'unused'/i);
+    assert.match(sql, /order by crc\.created_at asc, crc\.id asc/i);
+    assert.match(sql, /update public\.client_role_credits as crc/i);
+    assert.match(sql, /where crc\.id = v_credit\.id/i);
+    assert.doesNotMatch(sql, /\bwhere\s+id\s*=/i);
+    assert.doesNotMatch(sql, /\band\s+status\s*=\s*'unused'/i);
+    assert.doesNotMatch(sql, /\band\s+used_at\s+is\s+null/i);
+    assert.doesNotMatch(sql, /\border\s+by\s+created_at\b/i);
+  }
 })
 
 test('findUnusedFirstRolePrepayCredit reads by billing client and unused first-role state', async () => {

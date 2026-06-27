@@ -245,7 +245,7 @@ function makeDb(options = {}) {
     },
     async rpc(name, args) {
       this.rpcCalls.push({ name, args })
-      if (name !== 'consume_first_role_prepay_credit') {
+      if (name !== 'consume_first_role_prepay_credit_v2') {
         return { data: null, error: { message: 'unknown_rpc' } }
       }
       if (this.rpcMode === 'error') {
@@ -265,7 +265,7 @@ function makeDb(options = {}) {
         return { data: [{ ok: false, credit_id: null, role_id: null, status: 'credit_not_available' }], error: null }
       }
       const role = {
-        id: `role-${this.roles.length + 1}`,
+        id: args.p_role_id,
         client_id: args.p_source_client_id,
         title: args.p_role_title,
         interview_type: args.p_interview_type,
@@ -388,20 +388,21 @@ test('role checkout consumes unused first-role credit without Stripe checkout or
   const response = await postRoleCheckout(buildApp(db), 'parent-client')
 
   assert.equal(response.status, 200)
-  assert.deepEqual(response.body, {
-    ok: true,
-    credit_applied: true,
-    role_id: 'role-1',
-    message: 'First-role prepay credit applied.'
-  })
+  assert.equal(response.body.ok, true)
+  assert.equal(response.body.credit_applied, true)
+  assert.match(response.body.role_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  assert.equal(response.body.message, 'First-role prepay credit applied.')
   assert.equal(db.pendingRolePurchases.length, 0)
   assert.equal(db.stripeConstructs.length, 0)
   assert.equal(db.roles.length, 1)
+  assert.equal(db.roles[0].id, response.body.role_id)
   assert.equal(db.roles[0].client_id, 'parent-client')
+  assert.equal(db.rpcCalls[0].name, 'consume_first_role_prepay_credit_v2')
+  assert.equal(db.rpcCalls[0].args.p_role_id, response.body.role_id)
   assert.equal(db.clientRoleCredits[0].status, 'used')
-  assert.equal(db.clientRoleCredits[0].used_by_role_id, 'role-1')
+  assert.equal(db.clientRoleCredits[0].used_by_role_id, response.body.role_id)
   assert.equal(db.clientRoleCredits[0].used_at, '2026-06-26T12:00:00.000Z')
-  assert.deepEqual(db.rubricCalls, ['role-1'])
+  assert.deepEqual(db.rubricCalls, [response.body.role_id])
 })
 
 test('role checkout under child entity consumes parent billing client credit', async () => {

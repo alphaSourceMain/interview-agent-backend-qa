@@ -1,4 +1,5 @@
 create or replace function public.consume_first_role_prepay_credit(
+  p_role_id uuid,
   p_billing_client_id uuid,
   p_source_client_id uuid,
   p_role_title text,
@@ -20,6 +21,11 @@ declare
   v_role_id uuid;
   v_interview_type text;
 begin
+  if p_role_id is null then
+    return query select false, null::uuid, null::uuid, 'role_id_required'::text;
+    return;
+  end if;
+
   if p_billing_client_id is null or p_source_client_id is null then
     return query select false, null::uuid, null::uuid, 'client_required'::text;
     return;
@@ -60,7 +66,7 @@ begin
     job_description_url
   )
   values (
-    pg_catalog.gen_random_uuid(),
+    p_role_id,
     p_source_client_id,
     trim(p_role_title),
     v_interview_type,

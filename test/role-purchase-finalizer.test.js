@@ -32,6 +32,13 @@ const consumeCreditRandomBytesHotfixMigrationPath = path.join(
   'migrations',
   '20260627123000_fix_first_role_prepay_credit_rpc_random_bytes.sql'
 );
+const consumeCreditAppRoleIdMigrationPath = path.join(
+  __dirname,
+  '..',
+  'supabase',
+  'migrations',
+  '20260627124500_consume_first_role_prepay_credit_app_role_id.sql'
+);
 
 function matchesFilters(row, filters) {
   return filters.every((filter) => {
@@ -155,7 +162,7 @@ function makeDb(overrides = {}) {
       this.rpcCalls.push({ name, args });
       if (overrides.rpcError) return { data: null, error: overrides.rpcError };
       if (overrides.rpcResponse) return { data: overrides.rpcResponse, error: null };
-      if (name !== 'consume_first_role_prepay_credit') return { data: null, error: { message: 'unknown_rpc' } };
+      if (name !== 'consume_first_role_prepay_credit_v2') return { data: null, error: { message: 'unknown_rpc' } };
       const credit = this.clientRoleCredits.find((row) => {
         return row.billing_client_id === args.p_billing_client_id &&
           row.credit_type === 'first_role_prepay' &&
@@ -167,7 +174,7 @@ function makeDb(overrides = {}) {
         return { data: [{ ok: false, credit_id: null, role_id: null, status: 'credit_not_available' }], error: null };
       }
       const role = {
-        id: `role-${this.roles.length + 1}`,
+        id: args.p_role_id,
         client_id: args.p_source_client_id,
         title: args.p_role_title,
         interview_type: args.p_interview_type || null,
@@ -221,6 +228,7 @@ function consumeCreditMigrationFiles() {
     consumeCreditMigrationPath,
     consumeCreditHotfixMigrationPath,
     consumeCreditRandomBytesHotfixMigrationPath,
+    consumeCreditAppRoleIdMigrationPath,
   ];
 }
 
@@ -242,13 +250,14 @@ test('consume first-role credit RPC qualifies ambiguous credit columns', () => {
   }
 })
 
-test('consume first-role credit RPC avoids gen_random_bytes for role ids', () => {
+test('consume first-role credit RPC avoids Postgres UUID/random helpers for role ids', () => {
   for (const filename of consumeCreditMigrationFiles()) {
     const sql = fs.readFileSync(filename, 'utf8');
 
-    assert.doesNotMatch(sql, /gen_random_bytes/i);
+    assert.doesNotMatch(sql, /gen_random_bytes|gen_random_uuid|uuid_generate_v4/i);
+    assert.match(sql, /p_role_id uuid/i);
     assert.match(sql, /insert into public\.roles as r\s*\(\s*id,/i);
-    assert.match(sql, /values\s*\(\s*pg_catalog\.gen_random_uuid\(\),/i);
+    assert.match(sql, /values\s*\(\s*p_role_id,/i);
     assert.match(sql, /returning r\.id into v_role_id/i);
   }
 })
@@ -290,16 +299,17 @@ test('finalizePrepaidRoleCredit consumes credit through RPC and enriches created
   });
 
   assert.equal(result.applied, true);
-  assert.equal(result.role_id, 'role-1');
+  assert.match(result.role_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   assert.equal(result.credit_id, 'credit-1');
   assert.equal(result.enrichment_status, 'completed');
-  assert.equal(db.rpcCalls[0].name, 'consume_first_role_prepay_credit');
+  assert.equal(db.rpcCalls[0].name, 'consume_first_role_prepay_credit_v2');
+  assert.equal(db.rpcCalls[0].args.p_role_id, result.role_id);
   assert.equal(db.rpcCalls[0].args.p_billing_client_id, 'billing-1');
   assert.equal(db.rpcCalls[0].args.p_source_client_id, 'child-1');
   assert.equal(db.roles[0].client_id, 'child-1');
   assert.equal(db.clientRoleCredits[0].status, 'used');
-  assert.equal(db.clientRoleCredits[0].used_by_role_id, 'role-1');
-  assert.deepEqual(generated, ['role-1']);
+  assert.equal(db.clientRoleCredits[0].used_by_role_id, result.role_id);
+  assert.deepEqual(generated, [result.role_id]);
 })
 
 test('finalizePrepaidRoleCredit returns not applied when RPC loses credit race', async () => {

@@ -1,5 +1,7 @@
 'use strict';
 
+const { randomUUID } = require('crypto');
+
 const VALID_INTERVIEW_TYPES = new Set(['BASIC', 'DETAILED', 'TECHNICAL']);
 
 function cleanText(value) {
@@ -183,7 +185,9 @@ async function finalizePrepaidRoleCredit({
   if (!safeClientId) throw new Error('Client id is required for first-role prepay credit.');
   if (!safeTitle) throw new Error('Role title is required for first-role prepay credit.');
 
-  const { data, error } = await db.rpc('consume_first_role_prepay_credit', {
+  const roleId = randomUUID();
+  const { data, error } = await db.rpc('consume_first_role_prepay_credit_v2', {
+    p_role_id: roleId,
     p_billing_client_id: safeBillingClientId,
     p_source_client_id: safeClientId,
     p_role_title: safeTitle,

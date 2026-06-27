@@ -1,4 +1,4 @@
-create or replace function public.consume_first_role_prepay_credit(
+create or replace function public.consume_first_role_prepay_credit_v2(
   p_role_id uuid,
   p_billing_client_id uuid,
   p_source_client_id uuid,

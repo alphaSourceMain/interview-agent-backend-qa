@@ -398,6 +398,28 @@ test('invalid purchase intent inputs are rejected before insert', async () => {
   }
 })
 
+test('purchase intent requires buyer phone before insert', async () => {
+  for (const value of ['', '   ', 'letters only']) {
+    const db = makeDb()
+    const response = await request(buildApp(db), validBody({ buyer_phone: value }))
+
+    assert.equal(response.status, 400)
+    assert.equal(response.body.code, 'required_fields_missing')
+    assert.equal(response.body.fields.includes('buyer_phone'), true)
+    assert.equal(db.inserts.length, 0)
+  }
+})
+
+test('purchase intent requires buyer title before insert', async () => {
+  const db = makeDb()
+  const response = await request(buildApp(db), validBody({ buyer_title: '   ' }))
+
+  assert.equal(response.status, 400)
+  assert.equal(response.body.code, 'required_fields_missing')
+  assert.equal(response.body.fields.includes('buyer_title'), true)
+  assert.equal(db.inserts.length, 0)
+})
+
 test('long strings are bounded before storage', async () => {
   const db = makeDb()
   const response = await request(buildApp(db), validBody({

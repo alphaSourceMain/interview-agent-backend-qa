@@ -162,6 +162,8 @@ function validatePurchaseIntentInput(input) {
   if (!input.buyer_first_name) missing.push('buyer_first_name')
   if (!input.buyer_last_name) missing.push('buyer_last_name')
   if (!input.buyer_email) missing.push('buyer_email')
+  if (!input.buyer_phone) missing.push('buyer_phone')
+  if (!input.buyer_title) missing.push('buyer_title')
   if (!input.agreement_acknowledged) missing.push('agreement_acknowledged')
   if (!input.contact_acknowledged) missing.push('contact_acknowledged')
   if (missing.length) {

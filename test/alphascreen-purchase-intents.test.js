@@ -38,6 +38,8 @@ class FakeQuery {
     this.filters = []
     this.inFilters = []
     this.gteFilters = []
+    this.orderBy = null
+    this.limitCount = null
     this.insertPayload = null
   }
 
@@ -61,11 +63,13 @@ class FakeQuery {
     return this
   }
 
-  order() {
+  order(column, options = {}) {
+    this.orderBy = { column, ascending: options.ascending === true }
     return this
   }
 
-  limit() {
+  limit(count) {
+    this.limitCount = Number(count)
     return this
   }
 
@@ -74,9 +78,49 @@ class FakeQuery {
     return this
   }
 
+  rowsForTable() {
+    if (this.table === 'public_purchase_intents') {
+      if (Array.isArray(this.db.purchaseIntents)) return this.db.purchaseIntents
+      return this.db.existingIntent ? [this.db.existingIntent] : []
+    }
+    if (this.table === 'client_members') return this.db.clientMembers || []
+    if (this.table === 'clients') return this.db.clients || []
+    if (this.table === 'membership_agreements') return this.db.membershipAgreements || []
+    return []
+  }
+
+  rowMatches(row) {
+    for (const { column, value } of this.filters) {
+      if (row?.[column] !== value && String(row?.[column]) !== String(value)) return false
+    }
+    for (const { column, values } of this.inFilters) {
+      if (!values.has(String(row?.[column]))) return false
+    }
+    for (const { column, value } of this.gteFilters) {
+      const rowValue = row?.[column]
+      if (rowValue === undefined || rowValue === null || String(rowValue) < String(value)) return false
+    }
+    return true
+  }
+
+  runSelect() {
+    let rows = this.rowsForTable().filter((row) => this.rowMatches(row))
+    if (this.orderBy?.column) {
+      const { column, ascending } = this.orderBy
+      rows = rows.slice().sort((a, b) => {
+        const av = String(a?.[column] || '')
+        const bv = String(b?.[column] || '')
+        if (av === bv) return 0
+        return ascending ? av.localeCompare(bv) : bv.localeCompare(av)
+      })
+    }
+    if (Number.isFinite(this.limitCount)) rows = rows.slice(0, this.limitCount)
+    return rows
+  }
+
   async maybeSingle() {
     if (this.db.lookupError) return { data: null, error: this.db.lookupError }
-    const existing = this.db.existingIntent || null
+    const existing = this.runSelect()[0] || null
     return { data: existing, error: null }
   }
 
@@ -95,6 +139,10 @@ function makeDb(options = {}) {
   const db = {
     nextId: options.nextId || 'intent-1',
     existingIntent: options.existingIntent || null,
+    purchaseIntents: options.purchaseIntents || null,
+    clientMembers: options.clientMembers || [],
+    clients: options.clients || [],
+    membershipAgreements: options.membershipAgreements || [],
     lookupError: options.lookupError || null,
     insertError: options.insertError || null,
     inserts: [],
@@ -369,7 +417,7 @@ test('purchase intent endpoint stores and returns no raw payload, session, IP, u
   })
 
   assert.equal(response.status, 201)
-  assert.deepEqual(Array.from(new Set(db.touchedTables)), ['public_purchase_intents'])
+  assert.deepEqual(Array.from(new Set(db.inserts.map((entry) => entry.table))), ['public_purchase_intents'])
   assert.equal(db.inserts[0].row.client_id, null)
   assert.equal(db.inserts[0].row.agreement_id, null)
   assert.equal(db.inserts[0].row.stripe_checkout_session_id, null)
@@ -386,6 +434,10 @@ test('duplicate pending intent returns existing safe response without inserting'
       status: 'pending',
       selected_plan_key: 'basic',
       selected_billing_cadence: 'monthly',
+      buyer_email: 'alex@acmedental.example',
+      company_legal_name: 'Acme Dental Group',
+      first_role_prepay_selected: false,
+      created_at: new Date().toISOString(),
       package_snapshot: {
         plan_key: 'basic',
         display_name: 'Basic',
@@ -414,6 +466,91 @@ test('duplicate pending intent returns existing safe response without inserting'
   assert.equal(response.status, 200)
   assert.equal(response.body.purchase_intent_id, 'existing-intent')
   assert.equal(response.body.duplicate, true)
+  assert.equal(db.inserts.length, 0)
+})
+
+test('active client member email is blocked from creating a new retail signup', async () => {
+  const db = makeDb({
+    clientMembers: [{
+      client_id: 'client-active',
+      email: 'alex@acmedental.example',
+      role: 'manager',
+      user_id: 'user-existing'
+    }],
+    clients: [{
+      id: 'client-active',
+      archived_at: null,
+      billing_status: 'active'
+    }]
+  })
+
+  const response = await request(buildApp(db), validBody())
+
+  assert.equal(response.status, 409)
+  assert.equal(response.body.code, 'SIGNUP_ALREADY_EXISTS')
+  assert.equal(response.body.error, 'signup_already_exists')
+  assert.equal(response.body.next_step, 'sign_in_or_contact_support')
+  assert.equal(db.inserts.length, 0)
+})
+
+test('pending public purchase email is blocked instead of creating duplicate signup state', async () => {
+  const db = makeDb({
+    purchaseIntents: [{
+      id: 'intent-in-progress',
+      buyer_email: 'alex@acmedental.example',
+      company_legal_name: 'Different Dental Group',
+      selected_plan_key: 'pro',
+      selected_billing_cadence: 'annual',
+      first_role_prepay_selected: true,
+      status: 'agreement_pending',
+      created_at: '2026-06-27T12:00:00.000Z'
+    }]
+  })
+
+  const response = await request(buildApp(db), validBody())
+
+  assert.equal(response.status, 409)
+  assert.equal(response.body.code, 'SIGNUP_ALREADY_EXISTS')
+  assert.equal(response.body.next_step, 'check_email_or_contact_support')
+  assert.equal(db.inserts.length, 0)
+})
+
+test('paid setup-pending public purchase email is blocked from duplicate signup state', async () => {
+  const db = makeDb({
+    purchaseIntents: [{
+      id: 'intent-paid',
+      buyer_email: 'alex@acmedental.example',
+      status: 'completed',
+      client_id: 'client-paid',
+      agreement_id: 'agreement-paid',
+      created_at: '2026-06-27T12:00:00.000Z'
+    }]
+  })
+
+  const response = await request(buildApp(db), validBody())
+
+  assert.equal(response.status, 409)
+  assert.equal(response.body.code, 'SIGNUP_ALREADY_EXISTS')
+  assert.equal(response.body.detail, 'This email is already associated with an alphaScreen account or signup. Sign in, check your email, or contact support for help.')
+  assert.equal(db.inserts.length, 0)
+})
+
+test('existing membership agreement email is blocked before creating a duplicate purchase intent', async () => {
+  const db = makeDb({
+    membershipAgreements: [{
+      id: 'agreement-existing',
+      admin_email: 'alex@acmedental.example',
+      status: 'signed',
+      checkout_status: 'paid',
+      client_id: 'client-paid',
+      created_at: '2026-06-27T12:00:00.000Z'
+    }]
+  })
+
+  const response = await request(buildApp(db), validBody())
+
+  assert.equal(response.status, 409)
+  assert.equal(response.body.code, 'SIGNUP_ALREADY_EXISTS')
   assert.equal(db.inserts.length, 0)
 })
 

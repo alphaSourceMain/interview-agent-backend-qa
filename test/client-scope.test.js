@@ -25,11 +25,13 @@ test('manager parent membership gets retail buyer dashboard permissions and chil
   assert.deepEqual(context.accessibleClientIds.sort(), ['child-client', 'parent-client']);
   assert.equal(canCreateRolesForClient(context, 'parent-client'), true);
   assert.equal(canManageMembersForClient(context, 'parent-client'), true);
+  assert.equal(canManageMembersForClient(context, 'child-client'), true);
   assert.equal(canViewLegalBillingForClient(context, 'parent-client'), true);
   assert.equal(canViewLegalBillingForClient(context, 'child-client'), true);
   assert.equal(context.permissionsByClientId['parent-client'].can_manage_members, true);
   assert.equal(context.permissionsByClientId['parent-client'].can_view_legal_billing, true);
   assert.equal(context.permissionsByClientId['child-client'].can_create_roles, true);
+  assert.equal(context.permissionsByClientId['child-client'].can_manage_members, true);
   assert.equal(context.permissionsByClientId['child-client'].can_view_legal_billing, true);
 });
 
@@ -54,7 +56,7 @@ test('regular member remains limited in dashboard permissions', () => {
   assert.equal(context.permissionsByClientId['parent-client'].can_view_legal_billing, false);
 });
 
-test('child-only manager cannot view parent legal billing', () => {
+test('child-only manager cannot manage parent or sibling scopes', () => {
   const context = buildClientScopeContext({
     memberships: [{
       client_id: 'child-client',
@@ -64,11 +66,14 @@ test('child-only manager cannot view parent legal billing', () => {
     clients: [
       { id: 'parent-client', name: 'Retail Buyer', parent_client_id: null },
       { id: 'child-client', name: 'Retail Location', parent_client_id: 'parent-client', entity_label: 'location' },
+      { id: 'sibling-client', name: 'Second Location', parent_client_id: 'parent-client', entity_label: 'location' },
     ],
   });
 
   assert.deepEqual(context.accessibleClientIds, ['child-client']);
   assert.equal(canManageMembersForClient(context, 'child-client'), true);
+  assert.equal(canManageMembersForClient(context, 'parent-client'), false);
+  assert.equal(canManageMembersForClient(context, 'sibling-client'), false);
   assert.equal(canViewLegalBillingForClient(context, 'child-client'), false);
   assert.equal(canViewLegalBillingForClient(context, 'parent-client'), false);
   assert.equal(context.permissionsByClientId['child-client'].can_view_legal_billing, false);

@@ -24,6 +24,8 @@ const RATE_MAX = Number(process.env.ALPHASCREEN_PURCHASE_INTENT_RATE_MAX || 12)
 const DUPLICATE_WINDOW_MS = 30 * 60 * 1000
 const INTENT_EXPIRATION_MS = 14 * 24 * 60 * 60 * 1000
 const SIGNING_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const BLOCKING_PURCHASE_INTENT_STATUSES = ['pending', 'agreement_pending', 'checkout_pending', 'completed']
+const BLOCKING_AGREEMENT_STATUSES = ['sent', 'signed']
 const rateBuckets = new Map()
 
 function rateLimit(req, res, next) {
@@ -264,6 +266,89 @@ function buildPurchaseIntentResponse(row, { duplicate = false } = {}) {
       : 'Signup request received. The next step is membership agreement preparation.',
     request_id: row?.request_id || null
   }
+}
+
+function duplicateSignupResponse(res, req, reason = 'signup_exists') {
+  return res.status(409).json({
+    error: 'signup_already_exists',
+    code: 'SIGNUP_ALREADY_EXISTS',
+    detail: 'This email is already associated with an alphaScreen account or signup. Sign in, check your email, or contact support for help.',
+    next_step: reason === 'active_member'
+      ? 'sign_in_or_contact_support'
+      : 'check_email_or_contact_support',
+    request_id: req.request_id || null
+  })
+}
+
+function clientLooksActive(client) {
+  if (!client) return true
+  if (String(client.archived_at || '').trim()) return false
+  return true
+}
+
+async function findSignupConflictByEmail(email) {
+  const buyerEmail = trimText(email, 254).toLowerCase()
+  if (!buyerEmail) return { conflict: null, error: null }
+
+  const { data: existingMember, error: memberErr } = await supabaseAdmin
+    .from('client_members')
+    .select('client_id,email,user_id,role')
+    .eq('email', buyerEmail)
+    .limit(1)
+    .maybeSingle()
+
+  if (memberErr) return { conflict: null, error: memberErr }
+
+  if (existingMember?.client_id) {
+    const { data: client, error: clientErr } = await supabaseAdmin
+      .from('clients')
+      .select('id,archived_at,billing_status,subscription_status,status')
+      .eq('id', existingMember.client_id)
+      .maybeSingle()
+
+    if (clientErr) return { conflict: null, error: clientErr }
+    if (clientLooksActive(client)) {
+      return { conflict: { reason: 'active_member' }, error: null }
+    }
+  }
+
+  const { data: existingIntent, error: intentErr } = await supabaseAdmin
+    .from('public_purchase_intents')
+    .select('id,status,agreement_id,client_id,created_at')
+    .eq('buyer_email', buyerEmail)
+    .in('status', BLOCKING_PURCHASE_INTENT_STATUSES)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (intentErr) return { conflict: null, error: intentErr }
+  if (existingIntent?.id) {
+    const status = String(existingIntent.status || '').trim().toLowerCase()
+    return {
+      conflict: { reason: status === 'completed' ? 'paid_setup_pending' : 'purchase_in_progress' },
+      error: null
+    }
+  }
+
+  const { data: existingAgreement, error: agreementErr } = await supabaseAdmin
+    .from('membership_agreements')
+    .select('id,status,checkout_status,client_id,created_at')
+    .eq('admin_email', buyerEmail)
+    .in('status', BLOCKING_AGREEMENT_STATUSES)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (agreementErr) return { conflict: null, error: agreementErr }
+  if (existingAgreement?.id) {
+    const checkoutStatus = String(existingAgreement.checkout_status || '').trim().toLowerCase()
+    return {
+      conflict: { reason: checkoutStatus === 'paid' ? 'paid_setup_pending' : 'agreement_in_progress' },
+      error: null
+    }
+  }
+
+  return { conflict: null, error: null }
 }
 
 function signingPathFromUrl(signingUrl) {
@@ -514,6 +599,19 @@ router.post('/purchase-intents', rateLimit, async (req, res) => {
       const body = buildPurchaseIntentResponse(existingIntent, { duplicate: true })
       body.request_id = request_id
       return res.status(200).json(body)
+    }
+
+    const signupConflict = await findSignupConflictByEmail(input.buyer_email)
+    if (signupConflict.error) {
+      console.error('[alphascreen/purchase-intents] signup_conflict_lookup_failed:', signupConflict.error.message || signupConflict.error)
+      return res.status(503).json({
+        error: 'purchase_intent_lookup_failed',
+        code: 'PURCHASE_INTENT_LOOKUP_FAILED',
+        request_id
+      })
+    }
+    if (signupConflict.conflict) {
+      return duplicateSignupResponse(res, req, signupConflict.conflict.reason)
     }
 
     const nowIso = new Date().toISOString()

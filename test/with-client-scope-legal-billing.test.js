@@ -1,7 +1,10 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const path = require('node:path');
-const { canViewLegalBillingForClient } = require('../src/lib/clientScope');
+const {
+  canManageMembersForClient,
+  canViewLegalBillingForClient
+} = require('../src/lib/clientScope');
 
 const projectRoot = path.join(__dirname, '..');
 const authPath = path.join(projectRoot, 'src', 'middleware', 'auth.js');
@@ -95,7 +98,8 @@ function loadWithClientScope({ members, clients }) {
 function baseClients() {
   return [
     { id: 'parent-client', name: 'Retail Parent', parent_client_id: null, entity_label: null, archived_at: null },
-    { id: 'child-client', name: 'Retail Child', parent_client_id: 'parent-client', entity_label: 'location', archived_at: null }
+    { id: 'child-client', name: 'Retail Child', parent_client_id: 'parent-client', entity_label: 'location', archived_at: null },
+    { id: 'sibling-client', name: 'Retail Sibling', parent_client_id: 'parent-client', entity_label: 'location', archived_at: null }
   ];
 }
 
@@ -145,6 +149,8 @@ test('withClientScope keeps legal-billing maps for parent retail manager', async
 
   assert.equal(req.clientScope.effectiveRolesByClientId['parent-client'].includes('manager'), true);
   assert.equal(canViewLegalBillingForClient(req.clientScope, 'parent-client'), true);
+  assert.equal(canManageMembersForClient(req.clientScope, 'child-client'), true);
+  assert.equal(req.clientScope.permissionsByClientId['child-client'].can_manage_members, true);
 });
 
 test('withClientScope lets parent manager selected on child resolve legal billing to parent', async () => {
@@ -157,6 +163,7 @@ test('withClientScope lets parent manager selected on child resolve legal billin
   assert.equal(req.client?.id, 'child-client');
   assert.equal(canViewLegalBillingForClient(req.clientScope, 'child-client'), true);
   assert.equal(canViewLegalBillingForClient(req.clientScope, 'parent-client'), true);
+  assert.equal(canManageMembersForClient(req.clientScope, 'child-client'), true);
 });
 
 test('withClientScope keeps regular members blocked from legal billing', async () => {
@@ -178,6 +185,9 @@ test('withClientScope keeps child-only managers blocked from parent legal billin
 
   assert.equal(canViewLegalBillingForClient(req.clientScope, 'child-client'), false);
   assert.equal(canViewLegalBillingForClient(req.clientScope, 'parent-client'), false);
+  assert.equal(canManageMembersForClient(req.clientScope, 'child-client'), true);
+  assert.equal(canManageMembersForClient(req.clientScope, 'parent-client'), false);
+  assert.equal(canManageMembersForClient(req.clientScope, 'sibling-client'), false);
 });
 
 test('withClientScope preserves admin bypass state', async () => {

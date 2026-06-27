@@ -3,7 +3,8 @@
 const express = require('express');
 const crypto = require('crypto');
 const { supabaseAdmin } = require('../src/lib/supabaseClient');
-const { requireParentClient } = require('../src/lib/clientBillingScope');
+const { requireParentClient, resolveBillingOwnerForScope } = require('../src/lib/clientBillingScope');
+const { canViewLegalBillingForClient } = require('../src/lib/clientScope');
 const { buildMembershipAgreementSignUrl } = require('../config/urlConfig');
 const { requireAuth, withClientScope } = require('../src/middleware/auth');
 const { htmlToPdf } = require('../utils/pdfRenderer');
@@ -29,6 +30,34 @@ const AGREEMENTS_BUCKET = process.env.SUPABASE_AGREEMENTS_BUCKET || 'agreements'
 const MEMBERSHIP_INTERNAL_NOTIFY_EMAIL = 'memberships@alphasourceai.com';
 const SIGNED_URL_TTL_SECONDS = Math.max(60, Number(process.env.SIGNED_URL_TTL_SECONDS || 600));
 const EMAIL_SIGNED_URL_TTL_SECONDS = Math.max(300, Number(process.env.AGREEMENT_SIGNED_EMAIL_LINK_TTL_SECONDS || 604800));
+const PUBLIC_TOKEN_RATE_WINDOW_MS = 10 * 60 * 1000;
+const PUBLIC_TOKEN_RATE_MAX = Number(process.env.MEMBERSHIP_AGREEMENT_PUBLIC_TOKEN_RATE_MAX || 60);
+const publicAgreementTokenRateBuckets = new Map();
+
+function getRequestIp(req) {
+  return String((req.headers['x-forwarded-for'] || req.ip || 'unknown')).split(',')[0].trim() || 'unknown';
+}
+
+function publicAgreementTokenRateLimit(req, res, next) {
+  const now = Date.now();
+  const routeKey = `${req.method || 'POST'}:${req.path || req.originalUrl || 'membership-agreement'}`;
+  const subject = `${getRequestIp(req)}:${routeKey}`;
+  const current = publicAgreementTokenRateBuckets.get(subject);
+  const bucket = (!current || current.resetAt <= now)
+    ? { count: 0, resetAt: now + PUBLIC_TOKEN_RATE_WINDOW_MS }
+    : current;
+  bucket.count += 1;
+  publicAgreementTokenRateBuckets.set(subject, bucket);
+  if (bucket.count > PUBLIC_TOKEN_RATE_MAX) {
+    return res.status(429).json({
+      error: 'rate_limited',
+      code: 'RATE_LIMIT_EXCEEDED',
+      detail: 'Too many requests. Please try again later.',
+      request_id: req.request_id || null
+    });
+  }
+  return next();
+}
 
 function extractErrorMessage(text, fallback) {
   const raw = String(text || '').trim();
@@ -559,7 +588,69 @@ async function loadAgreementByTokenHash(tokenHash) {
   return data || null;
 }
 
-router.post('/session', async (req, res) => {
+async function resolveLegalBillingAgreementClient(req, clientId, requestId) {
+  const requestedClientId = String(clientId || '').trim();
+  if (!requestedClientId || requestedClientId === 'all') {
+    return { ok: true, client_id: null };
+  }
+
+  const scopedIds = Array.isArray(req.client_memberships)
+    ? req.client_memberships
+    : (Array.isArray(req.clientIds) ? req.clientIds : []);
+  const isGlobalAdmin = req.isGlobalAdmin === true || req.isAdmin === true;
+  if (!isGlobalAdmin && !scopedIds.includes(requestedClientId)) {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        error: 'forbidden',
+        code: 'forbidden',
+        detail: 'Client scope mismatch.',
+        request_id: requestId
+      }
+    };
+  }
+
+  const billingScope = await resolveBillingOwnerForScope(supabaseAdmin, requestedClientId);
+  if (!billingScope.ok) {
+    return {
+      ok: false,
+      status: billingScope.status || 500,
+      body: {
+        error: billingScope.body?.error || billingScope.body?.code || 'billing_client_lookup_failed',
+        code: billingScope.body?.code || billingScope.body?.error || 'billing_client_lookup_failed',
+        detail: billingScope.body?.detail || 'Billing client lookup failed.',
+        hint: billingScope.body?.hint || null,
+        request_id: requestId
+      }
+    };
+  }
+
+  if (
+    !isGlobalAdmin &&
+    !canViewLegalBillingForClient(req.clientScope, billingScope.scopeClientId || requestedClientId) &&
+    !canViewLegalBillingForClient(req.clientScope, billingScope.billingClientId)
+  ) {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        error: 'forbidden',
+        code: 'forbidden',
+        detail: 'Legal billing access is required.',
+        request_id: requestId
+      }
+    };
+  }
+
+  return {
+    ok: true,
+    client_id: billingScope.billingClientId || requestedClientId,
+    scope_client_id: billingScope.scopeClientId || requestedClientId
+  };
+}
+
+router.post('/session', publicAgreementTokenRateLimit, async (req, res) => {
   const request_id = req.request_id || null;
   try {
     const token = readToken(req);
@@ -650,7 +741,7 @@ router.post('/session', async (req, res) => {
   }
 });
 
-router.post('/sign', async (req, res) => {
+router.post('/sign', publicAgreementTokenRateLimit, async (req, res) => {
   const request_id = req.request_id || null;
   try {
     const token = readToken(req);
@@ -920,7 +1011,7 @@ router.post('/sign', async (req, res) => {
   }
 });
 
-router.post('/checkout-session', async (req, res) => {
+router.post('/checkout-session', publicAgreementTokenRateLimit, async (req, res) => {
   const request_id = req.request_id || null;
   try {
     const token = readToken(req);
@@ -1185,23 +1276,14 @@ router.get('/latest-signed', requireAuth, withClientScope, async (req, res) => {
       return res.json({ ok: true, agreement: null, request_id });
     }
 
-    const scopedIds = Array.isArray(req.client_memberships)
-      ? req.client_memberships
-      : (Array.isArray(req.clientIds) ? req.clientIds : []);
-    const isGlobalAdmin = req.isGlobalAdmin === true || req.isAdmin === true;
-    if (!isGlobalAdmin && !scopedIds.includes(clientId)) {
-      return res.status(403).json({
-        error: 'forbidden',
-        code: 'forbidden',
-        detail: 'Client scope mismatch.',
-        request_id
-      });
-    }
+    const access = await resolveLegalBillingAgreementClient(req, clientId, request_id);
+    if (!access.ok) return res.status(access.status || 403).json(access.body);
+    const agreementClientId = access.client_id;
 
     const { data: latest, error: latestErr } = await supabaseAdmin
       .from('membership_agreements')
       .select('id,client_id,status,signed_at,signer_typed_name,client_legal_name,executed_pdf_path,created_at,is_current')
-      .eq('client_id', clientId)
+      .eq('client_id', agreementClientId)
       .eq('status', 'signed')
       .eq('is_current', true)
       .maybeSingle();
@@ -1209,7 +1291,7 @@ router.get('/latest-signed', requireAuth, withClientScope, async (req, res) => {
     if (latestErr) {
       console.error('[membership-agreements/latest-signed] query_failed', {
         request_id,
-        client_id: clientId,
+        client_id: agreementClientId,
         error: latestErr.message,
         code: latestErr.code,
         hint: latestErr.hint
@@ -1261,23 +1343,14 @@ router.get('/latest-signed-url', requireAuth, withClientScope, async (req, res) 
       return res.json({ ok: true, executed_pdf_url: null, request_id });
     }
 
-    const scopedIds = Array.isArray(req.client_memberships)
-      ? req.client_memberships
-      : (Array.isArray(req.clientIds) ? req.clientIds : []);
-    const isGlobalAdmin = req.isGlobalAdmin === true || req.isAdmin === true;
-    if (!isGlobalAdmin && !scopedIds.includes(clientId)) {
-      return res.status(403).json({
-        error: 'forbidden',
-        code: 'forbidden',
-        detail: 'Client scope mismatch.',
-        request_id
-      });
-    }
+    const access = await resolveLegalBillingAgreementClient(req, clientId, request_id);
+    if (!access.ok) return res.status(access.status || 403).json(access.body);
+    const agreementClientId = access.client_id;
 
     const { data: latest, error: latestErr } = await supabaseAdmin
       .from('membership_agreements')
       .select('id,executed_pdf_path,created_at,signed_at,is_current')
-      .eq('client_id', clientId)
+      .eq('client_id', agreementClientId)
       .eq('status', 'signed')
       .eq('is_current', true)
       .maybeSingle();
@@ -1285,7 +1358,7 @@ router.get('/latest-signed-url', requireAuth, withClientScope, async (req, res) 
     if (latestErr) {
       console.error('[membership-agreements/latest-signed-url] query_failed', {
         request_id,
-        client_id: clientId,
+        client_id: agreementClientId,
         error: latestErr.message,
         code: latestErr.code,
         hint: latestErr.hint

@@ -57,7 +57,7 @@ const dashboardRouter = require('./routes/dashboard')
 const rolesRouter = require('./routes/roles')
 const automationRouter = require('./routes/automation')
 const { requireAuth, withClientScope } = require('./src/middleware/auth')
-const { buildClientScopeContext } = require('./src/lib/clientScope')
+const { buildClientScopeContext, canViewLegalBillingForClient } = require('./src/lib/clientScope')
 const {
   entityFieldsForClientId,
   loadEntityMap,
@@ -177,9 +177,12 @@ app.use((req, res, next) => {
     const cspFrameAncestors = String(
       process.env.CSP_FRAME_ANCESTORS || `'self' ${FRONTEND_URL} https://*.wixsite.com https://*.filesusr.com`
     ).trim();
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader(
       'Content-Security-Policy',
-      `frame-ancestors ${cspFrameAncestors};`
+      `base-uri 'self'; object-src 'none'; frame-ancestors ${cspFrameAncestors};`
     );
     // Ensure we don't send legacy X-Frame-Options that could conflict with CSP
     res.removeHeader && res.removeHeader('X-Frame-Options');
@@ -193,6 +196,25 @@ app.use((req, res, next) => {
       'Permissions-Policy',
       'camera=(self "https://tavus.daily.co" "https://c.daily.co"), microphone=(self "https://tavus.daily.co" "https://c.daily.co"), display-capture=(self "https://tavus.daily.co" "https://c.daily.co"), fullscreen=(self "https://tavus.daily.co" "https://c.daily.co"), autoplay=(self "https://tavus.daily.co" "https://c.daily.co"), clipboard-read=(self), clipboard-write=(self)'
     );
+  } catch (_) {}
+  next();
+});
+
+app.use((req, res, next) => {
+  try {
+    const pathName = String(req.path || '');
+    if (
+      pathName.startsWith('/admin') ||
+      pathName.startsWith('/clients') ||
+      pathName.startsWith('/client-members') ||
+      pathName.startsWith('/dashboard') ||
+      pathName.startsWith('/roles') ||
+      pathName.startsWith('/reports') ||
+      pathName.startsWith('/files') ||
+      pathName.startsWith('/membership-agreements')
+    ) {
+      res.setHeader('Cache-Control', 'private, no-store');
+    }
   } catch (_) {}
   next();
 });
@@ -741,13 +763,26 @@ app.get('/clients/billing/summary', requireAuth, withClientScope, async (req, re
     if (wantedClientId && !ids.includes(wantedClientId)) {
       return res.status(403).json({ error: 'forbidden' })
     }
+    const isGlobalAdmin = req.isGlobalAdmin === true || req.isAdmin === true
+
+    let queryIds = ids
+    if (wantedClientId) {
+      if (!isGlobalAdmin && !canViewLegalBillingForClient(req.clientScope, wantedClientId)) {
+        return res.status(403).json({ error: 'forbidden' })
+      }
+      const billingScope = await resolveBillingOwnerForScope(supabaseAdmin, wantedClientId)
+      if (!billingScope.ok) return respondWithBillingScopeError(res, billingScope, 'billing_client_lookup_failed')
+      queryIds = [billingScope.billingClientId || wantedClientId]
+    } else if (!isGlobalAdmin) {
+      queryIds = ids.filter((clientId) => canViewLegalBillingForClient(req.clientScope, clientId))
+      if (queryIds.length === 0) return res.status(403).json({ error: 'forbidden' })
+    }
 
     let q = supabaseAdmin
       .from('clients')
       .select('id,name,plan_tier,billing_status,billing_interval,auto_renew,current_term_end,contract_end_at,subscription_status,cancel_at_term_end,access_override_mode,stripe_customer_id')
-      .in('id', ids)
+      .in('id', Array.from(new Set(queryIds)))
       .order('name', { ascending: true })
-    if (wantedClientId) q = q.eq('id', wantedClientId)
 
     const { data, error } = await q
     if (error) return res.status(500).json({ error: 'list_billing_summary_failed', detail: error.message })
@@ -5780,11 +5815,11 @@ adminRouter.post('/send-password-reset', requireAuth, requireAdmin, async (req, 
       request_id,
       email,
       redirectTo,
-      actionLink,
-      actionLink_host: actionLinkHost,
-      actionLink_path: actionLinkPath,
-      actionLink_contains_pwreset: actionLinkContainsPwreset,
-      actionLink_contains_redirect_to: actionLinkContainsRedirectTo
+      action_link_present: Boolean(actionLink),
+      action_link_host: actionLinkHost,
+      action_link_path: actionLinkPath,
+      action_link_contains_pwreset: actionLinkContainsPwreset,
+      action_link_contains_redirect_to: actionLinkContainsRedirectTo
     })
 
     try {
@@ -5800,7 +5835,9 @@ adminRouter.post('/send-password-reset', requireAuth, requireAdmin, async (req, 
         request_id,
         email,
         redirectTo,
-        actionLink,
+        action_link_present: Boolean(actionLink),
+        action_link_host: actionLinkHost,
+        action_link_path: actionLinkPath,
         error: e?.message || e,
         code: e?.code || null,
         status: e?.status || null
@@ -5812,8 +5849,8 @@ adminRouter.post('/send-password-reset', requireAuth, requireAdmin, async (req, 
       request_id,
       email,
       redirectTo,
-      actionLink_host: actionLinkHost,
-      actionLink_path: actionLinkPath
+      action_link_host: actionLinkHost,
+      action_link_path: actionLinkPath
     })
     return res.json({ ok: true, request_id })
   } catch (e) {

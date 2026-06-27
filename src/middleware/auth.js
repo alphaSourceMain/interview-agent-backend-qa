@@ -1,6 +1,5 @@
 // src/middleware/auth.js
-const jwt = require('jsonwebtoken');
-const { supabaseAdmin } = require('../lib/supabaseClient');
+const { supabaseAdmin, supabaseAnon } = require('../lib/supabaseClient');
 const { buildClientScopeContext } = require('../lib/clientScope');
 
 const supabase = supabaseAdmin;
@@ -74,7 +73,7 @@ function strongestRole(roles, fallback = 'member') {
 
 /**
  * Auth middleware
- * - Decodes the Supabase JWT (no verification here; Supabase will verify on DB calls via RLS)
+ * - Verifies the Supabase access token with Supabase Auth before trusting identity
  * - Attaches req.user and req.userToken
  */
 async function requireAuth(req, res, next) {
@@ -82,12 +81,22 @@ async function requireAuth(req, res, next) {
     const token = getToken(req);
     if (!token) return res.status(401).json({ error: 'Missing bearer token' });
 
-    const decoded = jwt.decode(token);
-    // Supabase JWT normally includes `sub` as the user id
-    const sub = decoded && (decoded.sub || decoded.user_id);
-    if (!decoded || !sub) return res.status(401).json({ error: 'Invalid token' });
+    const authClient = supabaseAnon || supabaseAdmin;
+    if (!authClient?.auth?.getUser) {
+      console.error('[requireAuth] Supabase auth client not configured.');
+      return res.status(500).json({ error: 'Server not configured' });
+    }
 
-    req.user = { id: sub, email: decoded.email || decoded.user_email || null };
+    const { data, error } = await authClient.auth.getUser(token);
+    const authUser = data?.user || null;
+    if (error || !authUser?.id) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    req.user = {
+      id: authUser.id,
+      email: authUser.email || null
+    };
     req.userToken = token;
     req.isGlobalAdmin = await lookupGlobalAdmin(req.user.email, req.user.id);
     req.isAdmin = req.isGlobalAdmin;

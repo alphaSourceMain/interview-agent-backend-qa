@@ -126,6 +126,9 @@ class FakeQuery {
 
   async single() {
     if (this.insertPayload) {
+      if (this.table === 'roles' && this.db.roleInsertError) {
+        return { data: null, error: { message: this.db.roleInsertError } }
+      }
       const row = { ...this.insertPayload }
       if (this.table === 'pending_role_purchases' && !row.id) row.id = `pending-${this.db.pendingRolePurchases.length + 1}`
       if (this.table === 'roles' && !row.id) row.id = `role-${this.db.roles.length + 1}`
@@ -223,7 +226,8 @@ function makeDb(options = {}) {
     rpcCalls: [],
     rubricCalls: [],
     storageUploads: [],
-    rpcMode: options.rpcMode || 'consume',
+    rpcMode: options.rpcMode || 'claim',
+    roleInsertError: options.roleInsertError || null,
     stripeConstructs: [],
     stripeCalls: {
       customersRetrieve: [],
@@ -245,14 +249,14 @@ function makeDb(options = {}) {
     },
     async rpc(name, args) {
       this.rpcCalls.push({ name, args })
-      if (name !== 'consume_first_role_prepay_credit_v2') {
+      if (name !== 'claim_first_role_prepay_credit') {
         return { data: null, error: { message: 'unknown_rpc' } }
       }
       if (this.rpcMode === 'error') {
-        return { data: null, error: { message: 'role_creation_failed' } }
+        return { data: null, error: { message: 'claim_failed' } }
       }
       if (this.rpcMode === 'race') {
-        return { data: [{ ok: false, credit_id: null, role_id: null, status: 'credit_not_available' }], error: null }
+        return { data: [{ ok: false, credit_id: null, status: 'credit_not_available' }], error: null }
       }
       const credit = this.clientRoleCredits.find((row) => {
         return row.billing_client_id === args.p_billing_client_id &&
@@ -262,22 +266,18 @@ function makeDb(options = {}) {
           !row.used_by_role_id
       })
       if (!credit) {
-        return { data: [{ ok: false, credit_id: null, role_id: null, status: 'credit_not_available' }], error: null }
+        return { data: [{ ok: false, credit_id: null, status: 'credit_not_available' }], error: null }
       }
-      const role = {
-        id: args.p_role_id,
-        client_id: args.p_source_client_id,
-        title: args.p_role_title,
-        interview_type: args.p_interview_type,
-        job_description_url: args.p_jd_storage_path
+      credit.status = 'claimed'
+      credit.source_client_id = credit.source_client_id || args.p_source_client_id
+      credit.metadata = {
+        ...(credit.metadata || {}),
+        claimed_by: args.p_claim_context,
+        claimed_client_id: args.p_source_client_id,
+        claimed_at: '2026-06-26T12:00:00.000Z'
       }
-      this.roles.push(role)
-      credit.status = 'used'
-      credit.used_at = '2026-06-26T12:00:00.000Z'
-      credit.used_by_role_id = role.id
-      this.writes.push({ table: 'roles', type: 'rpc_insert', row: role })
-      this.writes.push({ table: 'client_role_credits', type: 'rpc_update', row: credit })
-      return { data: [{ ok: true, credit_id: credit.id, role_id: role.id, status: 'used' }], error: null }
+      this.writes.push({ table: 'client_role_credits', type: 'rpc_claim', row: credit })
+      return { data: [{ ok: true, credit_id: credit.id, status: 'claimed' }], error: null }
     }
   }
   db.stripe = makeStripe(db)
@@ -397,11 +397,13 @@ test('role checkout consumes unused first-role credit without Stripe checkout or
   assert.equal(db.roles.length, 1)
   assert.equal(db.roles[0].id, response.body.role_id)
   assert.equal(db.roles[0].client_id, 'parent-client')
-  assert.equal(db.rpcCalls[0].name, 'consume_first_role_prepay_credit_v2')
-  assert.equal(db.rpcCalls[0].args.p_role_id, response.body.role_id)
+  assert.equal(db.rpcCalls[0].name, 'claim_first_role_prepay_credit')
+  assert.equal(db.rpcCalls[0].args.p_claim_context, 'role_checkout')
   assert.equal(db.clientRoleCredits[0].status, 'used')
   assert.equal(db.clientRoleCredits[0].used_by_role_id, response.body.role_id)
-  assert.equal(db.clientRoleCredits[0].used_at, '2026-06-26T12:00:00.000Z')
+  assert.match(db.clientRoleCredits[0].used_at, /^\d{4}-\d{2}-\d{2}T/)
+  assert.equal(db.clientRoleCredits[0].metadata.claimed_by, 'role_checkout')
+  assert.equal(db.clientRoleCredits[0].metadata.consumed_by, 'role_checkout')
   assert.deepEqual(db.rubricCalls, [response.body.role_id])
 })
 
@@ -511,7 +513,7 @@ test('credit race fallback does not both consume credit and create a Stripe role
 
 test('prepaid role creation failure leaves credit unused and does not open Stripe checkout', async () => {
   const db = makeDb({
-    rpcMode: 'error',
+    roleInsertError: 'roles insert failed',
     clientRoleCredits: [{
       id: 'credit-error',
       billing_client_id: 'parent-client',
@@ -529,6 +531,7 @@ test('prepaid role creation failure leaves credit unused and does not open Strip
   assert.equal(db.clientRoleCredits[0].status, 'unused')
   assert.equal(db.clientRoleCredits[0].used_at, null)
   assert.equal(db.clientRoleCredits[0].used_by_role_id, null)
+  assert.equal(db.clientRoleCredits[0].metadata.released_by, 'role_checkout')
   assert.equal(db.roles.length, 0)
   assert.equal(db.pendingRolePurchases.length, 0)
   assert.equal(db.stripeConstructs.length, 0)

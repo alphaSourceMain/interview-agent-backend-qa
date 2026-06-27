@@ -41,14 +41,13 @@ async function enrichRoleJobDescription({
   return { enriched: true };
 }
 
-async function createOrRecoverRoleForPurchase({
+async function createRoleRecordForPurchase({
   db,
   clientId,
   roleTitle,
   interviewType,
-  jdStoragePath,
   pendingRolePurchaseId = null,
-  generateRubricAndKBForRole = defaultGenerateRubricAndKBForRole
+  roleId = null
 }) {
   const safeClientId = cleanText(clientId);
   const safeTitle = cleanText(roleTitle);
@@ -56,6 +55,7 @@ async function createOrRecoverRoleForPurchase({
   if (!safeTitle) throw new Error('Pending role title missing');
   const normalizedInterviewType = normalizeInterviewType(interviewType);
   const safePendingRolePurchaseId = cleanText(pendingRolePurchaseId);
+  const safeRoleId = cleanText(roleId);
 
   let linkedRoleId = null;
   if (safePendingRolePurchaseId) {
@@ -78,6 +78,7 @@ async function createOrRecoverRoleForPurchase({
       title: safeTitle,
       interview_type: normalizedInterviewType
     };
+    if (safeRoleId) insertPayload.id = safeRoleId;
     if (safePendingRolePurchaseId) insertPayload.pending_role_purchase_id = safePendingRolePurchaseId;
     const { data: insertedRole, error: createdRoleErr } = await db
       .from('roles')
@@ -88,19 +89,41 @@ async function createOrRecoverRoleForPurchase({
     role = insertedRole;
   }
 
-  await enrichRoleJobDescription({
-    db,
-    roleId: role.id,
-    clientId: safeClientId,
-    jdStoragePath,
-    generateRubricAndKBForRole
-  });
-
   return {
     role,
     linkedRoleId,
     recovered: Boolean(linkedRoleId)
   };
+}
+
+async function createOrRecoverRoleForPurchase({
+  db,
+  clientId,
+  roleTitle,
+  interviewType,
+  jdStoragePath,
+  pendingRolePurchaseId = null,
+  roleId = null,
+  generateRubricAndKBForRole = defaultGenerateRubricAndKBForRole
+}) {
+  const created = await createRoleRecordForPurchase({
+    db,
+    clientId,
+    roleTitle,
+    interviewType,
+    pendingRolePurchaseId,
+    roleId
+  });
+
+  await enrichRoleJobDescription({
+    db,
+    roleId: created.role.id,
+    clientId,
+    jdStoragePath,
+    generateRubricAndKBForRole
+  });
+
+  return created;
 }
 
 async function finalizePendingRolePurchase({
@@ -167,6 +190,108 @@ function firstRpcRow(data) {
   return data || null;
 }
 
+function plainMetadata(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+}
+
+async function readClaimedCreditMetadata({ db, creditId }) {
+  const { data, error } = await db
+    .from('client_role_credits')
+    .select('metadata')
+    .eq('id', creditId)
+    .eq('status', 'claimed')
+    .maybeSingle();
+  if (error) throw new Error(error.message || 'Claimed first-role credit lookup failed');
+  return plainMetadata(data?.metadata);
+}
+
+async function claimFirstRolePrepayCredit({ db, billingClientId, clientId }) {
+  const { data, error } = await db.rpc('claim_first_role_prepay_credit', {
+    p_billing_client_id: billingClientId,
+    p_source_client_id: clientId,
+    p_claim_context: 'role_checkout'
+  });
+  if (error) throw new Error(error.message || 'First-role prepay credit claim failed');
+
+  const row = firstRpcRow(data);
+  if (!row?.ok || !row?.credit_id) {
+    return {
+      claimed: false,
+      status: cleanText(row?.status) || 'credit_not_available'
+    };
+  }
+
+  return {
+    claimed: true,
+    credit_id: row.credit_id,
+    status: cleanText(row.status) || 'claimed'
+  };
+}
+
+async function markClaimedFirstRoleCreditUsed({ db, creditId, roleId, clientId }) {
+  const safeCreditId = cleanText(creditId);
+  const safeRoleId = cleanText(roleId);
+  const safeClientId = cleanText(clientId);
+  if (!safeCreditId) throw new Error('Claimed first-role credit id missing');
+  if (!safeRoleId) throw new Error('Claimed first-role credit role id missing');
+
+  const consumedAt = new Date().toISOString();
+  const metadata = {
+    ...(await readClaimedCreditMetadata({ db, creditId: safeCreditId })),
+    consumed_by: 'role_checkout',
+    consumed_client_id: safeClientId || null,
+    consumed_at: consumedAt
+  };
+
+  const { data, error } = await db
+    .from('client_role_credits')
+    .update({
+      status: 'used',
+      used_at: consumedAt,
+      used_by_role_id: safeRoleId,
+      metadata
+    })
+    .eq('id', safeCreditId)
+    .eq('status', 'claimed')
+    .is('used_at', null)
+    .is('used_by_role_id', null)
+    .select('id')
+    .maybeSingle();
+  if (error || !data) throw new Error(error?.message || 'Claimed first-role credit use failed');
+  return { used_at: consumedAt };
+}
+
+async function releaseClaimedFirstRoleCredit({ db, creditId, clientId, reason }) {
+  const safeCreditId = cleanText(creditId);
+  if (!safeCreditId) return { released: false };
+
+  const releasedAt = new Date().toISOString();
+  const metadata = {
+    ...(await readClaimedCreditMetadata({ db, creditId: safeCreditId })),
+    released_by: 'role_checkout',
+    released_client_id: cleanText(clientId) || null,
+    release_reason: cleanText(reason) || 'role_creation_failed',
+    released_at: releasedAt
+  };
+
+  const { data, error } = await db
+    .from('client_role_credits')
+    .update({
+      status: 'unused',
+      used_at: null,
+      used_by_role_id: null,
+      metadata
+    })
+    .eq('id', safeCreditId)
+    .eq('status', 'claimed')
+    .is('used_at', null)
+    .is('used_by_role_id', null)
+    .select('id')
+    .maybeSingle();
+  if (error || !data) throw new Error(error?.message || 'Claimed first-role credit release failed');
+  return { released: true, released_at: releasedAt };
+}
+
 async function finalizePrepaidRoleCredit({
   db,
   billingClientId,
@@ -185,30 +310,59 @@ async function finalizePrepaidRoleCredit({
   if (!safeClientId) throw new Error('Client id is required for first-role prepay credit.');
   if (!safeTitle) throw new Error('Role title is required for first-role prepay credit.');
 
-  const roleId = randomUUID();
-  const { data, error } = await db.rpc('consume_first_role_prepay_credit_v2', {
-    p_role_id: roleId,
-    p_billing_client_id: safeBillingClientId,
-    p_source_client_id: safeClientId,
-    p_role_title: safeTitle,
-    p_interview_type: normalizeInterviewType(interviewType),
-    p_jd_storage_path: cleanText(jdStoragePath) || null
+  const claim = await claimFirstRolePrepayCredit({
+    db,
+    billingClientId: safeBillingClientId,
+    clientId: safeClientId
   });
-  if (error) throw new Error(error.message || 'First-role prepay credit consumption failed');
-
-  const row = firstRpcRow(data);
-  if (!row?.ok || !row?.role_id) {
+  if (!claim.claimed) {
     return {
       applied: false,
-      status: cleanText(row?.status) || 'credit_not_available'
+      status: claim.status || 'credit_not_available'
     };
   }
+
+  const roleId = randomUUID();
+  let created;
+  try {
+    created = await createRoleRecordForPurchase({
+      db,
+      clientId: safeClientId,
+      roleTitle: safeTitle,
+      interviewType,
+      roleId
+    });
+  } catch (error) {
+    try {
+      await releaseClaimedFirstRoleCredit({
+        db,
+        creditId: claim.credit_id,
+        clientId: safeClientId,
+        reason: error?.message || 'role_creation_failed'
+      });
+    } catch (releaseError) {
+      logger.error?.('[role-purchase-finalizer] prepaid_role_credit_release_failed', {
+        credit_id: claim.credit_id,
+        client_id: safeClientId,
+        billing_client_id: safeBillingClientId,
+        error: releaseError?.message || releaseError
+      });
+    }
+    throw error;
+  }
+
+  await markClaimedFirstRoleCreditUsed({
+    db,
+    creditId: claim.credit_id,
+    roleId: created.role.id,
+    clientId: safeClientId
+  });
 
   let enrichmentStatus = 'skipped';
   try {
     const enrichment = await enrichRoleJobDescription({
       db,
-      roleId: row.role_id,
+      roleId: created.role.id,
       clientId: safeClientId,
       jdStoragePath,
       generateRubricAndKBForRole
@@ -217,8 +371,8 @@ async function finalizePrepaidRoleCredit({
   } catch (error) {
     enrichmentStatus = 'failed';
     logger.error?.('[role-purchase-finalizer] prepaid_role_enrichment_failed', {
-      role_id: row.role_id,
-      credit_id: row.credit_id || null,
+      role_id: created.role.id,
+      credit_id: claim.credit_id,
       client_id: safeClientId,
       billing_client_id: safeBillingClientId,
       error: error?.message || error
@@ -229,8 +383,8 @@ async function finalizePrepaidRoleCredit({
   return {
     applied: true,
     status: 'used',
-    role_id: row.role_id,
-    credit_id: row.credit_id || null,
+    role_id: created.role.id,
+    credit_id: claim.credit_id,
     enrichment_status: enrichmentStatus
   };
 }

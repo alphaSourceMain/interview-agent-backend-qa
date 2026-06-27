@@ -11,34 +11,13 @@ const {
   findUnusedFirstRolePrepayCredit,
 } = require('../src/lib/rolePurchaseFinalizer');
 
-const consumeCreditMigrationPath = path.join(
+const migrationsDir = path.join(
   __dirname,
   '..',
   'supabase',
-  'migrations',
-  '20260626130000_consume_first_role_prepay_credit.sql'
+  'migrations'
 );
-const consumeCreditHotfixMigrationPath = path.join(
-  __dirname,
-  '..',
-  'supabase',
-  'migrations',
-  '20260627120000_fix_first_role_prepay_credit_rpc_qualification.sql'
-);
-const consumeCreditRandomBytesHotfixMigrationPath = path.join(
-  __dirname,
-  '..',
-  'supabase',
-  'migrations',
-  '20260627123000_fix_first_role_prepay_credit_rpc_random_bytes.sql'
-);
-const consumeCreditAppRoleIdMigrationPath = path.join(
-  __dirname,
-  '..',
-  'supabase',
-  'migrations',
-  '20260627124500_consume_first_role_prepay_credit_app_role_id.sql'
-);
+const claimCreditMigrationPath = path.join(migrationsDir, '20260627130000_first_role_prepay_claim_credit_only.sql');
 
 function matchesFilters(row, filters) {
   return filters.every((filter) => {
@@ -123,6 +102,9 @@ class FakeQuery {
 
   async single() {
     if (this.insertPayload) {
+      if (this.table === 'roles' && this.db.roleInsertError) {
+        return { data: null, error: { message: this.db.roleInsertError } };
+      }
       const row = { ...this.insertPayload };
       if (this.table === 'roles' && !row.id) row.id = `role-${this.db.roles.length + 1}`;
       this.rows().push(row);
@@ -153,6 +135,7 @@ function makeDb(overrides = {}) {
     roles: overrides.roles ? [...overrides.roles] : [],
     pendingRolePurchases: overrides.pendingRolePurchases ? [...overrides.pendingRolePurchases] : [],
     clientRoleCredits: overrides.clientRoleCredits ? [...overrides.clientRoleCredits] : [],
+    roleInsertError: overrides.roleInsertError || null,
     writes: [],
     rpcCalls: [],
     from(table) {
@@ -162,7 +145,7 @@ function makeDb(overrides = {}) {
       this.rpcCalls.push({ name, args });
       if (overrides.rpcError) return { data: null, error: overrides.rpcError };
       if (overrides.rpcResponse) return { data: overrides.rpcResponse, error: null };
-      if (name !== 'consume_first_role_prepay_credit_v2') return { data: null, error: { message: 'unknown_rpc' } };
+      if (name !== 'claim_first_role_prepay_credit') return { data: null, error: { message: 'unknown_rpc' } };
       const credit = this.clientRoleCredits.find((row) => {
         return row.billing_client_id === args.p_billing_client_id &&
           row.credit_type === 'first_role_prepay' &&
@@ -171,22 +154,18 @@ function makeDb(overrides = {}) {
           !row.used_by_role_id;
       });
       if (!credit) {
-        return { data: [{ ok: false, credit_id: null, role_id: null, status: 'credit_not_available' }], error: null };
+        return { data: [{ ok: false, credit_id: null, status: 'credit_not_available' }], error: null };
       }
-      const role = {
-        id: args.p_role_id,
-        client_id: args.p_source_client_id,
-        title: args.p_role_title,
-        interview_type: args.p_interview_type || null,
-        job_description_url: args.p_jd_storage_path || null,
+      credit.status = 'claimed';
+      credit.source_client_id = credit.source_client_id || args.p_source_client_id;
+      credit.metadata = {
+        ...(credit.metadata || {}),
+        claimed_by: args.p_claim_context,
+        claimed_client_id: args.p_source_client_id,
+        claimed_at: '2026-06-26T12:00:00.000Z',
       };
-      this.roles.push(role);
-      credit.status = 'used';
-      credit.used_at = '2026-06-26T12:00:00.000Z';
-      credit.used_by_role_id = role.id;
-      this.writes.push({ table: 'roles', type: 'rpc_insert', row: role });
-      this.writes.push({ table: 'client_role_credits', type: 'rpc_update', row: credit });
-      return { data: [{ ok: true, credit_id: credit.id, role_id: role.id, status: 'used' }], error: null };
+      this.writes.push({ table: 'client_role_credits', type: 'rpc_claim', row: credit });
+      return { data: [{ ok: true, credit_id: credit.id, status: 'claimed' }], error: null };
     },
   };
   return db;
@@ -223,42 +202,36 @@ test('finalizePendingRolePurchase creates role, updates JD, generates rubric, an
   assert.equal(db.pendingRolePurchases[0].finalized_role_id, 'role-1');
 })
 
-function consumeCreditMigrationFiles() {
-  return [
-    consumeCreditMigrationPath,
-    consumeCreditHotfixMigrationPath,
-    consumeCreditRandomBytesHotfixMigrationPath,
-    consumeCreditAppRoleIdMigrationPath,
-  ];
+function hotfixCreditMigrationFiles() {
+  return fs.readdirSync(migrationsDir)
+    .filter((filename) => {
+      return filename.startsWith('20260627') &&
+        (filename.includes('_first_role') || filename.includes('_consume'));
+    })
+    .map((filename) => path.join(migrationsDir, filename));
 }
 
-test('consume first-role credit RPC qualifies ambiguous credit columns', () => {
-  for (const filename of consumeCreditMigrationFiles()) {
-    const sql = fs.readFileSync(filename, 'utf8');
+test('claim first-role credit RPC qualifies credit columns and claims only', () => {
+  const sql = fs.readFileSync(claimCreditMigrationPath, 'utf8');
 
-    assert.match(sql, /from public\.client_role_credits as crc/i);
-    assert.match(sql, /where crc\.billing_client_id = p_billing_client_id/i);
-    assert.match(sql, /and crc\.credit_type = 'first_role_prepay'/i);
-    assert.match(sql, /and crc\.status = 'unused'/i);
-    assert.match(sql, /order by crc\.created_at asc, crc\.id asc/i);
-    assert.match(sql, /update public\.client_role_credits as crc/i);
-    assert.match(sql, /where crc\.id = v_credit\.id/i);
-    assert.doesNotMatch(sql, /\bwhere\s+id\s*=/i);
-    assert.doesNotMatch(sql, /\band\s+status\s*=\s*'unused'/i);
-    assert.doesNotMatch(sql, /\band\s+used_at\s+is\s+null/i);
-    assert.doesNotMatch(sql, /\border\s+by\s+created_at\b/i);
-  }
+  assert.match(sql, /create or replace function public\.claim_first_role_prepay_credit/i);
+  assert.match(sql, /from public\.client_role_credits as crc/i);
+  assert.match(sql, /where crc\.billing_client_id = p_billing_client_id/i);
+  assert.match(sql, /and crc\.credit_type = 'first_role_prepay'/i);
+  assert.match(sql, /and crc\.status = 'unused'/i);
+  assert.match(sql, /order by crc\.created_at asc, crc\.id asc/i);
+  assert.match(sql, /for update skip locked/i);
+  assert.match(sql, /set status = 'claimed'/i);
+  assert.doesNotMatch(sql, /\binsert\s+into\s+public\.roles/i);
+  assert.doesNotMatch(sql, /gen_random_bytes|gen_random_uuid|uuid_generate_v4/i);
 })
 
-test('consume first-role credit RPC avoids Postgres UUID/random helpers for role ids', () => {
-  for (const filename of consumeCreditMigrationFiles()) {
+test('FR-3 hotfix credit migrations avoid SQL role inserts and UUID helpers', () => {
+  for (const filename of hotfixCreditMigrationFiles()) {
     const sql = fs.readFileSync(filename, 'utf8');
 
     assert.doesNotMatch(sql, /gen_random_bytes|gen_random_uuid|uuid_generate_v4/i);
-    assert.match(sql, /p_role_id uuid/i);
-    assert.match(sql, /insert into public\.roles as r\s*\(\s*id,/i);
-    assert.match(sql, /values\s*\(\s*p_role_id,/i);
-    assert.match(sql, /returning r\.id into v_role_id/i);
+    assert.doesNotMatch(sql, /\binsert\s+into\s+public\.roles/i);
   }
 })
 
@@ -302,13 +275,15 @@ test('finalizePrepaidRoleCredit consumes credit through RPC and enriches created
   assert.match(result.role_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   assert.equal(result.credit_id, 'credit-1');
   assert.equal(result.enrichment_status, 'completed');
-  assert.equal(db.rpcCalls[0].name, 'consume_first_role_prepay_credit_v2');
-  assert.equal(db.rpcCalls[0].args.p_role_id, result.role_id);
+  assert.equal(db.rpcCalls[0].name, 'claim_first_role_prepay_credit');
   assert.equal(db.rpcCalls[0].args.p_billing_client_id, 'billing-1');
   assert.equal(db.rpcCalls[0].args.p_source_client_id, 'child-1');
+  assert.equal(db.rpcCalls[0].args.p_claim_context, 'role_checkout');
   assert.equal(db.roles[0].client_id, 'child-1');
   assert.equal(db.clientRoleCredits[0].status, 'used');
   assert.equal(db.clientRoleCredits[0].used_by_role_id, result.role_id);
+  assert.equal(db.clientRoleCredits[0].metadata.claimed_by, 'role_checkout');
+  assert.equal(db.clientRoleCredits[0].metadata.consumed_by, 'role_checkout');
   assert.deepEqual(generated, [result.role_id]);
 })
 
@@ -330,6 +305,41 @@ test('finalizePrepaidRoleCredit returns not applied when RPC loses credit race',
   assert.equal(result.status, 'credit_not_available');
   assert.equal(db.roles.length, 0);
   assert.equal(generated, false);
+})
+
+test('finalizePrepaidRoleCredit releases claimed credit when role creation fails', async () => {
+  const db = makeDb({
+    roleInsertError: 'roles insert failed',
+    clientRoleCredits: [{
+      id: 'credit-1',
+      billing_client_id: 'billing-1',
+      credit_type: 'first_role_prepay',
+      status: 'unused',
+      used_at: null,
+      used_by_role_id: null,
+      metadata: {},
+    }],
+  });
+
+  await assert.rejects(
+    finalizePrepaidRoleCredit({
+      db,
+      billingClientId: 'billing-1',
+      clientId: 'billing-1',
+      roleTitle: 'Office Manager',
+      interviewType: 'BASIC',
+      jdStoragePath: 'job-descriptions/pending/billing-1/credit/jd.pdf',
+    }),
+    /roles insert failed/
+  );
+
+  assert.equal(db.roles.length, 0);
+  assert.equal(db.clientRoleCredits[0].status, 'unused');
+  assert.equal(db.clientRoleCredits[0].used_at, null);
+  assert.equal(db.clientRoleCredits[0].used_by_role_id, null);
+  assert.equal(db.clientRoleCredits[0].metadata.claimed_by, 'role_checkout');
+  assert.equal(db.clientRoleCredits[0].metadata.released_by, 'role_checkout');
+  assert.equal(db.clientRoleCredits[0].metadata.release_reason, 'roles insert failed');
 })
 
 test('finalizePrepaidRoleCredit can return applied even if enrichment fails after atomic consumption', async () => {

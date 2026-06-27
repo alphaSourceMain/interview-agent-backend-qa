@@ -309,6 +309,7 @@ async function withClientScope(req, res, next) {
 
     // Attach helpers for routes that expect them
     req.clientScope = {
+      ...scopeContext,
       user: req.user,
       memberships: effectiveMemberships,
       assignedMemberships: memberships,

@@ -53,12 +53,14 @@ begin
   end if;
 
   insert into public.roles as r (
+    id,
     client_id,
     title,
     interview_type,
     job_description_url
   )
   values (
+    pg_catalog.gen_random_uuid(),
     p_source_client_id,
     trim(p_role_title),
     v_interview_type,

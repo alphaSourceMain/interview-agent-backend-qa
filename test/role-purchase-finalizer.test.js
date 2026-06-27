@@ -25,6 +25,13 @@ const consumeCreditHotfixMigrationPath = path.join(
   'migrations',
   '20260627120000_fix_first_role_prepay_credit_rpc_qualification.sql'
 );
+const consumeCreditRandomBytesHotfixMigrationPath = path.join(
+  __dirname,
+  '..',
+  'supabase',
+  'migrations',
+  '20260627123000_fix_first_role_prepay_credit_rpc_random_bytes.sql'
+);
 
 function matchesFilters(row, filters) {
   return filters.every((filter) => {
@@ -209,8 +216,16 @@ test('finalizePendingRolePurchase creates role, updates JD, generates rubric, an
   assert.equal(db.pendingRolePurchases[0].finalized_role_id, 'role-1');
 })
 
+function consumeCreditMigrationFiles() {
+  return [
+    consumeCreditMigrationPath,
+    consumeCreditHotfixMigrationPath,
+    consumeCreditRandomBytesHotfixMigrationPath,
+  ];
+}
+
 test('consume first-role credit RPC qualifies ambiguous credit columns', () => {
-  for (const filename of [consumeCreditMigrationPath, consumeCreditHotfixMigrationPath]) {
+  for (const filename of consumeCreditMigrationFiles()) {
     const sql = fs.readFileSync(filename, 'utf8');
 
     assert.match(sql, /from public\.client_role_credits as crc/i);
@@ -224,6 +239,17 @@ test('consume first-role credit RPC qualifies ambiguous credit columns', () => {
     assert.doesNotMatch(sql, /\band\s+status\s*=\s*'unused'/i);
     assert.doesNotMatch(sql, /\band\s+used_at\s+is\s+null/i);
     assert.doesNotMatch(sql, /\border\s+by\s+created_at\b/i);
+  }
+})
+
+test('consume first-role credit RPC avoids gen_random_bytes for role ids', () => {
+  for (const filename of consumeCreditMigrationFiles()) {
+    const sql = fs.readFileSync(filename, 'utf8');
+
+    assert.doesNotMatch(sql, /gen_random_bytes/i);
+    assert.match(sql, /insert into public\.roles as r\s*\(\s*id,/i);
+    assert.match(sql, /values\s*\(\s*pg_catalog\.gen_random_uuid\(\),/i);
+    assert.match(sql, /returning r\.id into v_role_id/i);
   }
 })
 

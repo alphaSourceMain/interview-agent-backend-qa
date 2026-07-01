@@ -1,6 +1,8 @@
 'use strict'
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
 
@@ -780,10 +782,13 @@ test('checkout return state reads webhook state and does not activate pending ro
   assert.equal(readyStatus.client_id, CLIENT_ID)
 })
 
-test('sendAlphaScreenWelcomeEmail renders help email and avoids setup tokens or attachments', async () => {
+test('sendAlphaScreenWelcomeEmail renders updated copy and attaches getting-started playbook', async () => {
   const originalApiKey = process.env.SENDGRID_API_KEY
   const originalHelpEmail = process.env.BRANDED_EMAIL_HELP_EMAIL
   const sentMessages = []
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alphascreen-welcome-playbook-'))
+  const playbookPath = path.join(tempDir, 'alphascreen-getting-started-playbook.pdf')
+  fs.writeFileSync(playbookPath, Buffer.from('%PDF-1.4 test playbook\n'))
   delete require.cache[mailerPath]
   delete require.cache[sendgridMailPath]
   injectModule(sendgridMailPath, {
@@ -801,9 +806,11 @@ test('sendAlphaScreenWelcomeEmail renders help email and avoids setup tokens or 
       firstName: 'Alex',
       clientId: CLIENT_ID,
       agreementId: AGREEMENT_ID,
-      purchaseIntentId: INTENT_ID
+      purchaseIntentId: INTENT_ID,
+      playbookAttachmentPath: playbookPath
     })
   } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true })
     if (originalApiKey === undefined) delete process.env.SENDGRID_API_KEY
     else process.env.SENDGRID_API_KEY = originalApiKey
     if (originalHelpEmail === undefined) delete process.env.BRANDED_EMAIL_HELP_EMAIL
@@ -815,11 +822,65 @@ test('sendAlphaScreenWelcomeEmail renders help email and avoids setup tokens or 
   assert.equal(sentMessages.length, 1)
   assert.equal(sentMessages[0].subject, 'Welcome to alphaScreen')
   assert.equal(sentMessages[0].customArgs.email_category, 'public_purchase_welcome')
-  assert.equal(sentMessages[0].attachments, undefined)
+  assert.equal(sentMessages[0].attachments.length, 1)
+  assert.equal(sentMessages[0].attachments[0].filename, 'alphaScreen Getting Started Playbook.pdf')
+  assert.equal(sentMessages[0].attachments[0].type, 'application/pdf')
+  assert.equal(sentMessages[0].attachments[0].disposition, 'attachment')
+  assert.equal(sentMessages[0].attachments[0].content, Buffer.from('%PDF-1.4 test playbook\n').toString('base64'))
   const messageBody = `${sentMessages[0].text || ''}\n${sentMessages[0].html || ''}`
   assert.match(messageBody, /support@alphasourceai\.com/)
   assert.match(messageBody, /set your password using the setup email/)
+  assert.match(messageBody, /review the AI-generated screening questions/)
+  assert.match(messageBody, /Review the AI-generated screening questions before inviting candidates/)
+  assert.match(messageBody, /The attached alphaScreen playbook walks through the recommended getting-started flow/)
+  assert.doesNotMatch(messageBody, /add screening questions/)
+  assert.doesNotMatch(messageBody, /focused set of screening questions/)
   assert.doesNotMatch(messageBody, /recovery-token|setup\.example|raw_payload|stripe/i)
+})
+
+test('sendAlphaScreenWelcomeEmail sends without attachment when playbook file is missing', async () => {
+  const originalApiKey = process.env.SENDGRID_API_KEY
+  const sentMessages = []
+  const warnings = []
+  delete require.cache[mailerPath]
+  delete require.cache[sendgridMailPath]
+  injectModule(sendgridMailPath, {
+    setApiKey() {},
+    async send(message) {
+      sentMessages.push(message)
+      return [{ statusCode: 202 }]
+    },
+  })
+  process.env.SENDGRID_API_KEY = 'test-key'
+  try {
+    const { sendAlphaScreenWelcomeEmail } = require(mailerPath)
+    const result = await sendAlphaScreenWelcomeEmail(BUYER_EMAIL, {
+      firstName: 'Alex',
+      playbookAttachmentPath: path.join(os.tmpdir(), 'missing-alphascreen-playbook.pdf'),
+      logger: {
+        warn(message, metadata) {
+          warnings.push({ message, metadata })
+        }
+      }
+    })
+    assert.equal(result.statusCode, 202)
+  } finally {
+    if (originalApiKey === undefined) delete process.env.SENDGRID_API_KEY
+    else process.env.SENDGRID_API_KEY = originalApiKey
+    delete require.cache[mailerPath]
+    delete require.cache[sendgridMailPath]
+  }
+
+  assert.equal(sentMessages.length, 1)
+  assert.equal(sentMessages[0].attachments, undefined)
+  assert.equal(warnings.length, 1)
+  assert.equal(warnings[0].message, '[mailer] alphascreen_welcome_playbook_attachment_missing')
+  assert.deepEqual(warnings[0].metadata, {
+    attachment_missing: true,
+    filename: 'alphaScreen Getting Started Playbook.pdf',
+    reason: 'not_found'
+  })
+  assert.doesNotMatch(JSON.stringify(warnings[0]), /alex@|setup|token|\/Users|missing-alphascreen-playbook/i)
 })
 
 test('checkout return state reports ready for an existing signed-in user', async () => {

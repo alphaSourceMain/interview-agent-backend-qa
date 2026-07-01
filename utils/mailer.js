@@ -1,4 +1,6 @@
 // utils/mailer.js
+const fs = require('fs')
+const path = require('path')
 const sg = require('@sendgrid/mail')
 
 const API_KEY = process.env.SENDGRID_API_KEY
@@ -13,6 +15,8 @@ const FROM = process.env.SENDGRID_FROM || 'no-reply@yourdomain.com'
 const PUBLIC_SITE_BASE = String(process.env.PUBLIC_SITE_BASE || process.env.PUBLIC_SITE_BASE_FALLBACK || 'https://www.alphasourceai.com').trim().replace(/\/+$/, '')
 const BRAND_LOGO_URL = process.env.BRANDED_EMAIL_LOGO_URL || `${PUBLIC_SITE_BASE}/logo-dark-text-clear.png`
 const DEFAULT_HELP_EMAIL = process.env.BRANDED_EMAIL_HELP_EMAIL || 'info@alphasourceai.com'
+const ALPHASCREEN_WELCOME_PLAYBOOK_PATH = path.join(__dirname, '..', 'templates', 'email-attachments', 'alphascreen-getting-started-playbook.pdf')
+const ALPHASCREEN_WELCOME_PLAYBOOK_FILENAME = 'alphaScreen Getting Started Playbook.pdf'
 
 function escapeHtml(value) {
   return String(value || '')
@@ -58,6 +62,25 @@ function formatTimestampAsCst(value) {
   if (!month || !day || !year || !Number.isFinite(hour24) || !minute) return raw
   const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12
   return `${month}-${day}-${year} ${String(hour12).padStart(2, '0')}:${minute} CST`
+}
+
+function buildAlphaScreenWelcomePlaybookAttachment(filePath = ALPHASCREEN_WELCOME_PLAYBOOK_PATH, logger = console) {
+  try {
+    const content = fs.readFileSync(filePath)
+    return {
+      content: content.toString('base64'),
+      type: 'application/pdf',
+      filename: ALPHASCREEN_WELCOME_PLAYBOOK_FILENAME,
+      disposition: 'attachment'
+    }
+  } catch (error) {
+    logger.warn?.('[mailer] alphascreen_welcome_playbook_attachment_missing', {
+      attachment_missing: true,
+      filename: ALPHASCREEN_WELCOME_PLAYBOOK_FILENAME,
+      reason: error?.code === 'ENOENT' ? 'not_found' : 'read_failed'
+    })
+    return null
+  }
 }
 
 function buildBrandedEmailShell({
@@ -310,6 +333,10 @@ async function sendAlphaScreenWelcomeEmail(to, details = {}) {
   const clientId = cleanEmailText(details.clientId || details.client_id)
   const agreementId = cleanEmailText(details.agreementId || details.agreement_id)
   const purchaseIntentId = cleanEmailText(details.purchaseIntentId || details.purchase_intent_id)
+  const playbookAttachment = buildAlphaScreenWelcomePlaybookAttachment(
+    details.playbookAttachmentPath || details.playbook_attachment_path || ALPHASCREEN_WELCOME_PLAYBOOK_PATH,
+    details.logger || console
+  )
   const msg = {
     to,
     from: FROM,
@@ -324,13 +351,17 @@ async function sendAlphaScreenWelcomeEmail(to, details = {}) {
           Thank you for signing up for alphaScreen. I appreciate you trusting alphaSource with your candidate screening workflow.
         </p>
         <p style="margin:0 0 12px;font-size:15px;line-height:1.6;">
-          Your membership is now active, and your account setup is being prepared. The next step is to set your password using the setup email we send to ${safeEmail}. After that, you can sign in, create your first role, add screening questions, and start inviting candidates.
+          Your membership is now active, and your account setup is being prepared. The next step is to set your password using the setup email we send to ${safeEmail}.
+        </p>
+        <p style="margin:0 0 12px;font-size:15px;line-height:1.6;">
+          After that, you can sign in, create your first role, review the AI-generated screening questions, make any edits you want, and start inviting candidates.
         </p>
         <p style="margin:0 0 8px;font-size:15px;line-height:1.6;">A few helpful starting points:</p>
         <ul style="margin:0 0 14px;padding:0;">
-          <li style="margin:0 0 6px 18px;">Start with one role and a focused set of screening questions.</li>
+          <li style="margin:0 0 6px 18px;">Start with one role so you can get familiar with the workflow before adding more.</li>
+          <li style="margin:0 0 6px 18px;">Review the AI-generated screening questions before inviting candidates.</li>
           <li style="margin:0 0 6px 18px;">Use the FAQ if you need help with setup, candidate links, memberships, billing, or interview limits.</li>
-          <li style="margin:0 0 6px 18px;">When the alphaScreen playbook is finalized, we will make it available as a getting-started guide.</li>
+          <li style="margin:0 0 6px 18px;">The attached alphaScreen playbook walks through the recommended getting-started flow.</li>
         </ul>
         <p style="margin:0 0 12px;font-size:15px;line-height:1.6;">
           Need help? Email us at <a href="mailto:${safeHelpEmail}">${safeHelpEmail}</a> and we will help you get set up.
@@ -347,7 +378,7 @@ async function sendAlphaScreenWelcomeEmail(to, details = {}) {
       purchase_intent_id: purchaseIntentId
     }
   }
-  // Future playbook attachment can be added here once an approved file is available.
+  if (playbookAttachment) msg.attachments = [playbookAttachment]
   const [resp] = await sg.send(msg)
   return { statusCode: resp?.statusCode || 0 }
 }

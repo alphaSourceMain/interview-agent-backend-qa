@@ -69,6 +69,7 @@ const {
 const { requireParentClient, resolveBillingOwnerForScope } = require('./src/lib/clientBillingScope')
 const { normalizeCriteriaConfig, stableStringify } = require('./src/lib/candidateAutomationEvaluator')
 const { getRoleInterviewAvailability } = require('./src/lib/roleInterviewAvailability')
+const { getRoleJdReplacementEligibility } = require('./src/lib/roleJdReplacement')
 const { cleanupNoSubstantiveRecordings } = require('./src/lib/recordingCleanup')
 const { createSubscriptionCheckoutSession } = require('./src/lib/subscriptionCheckout')
 const {
@@ -4234,6 +4235,19 @@ adminRouter.get('/roles', requireAuth, requireAdmin, async (req, res) => {
   const { data, error } = await q
   if (error) return res.status(500).json({ error: 'list_roles_failed', code: 'LIST_ROLES_FAILED', detail: error.message, hint: error.hint || null, request_id })
   const rows = data || []
+  let replacementEligibilityByRoleId = {}
+  try {
+    replacementEligibilityByRoleId = await getRoleJdReplacementEligibility({ db: supabaseAdmin, roles: rows })
+  } catch (eligibilityError) {
+    console.error('[admin/roles] replacement eligibility lookup failed', eligibilityError)
+    return res.status(500).json({
+      error: 'list_role_replacement_eligibility_failed',
+      code: 'LIST_ROLE_REPLACEMENT_ELIGIBILITY_FAILED',
+      detail: null,
+      hint: null,
+      request_id
+    })
+  }
   const entityMap = {
     ...(entityScope.entitiesById || {}),
     ...(await loadEntityMap(supabaseAdmin, rows.map((role) => role.client_id)))
@@ -4246,7 +4260,16 @@ adminRouter.get('/roles', requireAuth, requireAdmin, async (req, res) => {
   }
   const items = await Promise.all(rows.map(async (role) => {
     try {
-      if (!role?.id || !role?.client_id) return withEntityFields({ ...role, ...availabilityFallback }, entityMap, role?.client_id)
+      if (!role?.id || !role?.client_id) {
+        return withEntityFields({
+          ...role,
+          ...availabilityFallback,
+          job_description_replacement: replacementEligibilityByRoleId[role?.id] || {
+            eligible: false,
+            blockers: ['eligibility_unavailable']
+          }
+        }, entityMap, role?.client_id)
+      }
       const availability = await getRoleInterviewAvailability({
         db: supabaseAdmin,
         roleId: role.id,
@@ -4257,7 +4280,11 @@ adminRouter.get('/roles', requireAuth, requireAdmin, async (req, res) => {
         included_interviews_per_role: availability?.included_interviews_per_role ?? null,
         purchased_interviews: availability?.purchased_interviews ?? null,
         used_interviews: availability?.used_interviews ?? null,
-        remaining_interviews: availability?.remaining_interviews ?? null
+        remaining_interviews: availability?.remaining_interviews ?? null,
+        job_description_replacement: replacementEligibilityByRoleId[role.id] || {
+          eligible: false,
+          blockers: ['eligibility_unavailable']
+        }
       }, entityMap, role.client_id)
     } catch (e) {
       console.warn('[admin/roles] availability lookup failed', {
@@ -4265,7 +4292,14 @@ adminRouter.get('/roles', requireAuth, requireAdmin, async (req, res) => {
         client_id: role?.client_id || null,
         error: e?.message || e
       })
-      return withEntityFields({ ...role, ...availabilityFallback }, entityMap, role?.client_id)
+      return withEntityFields({
+        ...role,
+        ...availabilityFallback,
+        job_description_replacement: replacementEligibilityByRoleId[role?.id] || {
+          eligible: false,
+          blockers: ['eligibility_unavailable']
+        }
+      }, entityMap, role?.client_id)
     }
   }))
   res.json({ items })

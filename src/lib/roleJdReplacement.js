@@ -95,15 +95,46 @@ function rubricQuestionQualityError(detail = null) {
   });
 }
 
-async function findRoleActivity(db, roleId) {
-  const results = await Promise.all(ROLE_ACTIVITY_CHECKS.map(async (check) => {
+function normalizeRoleId(value) {
+  return String(value || '').trim();
+}
+
+function roleIsActive(role) {
+  return String(role?.status || 'active').trim().toLowerCase() === 'active';
+}
+
+/**
+ * Returns the same normalized blockers used by replacement preflight for one
+ * or many roles. List routes can call this once per activity table instead of
+ * running the replacement eligibility queries for every role row.
+ */
+async function getRoleJdReplacementEligibility({ db, roles = [] }) {
+  const roleById = new Map();
+  for (const role of roles || []) {
+    const roleId = normalizeRoleId(role?.id || role);
+    if (!roleId || roleById.has(roleId)) continue;
+    roleById.set(roleId, typeof role === 'object' && role ? role : { id: roleId, status: 'active' });
+  }
+
+  const roleIds = Array.from(roleById.keys());
+  const eligibilityByRoleId = Object.fromEntries(roleIds.map((roleId) => [
+    roleId,
+    {
+      eligible: roleIsActive(roleById.get(roleId)),
+      blockers: roleIsActive(roleById.get(roleId)) ? [] : ['role_not_active']
+    }
+  ]));
+  if (!roleIds.length) return eligibilityByRoleId;
+
+  const activityRowsByCheck = await Promise.all(ROLE_ACTIVITY_CHECKS.map(async (check) => {
     let query = db
       .from(check.table)
-      .select('id')
-      .eq('role_id', roleId)
-      .limit(1);
+      .select('role_id');
+    query = roleIds.length === 1
+      ? query.eq('role_id', roleIds[0])
+      : query.in('role_id', roleIds);
     if (check.activeOnly) query = query.is('archived_at', null);
-    const { data, error } = await query.maybeSingle();
+    const { data, error } = await query;
     if (error) {
       throw new RoleJdReplacementError('Unable to verify role activity.', {
         status: 500,
@@ -112,9 +143,31 @@ async function findRoleActivity(db, roleId) {
         detail: `${check.table}: ${error.message || error}`
       });
     }
-    return data ? check.label : null;
+    return { check, rows: data || [] };
   }));
-  return results.filter(Boolean);
+
+  for (const { check, rows } of activityRowsByCheck) {
+    for (const row of rows) {
+      const roleId = normalizeRoleId(row?.role_id);
+      const eligibility = eligibilityByRoleId[roleId];
+      if (!eligibility || eligibility.blockers.includes(check.label)) continue;
+      eligibility.blockers.push(check.label);
+      eligibility.eligible = false;
+    }
+  }
+
+  return eligibilityByRoleId;
+}
+
+async function findRoleActivity(db, roleId) {
+  const normalizedRoleId = normalizeRoleId(roleId);
+  if (!normalizedRoleId) return [];
+  const eligibilityByRoleId = await getRoleJdReplacementEligibility({
+    db,
+    roles: [{ id: normalizedRoleId, status: 'active' }]
+  });
+  return (eligibilityByRoleId[normalizedRoleId]?.blockers || [])
+    .filter((blocker) => blocker !== 'role_not_active');
 }
 
 function mapCompletionError(error) {
@@ -218,7 +271,9 @@ function createRoleJdReplacementService(options = {}) {
         stage: 'role_lookup'
       });
     }
-    if (String(role.status || 'active').toLowerCase() !== 'active') {
+    const eligibilityByRoleId = await getRoleJdReplacementEligibility({ db, roles: [role] });
+    const eligibility = eligibilityByRoleId[safeRoleId] || { eligible: false, blockers: ['role_not_active'] };
+    if (eligibility.blockers.includes('role_not_active')) {
       throw new RoleJdReplacementError('Only active roles can have their job description replaced.', {
         status: 409,
         code: 'ROLE_NOT_ACTIVE',
@@ -226,13 +281,12 @@ function createRoleJdReplacementService(options = {}) {
       });
     }
 
-    const activity = await findRoleActivity(db, safeRoleId);
-    if (activity.length) {
+    if (!eligibility.eligible) {
       throw new RoleJdReplacementError('Job description replacement is blocked after role activity begins.', {
         status: 409,
         code: 'ROLE_ACTIVITY_EXISTS',
         stage: 'eligibility',
-        detail: activity.join(',')
+        detail: eligibility.blockers.join(',')
       });
     }
 
@@ -440,6 +494,7 @@ module.exports = {
   RoleJdReplacementError,
   createRoleJdReplacementService,
   findRoleActivity,
+  getRoleJdReplacementEligibility,
   normalizeGeneratedRubricQuestions,
   supportedJdFile
 };

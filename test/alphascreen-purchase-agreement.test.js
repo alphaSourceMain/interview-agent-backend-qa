@@ -267,6 +267,10 @@ function intent(overrides = {}) {
     buyer_first_name: 'Alex',
     buyer_last_name: 'Rivera',
     buyer_email: 'alex@acmedental.example',
+    email_verified_at: new Date().toISOString(),
+    email_verified_address: 'alex@acmedental.example',
+    email_verification_method: 'retail_signup_email_otp_v1',
+    email_verification_version: 1,
     buyer_phone: '+1 (555) 123-4567',
     buyer_title: 'Director of Operations',
     source_path: '/alphascreen/pricing',
@@ -507,6 +511,35 @@ test('purchase intent agreement endpoint rejects missing, expired, ineligible, a
     assert.equal(response.body.code, code)
     assert.equal(db.inserts.length, 0)
   }
+})
+
+test('purchase intent agreement endpoint requires a matching retail email verification', async () => {
+  const db = makeDb({
+    purchaseIntents: [intent({
+      email_verified_at: null,
+      email_verified_address: null,
+      email_verification_method: null,
+      email_verification_version: null
+    })]
+  })
+  const response = await postAgreement(buildApp(db), BASIC_INTENT_ID)
+
+  assert.equal(response.status, 409)
+  assert.equal(response.body.code, 'RETAIL_EMAIL_VERIFICATION_REQUIRED')
+  assert.equal(db.inserts.length, 0)
+  assert.deepEqual(Array.from(new Set(db.touchedTables)).sort(), ['public_purchase_intents'])
+
+  const changedEmailDb = makeDb({
+    purchaseIntents: [intent({
+      buyer_email: 'new-buyer@acmedental.example',
+      email_verified_address: 'alex@acmedental.example'
+    })]
+  })
+  const changedEmailResponse = await postAgreement(buildApp(changedEmailDb), BASIC_INTENT_ID)
+
+  assert.equal(changedEmailResponse.status, 409)
+  assert.equal(changedEmailResponse.body.code, 'RETAIL_EMAIL_VERIFICATION_REQUIRED')
+  assert.equal(changedEmailDb.inserts.length, 0)
 })
 
 test('purchase intent agreement response is safe and creates no Stripe, client, user, or membership access records', async () => {

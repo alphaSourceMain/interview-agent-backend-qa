@@ -14,28 +14,31 @@ const { buildMembershipAgreementSignUrl } = require('../config/urlConfig')
 const { htmlToPdf } = require('../utils/pdfRenderer')
 const { buildMembershipAgreementHtml } = require('../utils/renderMembershipAgreement')
 const { resolvePublicCheckoutReturnState } = require('../src/lib/publicPurchaseActivation')
-const { getRequestSubjectKey, checkAndIncrementRateLimit } = require('../src/lib/rateLimit')
+const { getRequestSubjectKey, hashRateLimitSubject, checkAndIncrementRateLimit } = require('../src/lib/rateLimit')
 const { sendRetailSignupEmailVerificationCode } = require('../utils/mailer')
 
 const router = express.Router()
 const AGREEMENTS_BUCKET = process.env.SUPABASE_AGREEMENTS_BUCKET || 'agreements'
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const RATE_WINDOW_MS = 10 * 60 * 1000
-const RATE_MAX = Number(process.env.ALPHASCREEN_PURCHASE_INTENT_RATE_MAX || 12)
+const RETAIL_RATE_WINDOW_MS = 10 * 60 * 1000
+const RETAIL_PURCHASE_INTENT_RATE_MAX = Number(process.env.ALPHASCREEN_PURCHASE_INTENT_RATE_MAX || 12)
+const RETAIL_PURCHASE_INTENT_IP_RATE_MAX = Number(process.env.ALPHASCREEN_PURCHASE_INTENT_IP_RATE_MAX || 60)
+const RETAIL_CHECKOUT_STATUS_RATE_MAX = Number(process.env.ALPHASCREEN_CHECKOUT_STATUS_RATE_MAX || 60)
+const RETAIL_AGREEMENT_RATE_MAX = Number(process.env.ALPHASCREEN_AGREEMENT_RATE_MAX || 10)
+const RETAIL_PUBLIC_IP_SAFETY_RATE_MAX = Number(process.env.ALPHASCREEN_PUBLIC_IP_SAFETY_RATE_MAX || 60)
 const DUPLICATE_WINDOW_MS = 30 * 60 * 1000
 const INTENT_EXPIRATION_MS = 14 * 24 * 60 * 60 * 1000
 const SIGNING_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const RETAIL_EMAIL_VERIFICATION_TTL_SECONDS = 10 * 60
 const RETAIL_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
-const RETAIL_EMAIL_VERIFICATION_RATE_WINDOW_MS = 10 * 60 * 1000
 const RETAIL_EMAIL_VERIFICATION_SEND_RATE_MAX = 10
 const RETAIL_EMAIL_VERIFICATION_VERIFY_RATE_MAX = 20
+const RETAIL_EMAIL_VERIFICATION_STATUS_RATE_MAX = 120
 const RETAIL_EMAIL_VERIFICATION_METHOD = 'retail_signup_email_otp_v1'
 const BLOCKING_PURCHASE_INTENT_STATUSES = ['pending', 'agreement_pending', 'checkout_pending', 'completed']
 const BLOCKING_AGREEMENT_STATUSES = ['sent', 'signed']
 const SIGNUP_ALREADY_EXISTS_MESSAGE = 'This email is already associated with an alphaScreen account or signup. Sign in, check your email, or contact support for help.'
-const rateBuckets = new Map()
 
 const RETAIL_VERIFICATION_INTENT_SELECT = [
   'id',
@@ -51,51 +54,71 @@ const RETAIL_VERIFICATION_INTENT_SELECT = [
   'agreement_id'
 ].join(',')
 
-function rateLimit(req, res, next) {
-  const now = Date.now()
-  const ip = String((req.headers['x-forwarded-for'] || req.ip || 'unknown')).split(',')[0].trim() || 'unknown'
-  const current = rateBuckets.get(ip)
-  const bucket = (!current || current.resetAt <= now)
-    ? { count: 0, resetAt: now + RATE_WINDOW_MS }
-    : current
-  bucket.count += 1
-  rateBuckets.set(ip, bucket)
-  if (bucket.count > RATE_MAX) {
-    return res.status(429).json({
-      error: 'rate_limited',
-      code: 'RATE_LIMIT_EXCEEDED',
-      request_id: req.request_id || null
-    })
-  }
-  return next()
+function retailRateLimitSubject(...parts) {
+  return `v1:${hashRateLimitSubject('retail', ...parts)}`
 }
 
-function retailVerificationRateLimit(routeName, maxCount) {
-  return async (req, res, next) => {
-    try {
-      const result = await checkAndIncrementRateLimit({
-        routeName,
-        subjectKey: getRequestSubjectKey(req),
-        windowMs: RETAIL_EMAIL_VERIFICATION_RATE_WINDOW_MS,
-        maxCount
+function sendRateLimitResponse(res, req, { code, detail, retryAfterSeconds }) {
+  const retryAfter = Math.max(0, Math.ceil(Number(retryAfterSeconds || 0)))
+  if (retryAfter > 0) res.set('Retry-After', String(retryAfter))
+  return res.status(429).json({
+    error: 'rate_limited',
+    code,
+    detail,
+    retry_after_seconds: retryAfter,
+    request_id: req.request_id || null
+  })
+}
+
+async function enforceRetailRateLimit(req, res, {
+  routeName,
+  subjectParts,
+  maxCount,
+  code = 'RETAIL_PUBLIC_RATE_LIMITED',
+  detail = 'Please wait before trying again.',
+  ipSafetyMax = RETAIL_PUBLIC_IP_SAFETY_RATE_MAX
+}) {
+  try {
+    const primary = await checkAndIncrementRateLimit({
+      routeName,
+      subjectKey: retailRateLimitSubject(...subjectParts),
+      windowMs: RETAIL_RATE_WINDOW_MS,
+      maxCount
+    })
+    if (!primary.allowed) {
+      sendRateLimitResponse(res, req, {
+        code,
+        detail,
+        retryAfterSeconds: primary.retryAfterSeconds
       })
-      if (!result.allowed) {
-        return res.status(429).json({
-          error: 'rate_limited',
-          code: 'RETAIL_EMAIL_VERIFICATION_RATE_LIMITED',
-          retry_after_seconds: result.retryAfterSeconds,
-          request_id: req.request_id || null
-        })
-      }
-      return next()
-    } catch (error) {
-      console.error('[alphascreen/email-verification] rate_limit_failed:', error?.code || 'unknown')
-      return res.status(503).json({
-        error: 'email_verification_unavailable',
-        code: 'RETAIL_EMAIL_VERIFICATION_UNAVAILABLE',
-        request_id: req.request_id || null
-      })
+      return false
     }
+
+    if (ipSafetyMax > 0) {
+      const ipSafety = await checkAndIncrementRateLimit({
+        routeName: `${routeName}:ip_safety`,
+        subjectKey: retailRateLimitSubject('ip', getRequestSubjectKey(req)),
+        windowMs: RETAIL_RATE_WINDOW_MS,
+        maxCount: ipSafetyMax
+      })
+      if (!ipSafety.allowed) {
+        sendRateLimitResponse(res, req, {
+          code: 'RETAIL_PUBLIC_RATE_LIMITED',
+          detail: 'Please wait before trying again.',
+          retryAfterSeconds: ipSafety.retryAfterSeconds
+        })
+        return false
+      }
+    }
+    return true
+  } catch (error) {
+    console.error('[alphascreen] rate_limit_failed:', error?.code || 'unknown')
+    res.status(503).json({
+      error: 'retail_signup_unavailable',
+      code: 'RETAIL_SIGNUP_UNAVAILABLE',
+      request_id: req.request_id || null
+    })
+    return false
   }
 }
 
@@ -188,13 +211,74 @@ function hasValidRetailEmailVerification(intent) {
   )
 }
 
-function publicEmailVerificationState(intent) {
+function secondsUntil(value) {
+  const timestamp = Date.parse(String(value || ''))
+  if (!Number.isFinite(timestamp)) return 0
+  return Math.max(0, Math.ceil((timestamp - Date.now()) / 1000))
+}
+
+function resendCooldownForVerification(verification) {
+  const sentAt = Date.parse(String(verification?.sent_at || ''))
+  if (!Number.isFinite(sentAt)) return 0
+  return Math.max(0, RETAIL_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS - Math.floor((Date.now() - sentAt) / 1000))
+}
+
+function publicEmailVerificationState(intent, verification = null, resendCooldownSeconds = null) {
   const verified = hasValidRetailEmailVerification(intent)
+  const codeActive = Boolean(
+    !verified &&
+    verification &&
+    !verification.used_at &&
+    !verification.invalidated_at &&
+    secondsUntil(verification.expires_at) > 0
+  )
+  const calculatedResendCooldownSeconds = resendCooldownSeconds !== null &&
+    resendCooldownSeconds !== undefined &&
+    Number.isFinite(Number(resendCooldownSeconds))
+    ? Math.max(0, Number(resendCooldownSeconds))
+    : resendCooldownForVerification(verification)
   return {
     verified,
-    status: verified ? 'verified' : 'unverified',
-    expires_in_seconds: RETAIL_EMAIL_VERIFICATION_TTL_SECONDS,
-    resend_cooldown_seconds: RETAIL_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS
+    status: verified ? 'verified' : codeActive ? 'code_sent' : 'unverified',
+    code_active: codeActive,
+    expires_in_seconds: codeActive ? secondsUntil(verification.expires_at) : 0,
+    resend_cooldown_seconds: calculatedResendCooldownSeconds
+  }
+}
+
+async function loadLatestRetailEmailVerification(intentId, buyerEmail) {
+  const { data, error } = await supabaseAdmin
+    .from('retail_signup_email_verifications')
+    .select('id,sent_at,expires_at,used_at,invalidated_at,invalidation_reason,code_salt')
+    .eq('purchase_intent_id', intentId)
+    .eq('buyer_email', buyerEmail)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  return { verification: data || null, error }
+}
+
+async function loadRetailEmailVerificationStatus(intentId, buyerEmail) {
+  const { data, error } = await supabaseAdmin
+    .from('retail_signup_email_verifications')
+    .select('id,sent_at,expires_at,used_at,invalidated_at,invalidation_reason')
+    .eq('purchase_intent_id', intentId)
+    .eq('buyer_email', buyerEmail)
+    .order('sent_at', { ascending: false })
+    .limit(5)
+  const rows = Array.isArray(data) ? data : []
+  const verification = rows[0] || null
+  const hourlySentAt = rows
+    .map((row) => Date.parse(String(row?.sent_at || '')))
+    .filter((timestamp) => Number.isFinite(timestamp) && timestamp >= Date.now() - 60 * 60 * 1000)
+    .sort((left, right) => left - right)
+  const hourlyCooldownSeconds = hourlySentAt.length >= 5
+    ? Math.max(0, Math.ceil(((hourlySentAt[0] + 60 * 60 * 1000) - Date.now()) / 1000))
+    : 0
+  return {
+    verification,
+    resendCooldownSeconds: Math.max(resendCooldownForVerification(verification), hourlyCooldownSeconds),
+    error
   }
 }
 
@@ -218,11 +302,13 @@ function validatePurchaseIntentForEmailVerification(intent) {
 }
 
 function sendVerificationResponse(res, req, status, options = {}) {
+  const retryAfter = Math.max(0, Math.ceil(Number(options.retryAfterSeconds || 0)))
+  if (status === 429 && retryAfter > 0) res.set('Retry-After', String(retryAfter))
   return res.status(status).json({
     error: options.error || 'email_verification_failed',
     code: options.code || 'RETAIL_EMAIL_VERIFICATION_FAILED',
     detail: options.detail || 'Email verification could not be completed. No agreement was created.',
-    retry_after_seconds: options.retryAfterSeconds || 0,
+    retry_after_seconds: retryAfter,
     request_id: req.request_id || null
   })
 }
@@ -627,7 +713,7 @@ router.get('/packages', (req, res) => {
   })
 })
 
-router.get('/checkout-status', rateLimit, async (req, res) => {
+router.get('/checkout-status', async (req, res) => {
   const request_id = req.request_id || null
   const sessionId = cleanLookupId(req.query?.session_id)
   const agreementId = cleanLookupId(req.query?.agreement_id)
@@ -641,6 +727,13 @@ router.get('/checkout-status', rateLimit, async (req, res) => {
       request_id
     })
   }
+
+  const allowed = await enforceRetailRateLimit(req, res, {
+    routeName: 'retail_checkout_status',
+    subjectParts: ['checkout_status', sessionId || agreementId || fallbackClientId],
+    maxCount: RETAIL_CHECKOUT_STATUS_RATE_MAX
+  })
+  if (!allowed) return
 
   try {
     const state = await resolvePublicCheckoutReturnState({
@@ -670,7 +763,7 @@ router.get('/checkout-status', rateLimit, async (req, res) => {
   }
 })
 
-router.post('/purchase-intents', rateLimit, async (req, res) => {
+router.post('/purchase-intents', async (req, res) => {
   const request_id = req.request_id || null
   try {
     const input = normalizePurchaseIntentInput(req.body || {})
@@ -678,6 +771,16 @@ router.post('/purchase-intents', rateLimit, async (req, res) => {
     if (!validation.ok) {
       return validationError(res, req, validation.code, validation.detail, validation.fields)
     }
+
+    const allowed = await enforceRetailRateLimit(req, res, {
+      routeName: 'retail_purchase_intent_create',
+      subjectParts: ['purchase_intent', getRequestSubjectKey(req), input.buyer_email],
+      maxCount: RETAIL_PURCHASE_INTENT_RATE_MAX,
+      ipSafetyMax: RETAIL_PURCHASE_INTENT_IP_RATE_MAX,
+      code: 'RETAIL_SIGNUP_RATE_LIMITED',
+      detail: 'Too many signup attempts were made from this browser or network. Try again later.'
+    })
+    if (!allowed) return
 
     const packageSnapshot = buildAlphaScreenPackageSnapshot(input.selected_plan_key, input.selected_billing_cadence, {
       firstRolePrepaySelected: input.first_role_prepay_selected
@@ -787,7 +890,7 @@ router.post('/purchase-intents', rateLimit, async (req, res) => {
   }
 })
 
-router.get('/purchase-intents/:id/email-verification/status', rateLimit, retailVerificationRateLimit('retail_signup_email_verification_status', RETAIL_EMAIL_VERIFICATION_VERIFY_RATE_MAX), async (req, res) => {
+router.get('/purchase-intents/:id/email-verification/status', async (req, res) => {
   const request_id = req.request_id || null
   const intentId = trimText(req.params?.id, 80)
   if (!UUID_RE.test(intentId)) {
@@ -817,14 +920,36 @@ router.get('/purchase-intents/:id/email-verification/status', rateLimit, retailV
       })
     }
 
-    return res.json({ ok: true, email_verification: publicEmailVerificationState(intent), request_id })
+    const buyerEmail = normalizeEmail(intent.buyer_email)
+    const allowed = await enforceRetailRateLimit(req, res, {
+      routeName: 'retail_email_verification_status',
+      subjectParts: ['email_verification_status', intent.id, getRequestSubjectKey(req)],
+      maxCount: RETAIL_EMAIL_VERIFICATION_STATUS_RATE_MAX
+    })
+    if (!allowed) return
+
+    const {
+      verification,
+      resendCooldownSeconds,
+      error: verificationError
+    } = await loadRetailEmailVerificationStatus(intent.id, buyerEmail)
+    if (verificationError) {
+      console.error('[alphascreen/email-verification] status_verification_lookup_failed:', verificationError?.code || 'unknown')
+      return sendVerificationResponse(res, req, 503, { code: 'RETAIL_EMAIL_VERIFICATION_UNAVAILABLE' })
+    }
+
+    return res.json({
+      ok: true,
+      email_verification: publicEmailVerificationState(intent, verification, resendCooldownSeconds),
+      request_id
+    })
   } catch (error) {
     console.error('[alphascreen/email-verification] status_failed:', error?.code || 'unknown')
     return sendVerificationResponse(res, req, 500)
   }
 })
 
-router.post('/purchase-intents/:id/email-verification/send', rateLimit, retailVerificationRateLimit('retail_signup_email_verification_send', RETAIL_EMAIL_VERIFICATION_SEND_RATE_MAX), async (req, res) => {
+router.post('/purchase-intents/:id/email-verification/send', async (req, res) => {
   const request_id = req.request_id || null
   const intentId = trimText(req.params?.id, 80)
   if (!UUID_RE.test(intentId)) {
@@ -854,15 +979,28 @@ router.post('/purchase-intents/:id/email-verification/send', rateLimit, retailVe
       })
     }
 
+    const buyerEmail = normalizeEmail(intent.buyer_email)
+    const allowed = await enforceRetailRateLimit(req, res, {
+      routeName: 'retail_email_verification_send',
+      subjectParts: ['email_verification_send', intent.id, buyerEmail],
+      maxCount: RETAIL_EMAIL_VERIFICATION_SEND_RATE_MAX
+    })
+    if (!allowed) return
+
+    const { verification: latestVerification, error: latestVerificationError } = await loadLatestRetailEmailVerification(intent.id, buyerEmail)
+    if (latestVerificationError) {
+      console.error('[alphascreen/email-verification] send_verification_lookup_failed:', latestVerificationError?.code || 'unknown')
+      return sendVerificationResponse(res, req, 503, { code: 'RETAIL_EMAIL_VERIFICATION_UNAVAILABLE' })
+    }
+
     if (hasValidRetailEmailVerification(intent)) {
       return res.json({
         ok: true,
-        email_verification: publicEmailVerificationState(intent),
+        email_verification: publicEmailVerificationState(intent, latestVerification),
         request_id
       })
     }
 
-    const buyerEmail = normalizeEmail(intent.buyer_email)
     const verificationCode = generateRetailVerificationCode()
     const verificationSalt = generateRetailVerificationSalt()
     const verificationHash = hashRetailVerificationCode(verificationCode, verificationSalt)
@@ -889,9 +1027,9 @@ router.post('/purchase-intents/:id/email-verification/send', rateLimit, retailVe
     }
     if (issued.status === 'hourly_limit') {
       return sendVerificationResponse(res, req, 429, {
-        code: 'RETAIL_EMAIL_VERIFICATION_HOURLY_LIMIT',
-        detail: 'Please wait before requesting another code.',
-        retryAfterSeconds: 60 * 60
+        code: 'RETAIL_EMAIL_VERIFICATION_SEND_LIMIT',
+        detail: 'Too many verification codes were requested. Try again later.',
+        retryAfterSeconds: Number(issued.resend_after_seconds || 60 * 60)
       })
     }
     if (issued.status !== 'issued' || !issued.verification_id) {
@@ -928,6 +1066,7 @@ router.post('/purchase-intents/:id/email-verification/send', rateLimit, retailVe
       email_verification: {
         verified: false,
         status: 'code_sent',
+        code_active: true,
         expires_in_seconds: RETAIL_EMAIL_VERIFICATION_TTL_SECONDS,
         resend_cooldown_seconds: Number(issued.resend_after_seconds || RETAIL_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS)
       },
@@ -939,7 +1078,7 @@ router.post('/purchase-intents/:id/email-verification/send', rateLimit, retailVe
   }
 })
 
-router.post('/purchase-intents/:id/email-verification/verify', rateLimit, retailVerificationRateLimit('retail_signup_email_verification_verify', RETAIL_EMAIL_VERIFICATION_VERIFY_RATE_MAX), async (req, res) => {
+router.post('/purchase-intents/:id/email-verification/verify', async (req, res) => {
   const request_id = req.request_id || null
   const intentId = trimText(req.params?.id, 80)
   const code = trimText(req.body?.code, 12)
@@ -980,19 +1119,20 @@ router.post('/purchase-intents/:id/email-verification/verify', rateLimit, retail
     }
 
     const buyerEmail = normalizeEmail(intent.buyer_email)
-    const { data: verification, error: verificationError } = await supabaseAdmin
-      .from('retail_signup_email_verifications')
-      .select('id,code_salt')
-      .eq('purchase_intent_id', intent.id)
-      .eq('buyer_email', buyerEmail)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
+    const { verification, error: verificationError } = await loadLatestRetailEmailVerification(intent.id, buyerEmail)
 
     if (verificationError) {
       console.error('[alphascreen/email-verification] verify_token_lookup_failed:', verificationError?.code || 'unknown')
       return sendVerificationResponse(res, req, 503, { code: 'RETAIL_EMAIL_VERIFICATION_UNAVAILABLE' })
     }
+
+    const allowed = await enforceRetailRateLimit(req, res, {
+      routeName: 'retail_email_verification_verify',
+      subjectParts: ['email_verification_verify', intent.id, verification?.id || 'no_active_verification', buyerEmail],
+      maxCount: RETAIL_EMAIL_VERIFICATION_VERIFY_RATE_MAX
+    })
+    if (!allowed) return
+
     if (!verification?.code_salt) {
       return sendVerificationResponse(res, req, 400, {
         code: 'RETAIL_EMAIL_VERIFICATION_INVALID_CODE',
@@ -1018,8 +1158,9 @@ router.post('/purchase-intents/:id/email-verification/verify', rateLimit, retail
         email_verification: {
           verified: true,
           status: 'verified',
-          expires_in_seconds: RETAIL_EMAIL_VERIFICATION_TTL_SECONDS,
-          resend_cooldown_seconds: RETAIL_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS
+          code_active: false,
+          expires_in_seconds: 0,
+          resend_cooldown_seconds: 0
         },
         request_id
       })
@@ -1032,7 +1173,7 @@ router.post('/purchase-intents/:id/email-verification/verify', rateLimit, retail
     }
     if (consumeStatus === 'attempt_limit') {
       return sendVerificationResponse(res, req, 429, {
-        code: 'RETAIL_EMAIL_VERIFICATION_ATTEMPT_LIMIT',
+        code: 'RETAIL_EMAIL_VERIFICATION_ATTEMPTS_EXCEEDED',
         detail: 'Too many unsuccessful attempts. Request a new code.'
       })
     }
@@ -1046,7 +1187,7 @@ router.post('/purchase-intents/:id/email-verification/verify', rateLimit, retail
   }
 })
 
-router.post('/purchase-intents/:id/agreement', rateLimit, async (req, res) => {
+router.post('/purchase-intents/:id/agreement', async (req, res) => {
   const request_id = req.request_id || null
   const intentId = trimText(req.params?.id, 80)
   if (!UUID_RE.test(intentId)) {
@@ -1057,6 +1198,13 @@ router.post('/purchase-intents/:id/agreement', rateLimit, async (req, res) => {
       request_id
     })
   }
+
+  const allowed = await enforceRetailRateLimit(req, res, {
+    routeName: 'retail_agreement_create',
+    subjectParts: ['agreement_create', intentId],
+    maxCount: RETAIL_AGREEMENT_RATE_MAX
+  })
+  if (!allowed) return
 
   try {
     const { data: intent, error: intentErr } = await supabaseAdmin

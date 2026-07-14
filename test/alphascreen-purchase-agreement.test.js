@@ -8,6 +8,7 @@ const { test } = require('node:test')
 
 const routePath = path.join(__dirname, '..', 'routes', 'alphaScreenPackages.js')
 const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
+const rateLimitPath = path.join(__dirname, '..', 'src', 'lib', 'rateLimit.js')
 const pdfRendererPath = path.join(__dirname, '..', 'utils', 'pdfRenderer.js')
 const urlConfigPath = path.join(__dirname, '..', 'config', 'urlConfig.js')
 const publicPurchaseActivationPath = path.join(__dirname, '..', 'src', 'lib', 'publicPurchaseActivation.js')
@@ -173,10 +174,16 @@ function makeDb(options = {}) {
 function buildApp(db) {
   delete require.cache[routePath]
   delete require.cache[supabaseClientPath]
+  delete require.cache[rateLimitPath]
   delete require.cache[pdfRendererPath]
   delete require.cache[urlConfigPath]
   delete require.cache[publicPurchaseActivationPath]
   injectModule(supabaseClientPath, { supabaseAdmin: db })
+  injectModule(rateLimitPath, {
+    getRequestSubjectKey: () => '198.51.100.10',
+    hashRateLimitSubject: (...parts) => `hash:${parts.join(':')}`,
+    checkAndIncrementRateLimit: async () => ({ allowed: true, retryAfterSeconds: 0 })
+  })
   injectModule(pdfRendererPath, { htmlToPdf: async () => Buffer.from('%PDF-qa') })
   injectModule(urlConfigPath, {
     buildMembershipAgreementSignUrl(token) {

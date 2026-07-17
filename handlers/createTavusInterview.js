@@ -9,7 +9,8 @@ const { ensureTavusDocumentForRole, missingTavusKbError } = require('../lib/tavu
  * Create a Tavus v2 conversation for a candidate/role.
  * - Attaches role KB via document_ids when available.
  * - Includes callback_url so Tavus posts to our webhook.
- * Returns { conversation_url, conversation_id }.
+ * Returns the conversation identifiers plus the effective vendor configuration
+ * that created this immutable attempt.
  *
  * @param {Object} candidate - { id, role_id, email, name }
  * @param {Object} role - { id, kb_document_id, tavus_document_id }
@@ -154,7 +155,12 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
     const data = resp?.data || {};
     return {
       conversation_url: data.conversation_url || data.url || data.link || null,
-      conversation_id: data.conversation_id || data.id || null
+      conversation_id: data.conversation_id || data.id || null,
+      effective_persona_id: data.persona_id || payload.persona_id || null,
+      effective_replica_id: data.replica_id || payload.replica_id || null,
+      effective_tavus_document_id: Array.isArray(data.document_ids)
+        ? data.document_ids[0] || null
+        : (Array.isArray(payload.document_ids) ? payload.document_ids[0] || null : null),
     };
   } catch (e) {
     const status = e.response?.status || 500;

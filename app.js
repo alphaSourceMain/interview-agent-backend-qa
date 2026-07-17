@@ -70,6 +70,7 @@ const { requireParentClient, resolveBillingOwnerForScope } = require('./src/lib/
 const { normalizeCriteriaConfig, stableStringify } = require('./src/lib/candidateAutomationEvaluator')
 const { getRoleInterviewAvailability } = require('./src/lib/roleInterviewAvailability')
 const { getRoleJdReplacementEligibility } = require('./src/lib/roleJdReplacement')
+const { createInterviewRecoveryRouter } = require('./routes/interviewRecovery')
 const { cleanupNoSubstantiveRecordings } = require('./src/lib/recordingCleanup')
 const { createSubscriptionCheckoutSession } = require('./src/lib/subscriptionCheckout')
 const {
@@ -1654,6 +1655,10 @@ async function requireAdmin(req, res, next) {
 }
 
 const adminRouter = express.Router()
+// Candidate replacement authorization is deliberately separate from the
+// legacy candidate CRUD handlers: it is admin-only, client/role-bound, and
+// writes an immutable reset event through the Phase B RPC.
+adminRouter.use('/interview-recovery', requireAuth, requireAdmin, createInterviewRecoveryRouter())
 const PUBLIC_PURCHASE_PLAYBOOK_PDF_PATH = path.join(__dirname, 'templates', 'pdf', 'alphascreen-public-purchase-support-playbook.pdf')
 
 // Helper: ensure a user exists/invite; return user_id + optional action_link

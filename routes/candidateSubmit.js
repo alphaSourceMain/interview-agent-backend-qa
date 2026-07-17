@@ -418,6 +418,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
         const freshCode = six();
         const { error: otpErr } = await supabase.from('otp_tokens').insert({
           candidate_email: email,
+          candidate_id,
           role_id: roleId,
           code: freshCode,
           expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
@@ -632,6 +633,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
     const freshCode = six();
     const { error: otpErr } = await supabase.from('otp_tokens').insert({
       candidate_email: email,
+      candidate_id,
       role_id: roleId,
       code: freshCode,
       expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),

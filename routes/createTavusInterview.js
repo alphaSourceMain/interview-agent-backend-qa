@@ -8,7 +8,8 @@ const { createTavusInterviewHandler } = require('../handlers/createTavusIntervie
 const { getRoleInterviewAvailability, syncRoleInterviewLimitNotification } = require('../src/lib/roleInterviewAvailability');
 const { getRequestSubjectKey, checkAndIncrementRateLimit } = require('../src/lib/rateLimit');
 const { isRoleInactive, buildRoleInactivePayload, logInactiveRoleBlocked } = require('../src/lib/roleLifecycle');
-const { sendCandidateError, getInterviewConflictCode } = require('../src/lib/candidateErrors');
+const { sendCandidateError } = require('../src/lib/candidateErrors');
+const { claimInterviewAttempt } = require('../src/lib/interviewAttemptService');
 const { resolvePublicBackendBase } = require('../config/urlConfig');
 
 const router = express.Router();
@@ -259,21 +260,6 @@ router.post('/', createTavusRateLimit, async (req, res) => {
       } catch {}
     }
 
-    // Check for existing interview row
-    const { data: existing, error: eErr } = await supabase
-      .from('interviews')
-      .select('id, tavus_application_id, status')
-      .eq('candidate_id', candidate_id)
-      .eq('role_id', roleId)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (eErr) return res.status(500).json({ error: eErr.message });
-
-    if (existing) {
-      return sendCandidateError(res, getInterviewConflictCode(existing.status), { request_id });
-    }
-
     const availability = await getRoleInterviewAvailability({
       db: supabaseAdmin,
       roleId,
@@ -303,26 +289,21 @@ router.post('/', createTavusRateLimit, async (req, res) => {
     }
 
     const webhookUrl = `${base}/webhook/tavus`;
-    const { data: startingInterview, error: startingInterviewError } = await supabase
-      .from('interviews')
-      .insert({
-        candidate_id,
-        client_id: clientId,
-        role_id: roleId,
-        status: 'Starting',
-        failure_code: null,
-        failure_stage: null,
-        failure_summary: null,
-        failure_at: null,
-        retryable: null
-      })
-      .select('id')
-      .single();
-    if (startingInterviewError || !startingInterview) {
-      if (startingInterviewError?.code === '23505') {
-        return sendCandidateError(res, 'INTERVIEW_IN_PROGRESS', { request_id });
-      }
-      return sendCandidateError(res, 'TEMPORARY_SERVICE_ERROR', { request_id });
+    let startingInterview;
+    try {
+      const claimed = await claimInterviewAttempt(supabaseAdmin, {
+        candidateId: candidate_id,
+        roleId,
+        clientId,
+      });
+      startingInterview = { id: claimed.interview_id, attempt_number: claimed.attempt_number };
+    } catch (claimError) {
+      return res.status(claimError.status || 503).json({
+        error: claimError.code || 'temporary_service_error',
+        code: claimError.code || 'TEMPORARY_SERVICE_ERROR',
+        detail: claimError.message,
+        request_id,
+      });
     }
 
     // Tavus
@@ -343,7 +324,7 @@ router.post('/', createTavusRateLimit, async (req, res) => {
         throw invalidResultError;
       }
     } catch (error) {
-      await supabase
+      await supabaseAdmin
         .from('interviews')
         .update({
           status: 'Failed',
@@ -376,11 +357,15 @@ router.post('/', createTavusRateLimit, async (req, res) => {
       data: { conversation_id: result?.conversation_id || null }
     });
 
-    const { error: interviewUpdateError } = await supabase
+    const { error: interviewUpdateError } = await supabaseAdmin
       .from('interviews')
       .update({
         video_url: result.conversation_url || null,
         tavus_application_id: result.conversation_id || null,
+        tavus_conversation_id: result.conversation_id || null,
+        effective_persona_id: result.effective_persona_id || null,
+        effective_replica_id: result.effective_replica_id || null,
+        effective_tavus_document_id: result.effective_tavus_document_id || null,
         status: 'Pending',
         updated_at: new Date().toISOString()
       })
@@ -397,7 +382,7 @@ router.post('/', createTavusRateLimit, async (req, res) => {
     }
 
     // Immediately reflect on candidate
-    await supabase
+    await supabaseAdmin
       .from('candidates')
       .update({
         interview_status: 'Started',
@@ -405,16 +390,6 @@ router.post('/', createTavusRateLimit, async (req, res) => {
         candidate_external_id: result.conversation_id || null
       })
       .eq('id', candidate_id);
-
-    // Stamp linkage on existing report rows for this candidate (if any)
-    await supabase
-      .from('reports')
-      .update({
-        role_id: role.id,
-        client_id: clientId,
-        candidate_external_id: result.conversation_id || null
-      })
-      .eq('candidate_id', candidate_id);
 
     return res.status(200).json({
       message: 'Interview created',

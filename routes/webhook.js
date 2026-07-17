@@ -9,6 +9,8 @@ const { analyzeInterviewTranscriptById } = require('../scripts/backfillInterview
 const { generateInterviewAnalysisV2 } = require('../src/lib/interviewAnalysisV2');
 const { INSUFFICIENT_SUMMARY, isSubstantiveTranscript, scoreInterview } = require('../src/lib/interviewScoring');
 const { getRoleInterviewAvailability, syncRoleInterviewLimitNotification } = require('../src/lib/roleInterviewAvailability');
+const { transcriptCompletionTransition } = require('../src/lib/interviewLifecycle');
+const { classifyCandidateUtterance } = require('../src/lib/interviewUtteranceClassifier');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -41,6 +43,44 @@ function fromAny(obj, ...paths) {
     } catch {}
   }
   return undefined;
+}
+
+async function recordLifecycleEvent({ interview, body, eventType, receivedAt }) {
+  if (!supabaseAdmin || !interview?.id || !interview?.client_id) return false;
+  const rawRole = String(pickFirst(
+    fromAny(body, 'properties.role'), fromAny(body, 'role'), fromAny(body, 'payload.properties.role'), fromAny(body, 'payload.role')
+  ) || '').toLowerCase();
+  const speakerRole = /candidate|user|participant/.test(rawRole)
+    ? 'candidate'
+    : (/replica|assistant|agent|ai/.test(rawRole) ? 'ai' : 'system');
+  const utterance = String(pickFirst(
+    fromAny(body, 'properties.speech'), fromAny(body, 'properties.text'), fromAny(body, 'speech'), fromAny(body, 'text'), fromAny(body, 'payload.properties.speech'), fromAny(body, 'payload.properties.text')
+  ) || '');
+  const classification = speakerRole === 'candidate' ? classifyCandidateUtterance(utterance) : null;
+  const vendorEventId = String(pickFirst(
+    fromAny(body, 'event_id'), fromAny(body, 'id'), fromAny(body, 'payload.event_id'), fromAny(body, 'payload.id')
+  ) || '').trim() || null;
+  const observedAt = pickFirst(fromAny(body, 'timestamp'), fromAny(body, 'created_at'), fromAny(body, 'payload.timestamp'), receivedAt);
+  const dedupeKey = vendorEventId || require('crypto').createHash('sha256')
+    .update(`${eventType}|${speakerRole}|${observedAt || ''}|${utterance.slice(0, 200)}`)
+    .digest('hex');
+  const { data, error } = await supabaseAdmin.rpc('record_interview_lifecycle_event', {
+    p_interview_id: interview.id,
+    p_client_id: interview.client_id,
+    p_event_type: eventType || 'unknown',
+    p_vendor_event_id: vendorEventId,
+    p_dedupe_key: dedupeKey,
+    p_speaker_role: speakerRole,
+    p_utterance_classification: classification?.classification || null,
+    p_observed_at: observedAt || null,
+    // Avoid full transcript/utterance storage in telemetry.
+    p_metadata: { word_count: classification?.wordCount || 0 },
+  });
+  if (error) {
+    console.warn('[webhook] lifecycle_event_not_recorded', { interview_id: interview.id, event_type: eventType, error: error.message || error });
+    return false;
+  }
+  return data === true;
 }
 
 function fromAnyPathList(obj, paths) {
@@ -1068,24 +1108,48 @@ async function applyTranscriptScoringForInterview({ interview, fresh, transcript
   const hasInsufficientSummary = existingSummary === INSUFFICIENT_SUMMARY ||
     existingSummary.includes('Interview ended before any substantive responses were recorded.');
 
+  // Phase B is a hard evidence gate.  A transcript may be retained for audit,
+  // but it may never be scored or promoted unless the deterministic candidate
+  // utterance classifier found a substantive answer.
+  if (!substantiveCheck.ok) {
+    const transition = transcriptCompletionTransition(substantiveCheck);
+    const { error: gateError } = await supabaseAdmin
+      .from('interviews')
+      .update({
+        status: transition.status,
+        failure_code: transition.failure_code,
+        failure_stage: transition.failure_stage,
+        failure_summary: transition.failure_summary,
+        failure_at: new Date().toISOString(),
+        retryable: transition.retryable,
+        replacement_eligible: transition.replacement_eligible,
+        has_substantive_response: false,
+        substantive_response_count: substantiveCheck.substantiveResponseCount || 0,
+        candidate_utterance_count: substantiveCheck.candidateUtteranceCount || 0,
+        utterance_classification_counts: substantiveCheck.counts || {},
+        conversation_progress_state: 'NoSubstantiveCandidateResponse',
+        interview_summary: 'Interview ended before a substantive candidate response was recorded.',
+        transcript_scores: {
+          ...existingTopScores,
+          overall: null,
+          role_fit: null,
+          technical_strength: null,
+          communication_quality: null,
+          confidence: 0,
+          ai_aided_risk: 'low',
+          ai_aided_risk_reason: disconnectedRiskReason,
+        },
+      })
+      .eq('id', interview.id);
+    if (gateError) {
+      console.error('[webhook] transcript evidence gate update failed', { request_id: requestId || null, interview_id: interview?.id || null, error: gateError.message || gateError });
+      return { updated: false, substantive: false, reason: substantiveCheck.reason };
+    }
+    return { updated: true, substantive: false, reason: substantiveCheck.reason, evidence: substantiveCheck };
+  }
+
   if (substantiveCheck.ok && Number.isFinite(existingOverall) && Number.isFinite(existingConfidence) && existingSummary) {
     return { updated: false, substantive: true, reason: 'already_scored' };
-  }
-  if (
-    disconnectedLevel &&
-    existingSummary === disconnectedSummary &&
-    existingTopScores.overall == null &&
-    existingTopScores.role_fit == null &&
-    existingTopScores.technical_strength == null &&
-    existingTopScores.communication_quality == null &&
-    Number(existingTopScores.confidence) === 0 &&
-    String(existingTopScores.ai_aided_risk || '').toLowerCase() === 'low' &&
-    String(existingTopScores.ai_aided_risk_reason || '').trim() === disconnectedRiskReason
-  ) {
-    return { updated: false, substantive: false, reason: 'already_disconnected' };
-  }
-  if (!substantiveCheck.ok && Number(existingConfidence) === 0 && hasInsufficientSummary) {
-    return { updated: false, substantive: false, reason: 'already_insufficient' };
   }
 
   const roleId = fresh?.role_id || interview?.role_id || null;
@@ -1099,34 +1163,13 @@ async function applyTranscriptScoringForInterview({ interview, fresh, transcript
           : {}
       );
 
-  const scored = disconnectedLevel
-    ? {
-      summary: disconnectedSummary,
-      transcript_scores: {
-        overall: null,
-        role_fit: null,
-        technical_strength: null,
-        communication_quality: null,
-        confidence: 0,
-        ai_aided_risk: 'low',
-        ai_aided_risk_reason: disconnectedRiskReason
-      }
-    }
-    : await scoreInterview({
+  const scored = await scoreInterview({
       transcriptText: transcript,
       jdText,
       perceptionScores,
       mode: 'webhook',
       request_id: requestId || null
     });
-
-  if (!substantiveCheck.ok && !disconnectedLevel) {
-    console.log('[webhook] transcript summary skipped insufficient', {
-      request_id: requestId || null,
-      interview_id: interview?.id || null,
-      reason: substantiveCheck.reason
-    });
-  }
 
   const updateFields = {
     transcript_scores: {
@@ -1138,10 +1181,6 @@ async function applyTranscriptScoringForInterview({ interview, fresh, transcript
     if (!existingSummary || existingSummary === INSUFFICIENT_SUMMARY) {
       updateFields.interview_summary = scored.summary;
     }
-  } else if (disconnectedLevel) {
-    updateFields.interview_summary = scored.summary;
-  } else if (!hasInsufficientSummary) {
-    updateFields.interview_summary = scored.summary;
   }
 
   const { error: scoreErr } = await supabaseAdmin
@@ -1576,7 +1615,14 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
     const isToolCall = eventType === 'conversation.tool_call';
     const isReplicaJoined = eventType === 'system.replica_joined';
     const isShutdown = eventType === 'system.shutdown';
-    const isKnownEvent = isReplicaJoined || isShutdown || isTranscriptionReady || isRecordingReady || isPerceptionAnalysis || isToolCall || isPerceptionEventIngestion;
+    const isLifecycleEvent = [
+      'conversation.utterance',
+      'conversation.started_speaking',
+      'conversation.stopped_speaking',
+      'conversation.connected',
+      'conversation.disconnected',
+    ].includes(eventType);
+    const isKnownEvent = isReplicaJoined || isShutdown || isTranscriptionReady || isRecordingReady || isPerceptionAnalysis || isToolCall || isPerceptionEventIngestion || isLifecycleEvent;
 
     interviewId = pickFirst(
       fromAny(body, 'interview_id'),
@@ -1767,6 +1813,10 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
     );
     const toolName = String(toolNameRaw || '').trim().toLowerCase();
 
+    if (isLifecycleEvent || isShutdown || isReplicaJoined) {
+      await recordLifecycleEvent({ interview, body, eventType, receivedAt: eventReceivedAtIso });
+    }
+
     if (isPerceptionEventIngestion) {
       await ingestPerceptionEvent({
         interview,
@@ -1777,6 +1827,9 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
         eventReceivedAtIso,
         toolName
       });
+      return res.status(200).json({ ok: true });
+    }
+    if (isLifecycleEvent) {
       return res.status(200).json({ ok: true });
     }
 
@@ -1874,6 +1927,9 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
 
     if (isShutdown) {
       updates.status = 'Ended';
+      updates.vendor_end_reason = String(pickFirst(
+        fromAny(body, 'reason'), fromAny(body, 'properties.reason'), fromAny(body, 'payload.reason'), fromAny(body, 'status')
+      ) || 'vendor_end_event').slice(0, 120);
       console.log('[webhook] interview ended', {
         request_id: requestId || null,
         interview_id: interview.id,
@@ -2247,7 +2303,11 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
             'TranscriptReady',
             'Video Ready'
           ];
-          if (allowed.includes(statusFrom)) {
+          if (!scoringResult?.substantive) {
+            statusTo = 'Incomplete';
+            shouldTriggerAnalysisRun = false;
+            analysisMissing = false;
+          } else if (allowed.includes(statusFrom)) {
             statusTo = analysisComplete ? 'Analyzed' : 'ReadyForAnalysis';
           }
 
@@ -2281,7 +2341,9 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
             status_to: statusTo,
             scoring_updated: scoringResult?.updated || false
           });
-          queueInterviewAnalysisV2({ interview, requestId, conversationId });
+          if (scoringResult?.substantive) {
+            queueInterviewAnalysisV2({ interview, requestId, conversationId });
+          }
         }
       }
     }

@@ -17,22 +17,30 @@ const EARLY_END_TRANSCRIPT_SCORES = {
   ai_aided_risk: 'low',
   ai_aided_risk_reason: 'No substantive interview response was available to assess.'
 };
-const END_REASONS = new Set([
-  'manual',
-  'tool_call',
-  'closing_utterance',
-  'time_limit_warning',
-  'time_limit_graceful_close',
-  'time_limit_force_close',
-  'progress_stalled',
-  'disconnected'
-]);
+const END_REASON_MAP = Object.freeze({
+  manual: 'candidate_ended',
+  candidate_ended: 'candidate_ended',
+  tool_call: 'vendor_end_event',
+  ended_payload: 'vendor_end_event',
+  vendor_end_event: 'vendor_end_event',
+  closing_utterance: 'completed_normally',
+  completed_normally: 'completed_normally',
+  time_limit_warning: 'completed_normally',
+  time_limit_graceful_close: 'completed_normally',
+  time_limit_force_close: 'completed_normally',
+  progress_stalled: 'watchdog_timeout',
+  watchdog_timeout: 'watchdog_timeout',
+  disconnected: 'reconnect_failed',
+  reconnect_failed: 'reconnect_failed',
+  browser_closed: 'browser_closed_or_navigation',
+  browser_closed_or_navigation: 'browser_closed_or_navigation',
+});
 
 function normalizeEndReason(value) {
   const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!raw) return 'manual';
   const normalized = raw.replace(/[^a-z0-9_-]+/g, '_').slice(0, 80);
-  return END_REASONS.has(normalized) ? normalized : 'unknown';
+  return END_REASON_MAP[normalized] || 'vendor_end_event';
 }
 
 function hasNonEmptyText(value) {
@@ -58,10 +66,10 @@ router.post('/tavus/end-conversation', express.json({ limit: '1mb' }), async (re
     const interview_id = typeof req.body?.interview_id === 'string' ? req.body.interview_id.trim() : '';
     const role_token = typeof req.body?.role_token === 'string' ? req.body.role_token.trim() : '';
     const reason = normalizeEndReason(req.body?.reason);
-    const isTimeLimitEnd = reason.startsWith('time_limit');
-    const isFailureEnd = reason === 'progress_stalled' || reason === 'disconnected';
-    const failureCode = reason === 'progress_stalled' ? 'INTERVIEW_PROGRESS_STALLED' : 'INTERVIEW_DISCONNECTED';
-    const failureSummary = reason === 'progress_stalled'
+    const isTimeLimitEnd = reason === 'completed_normally';
+    const isFailureEnd = reason === 'watchdog_timeout' || reason === 'reconnect_failed';
+    const failureCode = reason === 'watchdog_timeout' ? 'INTERVIEW_PROGRESS_STALLED' : 'INTERVIEW_DISCONNECTED';
+    const failureSummary = reason === 'watchdog_timeout'
       ? 'The live interview stopped progressing after one automatic reconnect attempt.'
       : 'The live interview disconnected and could not reconnect.';
     if (!conversation_id || !interview_id || !role_token) {
@@ -182,6 +190,8 @@ router.post('/tavus/end-conversation', express.json({ limit: '1mb' }), async (re
             failure_summary: failureSummary,
             failure_at: new Date().toISOString(),
             retryable: true,
+            replacement_eligible: true,
+            client_end_reason: reason,
             updated_at: new Date().toISOString()
           })
           .eq('id', interview.id);
@@ -203,10 +213,13 @@ router.post('/tavus/end-conversation', express.json({ limit: '1mb' }), async (re
           failure_summary: failureSummary,
           failure_at: new Date().toISOString(),
           retryable: true,
+          replacement_eligible: true,
+          client_end_reason: reason,
           updated_at: new Date().toISOString()
         }
       : {
-          status: 'ending_requested',
+        status: 'ending_requested',
+        client_end_reason: reason,
           updated_at: new Date().toISOString()
         };
     const { data: updatedInterview, error: updateError } = await supabaseAdmin
@@ -292,37 +305,6 @@ router.post('/tavus/end-conversation', express.json({ limit: '1mb' }), async (re
             return;
           }
 
-          if (fresh.candidate_id) {
-            const { error: reportCleanupError } = await supabaseAdmin
-              .from('reports')
-              .update({
-                interview_score: null,
-                overall_score: null,
-                interview_breakdown: {
-                  clarity: null,
-                  confidence: null,
-                  body_language: null,
-                  evidence_strength: null,
-                  total_score: null,
-                  summary: EARLY_END_SUMMARY
-                }
-              })
-              .eq('candidate_id', fresh.candidate_id)
-              .eq('role_id', fresh.role_id);
-
-            if (reportCleanupError) {
-              console.error('[tavus/end-conversation] early_end_reconcile_report_cleanup_failed', {
-                request_id,
-                interview_id: interviewId,
-                candidate_id: fresh.candidate_id,
-                role_id: fresh.role_id,
-                reason,
-                code: reportCleanupError.code,
-                detail: reportCleanupError.message
-              });
-            }
-          }
-
         } catch (e) {
           console.error('[tavus/end-conversation] early_end_reconcile_unexpected', {
             request_id,
@@ -351,6 +333,48 @@ router.post('/tavus/end-conversation', express.json({ limit: '1mb' }), async (re
       hint: null,
       request_id
     });
+  }
+});
+
+// Lightweight browser telemetry is intentionally separate from ending a Tavus
+// conversation. It contains only bounded lifecycle state, never transcript or
+// candidate-entered text, and is bound to the same interview/role/conversation.
+router.post('/tavus/client-telemetry', express.json({ limit: '32kb' }), async (req, res) => {
+  try {
+    const interviewId = String(req.body?.interview_id || '').trim();
+    const conversationId = String(req.body?.conversation_id || '').trim();
+    const roleToken = String(req.body?.role_token || '').trim();
+    const event = String(req.body?.event || '').trim().toLowerCase();
+    const reason = normalizeEndReason(req.body?.reason);
+    const allowedEvents = new Set(['watchdog_started', 'watchdog_timeout', 'reconnect_attempted', 'reconnect_succeeded', 'reconnect_failed', 'browser_closed_or_navigation']);
+    if (!interviewId || !conversationId || !roleToken || !allowedEvents.has(event)) {
+      return res.status(400).json({ error: 'bad_request', code: 'MISSING_REQUIRED_PARAMS' });
+    }
+    const { data: role } = await supabaseAdmin.from('roles').select('id').eq('slug_or_token', roleToken).maybeSingle();
+    const { data: interview, error } = await supabaseAdmin
+      .from('interviews')
+      .select('id,role_id,tavus_application_id,reconnect_attempt_count')
+      .eq('id', interviewId)
+      .maybeSingle();
+    if (error || !role || !interview || String(interview.role_id) !== String(role.id) || String(interview.tavus_application_id) !== conversationId) {
+      return res.status(403).json({ error: 'forbidden', code: 'INTERVIEW_BINDING_MISMATCH' });
+    }
+    const now = new Date().toISOString();
+    const update = { updated_at: now };
+    if (event === 'watchdog_timeout') update.watchdog_no_progress_at = now;
+    if (event === 'reconnect_attempted') {
+      update.reconnect_attempted = true;
+      update.reconnect_attempt_count = Math.min(1, Number(interview.reconnect_attempt_count || 0) + 1);
+    }
+    if (event === 'reconnect_succeeded' || event === 'reconnect_failed') update.reconnect_result = event;
+    if (event === 'browser_closed_or_navigation') update.client_end_reason = 'browser_closed_or_navigation';
+    if (reason && reason !== 'vendor_end_event') update.client_end_reason = reason;
+    const { error: updateError } = await supabaseAdmin.from('interviews').update(update).eq('id', interviewId);
+    if (updateError) throw updateError;
+    return res.json({ ok: true });
+  } catch (error) {
+    console.warn('[tavus/client-telemetry] update failed', { error: error?.message || error });
+    return res.status(503).json({ error: 'temporary_service_error', code: 'CLIENT_TELEMETRY_UNAVAILABLE' });
   }
 });
 

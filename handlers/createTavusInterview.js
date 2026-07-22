@@ -4,6 +4,10 @@
 require('dotenv').config();
 const axios = require('axios');
 const { ensureTavusDocumentForRole, missingTavusKbError } = require('../lib/tavusDocuments');
+const {
+  annotateTavusCreateError,
+  deterministicConversationName,
+} = require('../src/lib/tavusVendorReconciliation');
 
 /**
  * Create a Tavus v2 conversation for a candidate/role.
@@ -36,6 +40,8 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
     const err = new Error('TAVUS_API_KEY is not set');
     err.code = 'missing_env';
     err.status = 500;
+    err.failureCategory = 'definite_pre_acceptance';
+    err.retryable = true;
     throw err;
   }
 
@@ -99,7 +105,7 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
     maxInterviewMinutes
   );
 
-  const conversationName = `${roleTitle} - ${candidate?.name || candidate?.email || 'Candidate'}`;
+  const conversationName = deterministicConversationName(options.interviewId);
 
   // Build the payload Tavus expects
   const payload = {
@@ -126,8 +132,7 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
       tavusDocumentId = await ensureTavusDocumentForRole(role);
     } catch (err) {
       console.error(`[tavus-interview] Failed to sync Tavus KB for role ${role?.id || 'unknown'}:`, err?.message || err);
-      if (err?.code === 'missing_tavus_kb') throw err;
-      throw err;
+      throw annotateTavusCreateError(err, { requestTransmitted: false });
     }
   }
   if (tavusDocumentId) {
@@ -139,9 +144,9 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
     payload.document_ids = [tavusDocumentId];
     payload.document_retrieval_strategy = RETRIEVAL;
   } else if (role?.kb_document_id) {
-    throw missingTavusKbError(role?.id, 'Role is missing Tavus KB ID');
+    throw annotateTavusCreateError(missingTavusKbError(role?.id, 'Role is missing Tavus KB ID'), { requestTransmitted: false });
   } else {
-    throw missingTavusKbError(role?.id, 'Role has no KB source to sync to Tavus');
+    throw annotateTavusCreateError(missingTavusKbError(role?.id, 'Role has no KB source to sync to Tavus'), { requestTransmitted: false });
   }
 
   try {
@@ -153,6 +158,11 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
     });
 
     const data = resp?.data || {};
+    if (!data.conversation_id || !(data.conversation_url || data.url || data.link)) {
+      const incomplete = new Error('Tavus returned an incomplete conversation response');
+      incomplete.code = 'tavus_incomplete_response';
+      throw annotateTavusCreateError(incomplete, { requestTransmitted: true });
+    }
     return {
       conversation_url: data.conversation_url || data.url || data.link || null,
       conversation_id: data.conversation_id || data.id || null,
@@ -161,27 +171,31 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
       effective_tavus_document_id: Array.isArray(data.document_ids)
         ? data.document_ids[0] || null
         : (Array.isArray(payload.document_ids) ? payload.document_ids[0] || null : null),
+      vendor_external_reference: conversationName,
     };
   } catch (e) {
     const status = e.response?.status || 500;
-    const details = e.response?.data || e.message;
+    const details = e.response?.data || null;
+    const providerCode = typeof details === 'object' && details
+      ? String(details.code || details.error || '').slice(0, 80)
+      : null;
     console.error('[tavus-interview-error] tavus_request_failed', {
       role_id: role?.id || null,
       candidate_id: candidate?.id || candidate?.candidate_id || null,
       httpStatus: status,
-      tavusErrorBody: details
+      providerCode: providerCode || null,
     });
     if (status === 400 && (payload?.document_ids || []).length) {
       console.error(
         `[tavus-interview] Tavus rejected document ${payload.document_ids[0]} for role ${role?.id || 'unknown'}:`,
-        typeof details === 'string' ? details : JSON.stringify(details)
+        providerCode || 'provider_rejected_document'
       );
     }
-    const err = new Error(typeof details === 'string' ? details : JSON.stringify(details));
+    const err = new Error('Tavus create request failed');
     err.status = status >= 400 && status < 500 ? status : 502;
     err.code = 'tavus_request_failed';
     err.detail = err.message;
-    throw err;
+    throw annotateTavusCreateError(err, { requestTransmitted: true });
   }
 }
 

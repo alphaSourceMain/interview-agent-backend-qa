@@ -71,6 +71,8 @@ const { normalizeCriteriaConfig, stableStringify } = require('./src/lib/candidat
 const { getRoleInterviewAvailability } = require('./src/lib/roleInterviewAvailability')
 const { getRoleJdReplacementEligibility } = require('./src/lib/roleJdReplacement')
 const { createInterviewRecoveryRouter } = require('./routes/interviewRecovery')
+const { normalizeUuid } = require('./src/lib/strictRequestValidation')
+const { isInterviewRecoveryCoreEnabled, isInterviewRecoveryCoreEmailEnabled } = require('./src/lib/interviewAttemptService')
 const { cleanupNoSubstantiveRecordings } = require('./src/lib/recordingCleanup')
 const { createSubscriptionCheckoutSession } = require('./src/lib/subscriptionCheckout')
 const {
@@ -4529,6 +4531,7 @@ adminRouter.get('/candidates', requireAuth, requireAdmin, async (req, res) => {
     const candidateIds = Array.from(new Set((cands || []).map(c => c.id).filter(Boolean)));
     const roleIds = uniqueEntityIds((cands || []).map(c => c.role_id));
     const latestReportByCandidateId = {};
+    const reportsByCandidateId = {};
     let roleClientById = {};
 
     if (roleIds.length) {
@@ -4554,7 +4557,7 @@ adminRouter.get('/candidates', requireAuth, requireAdmin, async (req, res) => {
     if (candidateIds.length) {
       let reportsQuery = supabaseAdmin
         .from('reports')
-        .select('candidate_id,resume_score,interview_score,overall_score,report_url,created_at')
+        .select('candidate_id,interview_id,attempt_number,report_kind,resume_score,interview_score,overall_score,report_url,created_at')
         .in('candidate_id', candidateIds)
         .order('created_at', { ascending: false });
       if (scopedClientIds.length === 1) reportsQuery = reportsQuery.eq('client_id', scopedClientIds[0]);
@@ -4579,6 +4582,10 @@ adminRouter.get('/candidates', requireAuth, requireAdmin, async (req, res) => {
       }
 
       for (const rep of (reports || [])) {
+        if (rep?.candidate_id) {
+          if (!reportsByCandidateId[rep.candidate_id]) reportsByCandidateId[rep.candidate_id] = [];
+          reportsByCandidateId[rep.candidate_id].push(rep);
+        }
         if (rep?.candidate_id && !latestReportByCandidateId[rep.candidate_id]) {
           latestReportByCandidateId[rep.candidate_id] = rep;
         }
@@ -4592,7 +4599,7 @@ adminRouter.get('/candidates', requireAuth, requireAdmin, async (req, res) => {
     if (candidateIds.length) {
       let interviewsQuery = supabaseAdmin
         .from('interviews')
-        .select('id,candidate_id,created_at,transcript_scores,recording_status,recording_ready_at')
+        .select('id,candidate_id,created_at,attempt_number,replacement_authorization_id,transcript_scores,recording_status,recording_ready_at')
         .in('candidate_id', candidateIds)
         .order('created_at', { ascending: false });
       if (scopedClientIds.length === 1) interviewsQuery = interviewsQuery.eq('client_id', scopedClientIds[0]);
@@ -4639,8 +4646,16 @@ adminRouter.get('/candidates', requireAuth, requireAdmin, async (req, res) => {
     };
 
     const candidates = (cands || []).map((c) => {
-      const rep = latestReportByCandidateId[c.id] || null;
-      const resume_score = Number.isFinite(Number(rep?.resume_score)) ? Number(rep.resume_score) : null;
+      const latestInterview = latestInterviewByCandidateId[c.id] || null;
+      const candidateReports = reportsByCandidateId[c.id] || [];
+      const exactAttemptReport = latestInterview
+        ? candidateReports.find((report) => report.interview_id === latestInterview.id) || null
+        : null;
+      const isRecoveryAttempt = Number(latestInterview?.attempt_number || 0) > 1
+        || !!latestInterview?.replacement_authorization_id;
+      const rep = isRecoveryAttempt ? exactAttemptReport : (latestReportByCandidateId[c.id] || null);
+      const resumeSource = candidateReports.find((report) => Number.isFinite(Number(report?.resume_score))) || rep;
+      const resume_score = Number.isFinite(Number(resumeSource?.resume_score)) ? Number(resumeSource.resume_score) : null;
       const entityClientId = roleClientById[c.role_id] || c.client_id;
       const entityFields = entityFieldsForClientId(entityMap, entityClientId);
 
@@ -4690,15 +4705,21 @@ adminRouter.get('/candidates', requireAuth, requireAdmin, async (req, res) => {
         resume_score,
         interview_score,
         overall_score,
-        latest_interview_id: latestInterviewByCandidateId[c.id]?.id || null,
-        recording_status: latestInterviewByCandidateId[c.id]?.recording_status || null,
-        recording_ready_at: latestInterviewByCandidateId[c.id]?.recording_ready_at || null,
+        latest_interview_id: latestInterview?.id || null,
+        recording_status: latestInterview?.recording_status || null,
+        recording_ready_at: latestInterview?.recording_ready_at || null,
         latest_report_url: rep?.report_url || null,
         report_generated_at: rep?.created_at || null
       };
     });
 
-    return res.json({ candidates });
+    return res.json({
+      candidates,
+      features: {
+        interview_recovery_core: isInterviewRecoveryCoreEnabled(),
+        interview_recovery_core_email: isInterviewRecoveryCoreEmailEnabled(),
+      },
+    });
   } catch (e) {
     console.error('[admin/candidates] unexpected', { request_id, error: e?.message || e });
     return res.status(500).json({
@@ -4715,12 +4736,12 @@ adminRouter.get('/candidates', requireAuth, requireAdmin, async (req, res) => {
 adminRouter.post('/reports/generate', requireAuth, requireAdmin, async (req, res) => {
   const request_id = req.request_id || null;
   try {
-    const candidate_id = String(req.body?.candidate_id || '').trim();
-    if (!candidate_id) {
+    const candidate_id = normalizeUuid(req.body?.candidate_id);
+    if (candidate_id === null) {
       return res.status(400).json({
         error: 'bad_request',
-        code: 'CANDIDATE_ID_REQUIRED',
-        detail: 'candidate_id is required',
+        code: 'INVALID_CANDIDATE_ID',
+        detail: 'candidate_id must be a UUID.',
         hint: null,
         request_id
       });
@@ -6681,6 +6702,10 @@ app.get('/healthz', async (req, res) => {
       degraded: true,
       request_id,
       now,
+      interview_recovery_core: {
+        enabled: isInterviewRecoveryCoreEnabled(),
+        email_enabled: isInterviewRecoveryCoreEmailEnabled(),
+      },
       supabase_auth,
     });
   }
@@ -6715,6 +6740,10 @@ app.get('/healthz', async (req, res) => {
     degraded: supabase_auth.ok !== true,
     request_id,
     now,
+    interview_recovery_core: {
+      enabled: isInterviewRecoveryCoreEnabled(),
+      email_enabled: isInterviewRecoveryCoreEmailEnabled(),
+    },
     supabase_auth,
   });
 });

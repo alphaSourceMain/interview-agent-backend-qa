@@ -43,6 +43,145 @@ function isInterviewRecoveryCoreEmailEnabled(env = process.env) {
   return String(env?.INTERVIEW_RECOVERY_CORE_EMAIL_ENABLED || '').trim().toLowerCase() === 'true';
 }
 
+function sameIdentifier(left, right) {
+  const normalizedLeft = String(left || '').trim().toLowerCase();
+  const normalizedRight = String(right || '').trim().toLowerCase();
+  return normalizedLeft !== '' && normalizedRight !== '' && normalizedLeft === normalizedRight;
+}
+
+function isFutureOrUnset(value, nowMs) {
+  if (value == null || value === '') return true;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) && parsed > nowMs;
+}
+
+function exactAuthorizedRecoveryReentry({
+  authorization,
+  attempts,
+  eligibility,
+  candidateId,
+  roleId,
+  clientId,
+  priorInterviewId,
+  nowMs = Date.now(),
+}) {
+  if (!authorization || !eligibility || !Array.isArray(attempts) || attempts.length !== 1) {
+    return false;
+  }
+  const prior = attempts[0];
+  const blockers = Array.isArray(eligibility.blockers) ? eligibility.blockers : [];
+  const replacement = eligibility.replacement;
+  const eligibilityPrior = eligibility.prior_interview;
+
+  return sameIdentifier(prior.id, priorInterviewId)
+    && sameIdentifier(prior.candidate_id, candidateId)
+    && sameIdentifier(prior.role_id, roleId)
+    && sameIdentifier(prior.client_id, clientId)
+    && Number(prior.attempt_number) === 1
+    && prior.is_active === false
+    && prior.replacement_authorization_id == null
+    && eligibility.eligible === false
+    && blockers.length === 1
+    && blockers[0] === 'replacement_already_authorized'
+    && sameIdentifier(eligibility.candidate?.id, candidateId)
+    && sameIdentifier(eligibility.role?.id, roleId)
+    && sameIdentifier(eligibilityPrior?.id, priorInterviewId)
+    && Number(eligibilityPrior?.attempt_number) === 1
+    && sameIdentifier(replacement?.authorization_id, authorization.id)
+    && replacement?.status === 'authorized'
+    && replacement?.start_status === 'not_started'
+    && replacement?.replacement_interview_id == null
+    && replacement?.reset_mode === 'reset_only'
+    && replacement?.email_status === 'not_requested'
+    && sameIdentifier(authorization.candidate_id, candidateId)
+    && sameIdentifier(authorization.role_id, roleId)
+    && sameIdentifier(authorization.client_id, clientId)
+    && sameIdentifier(authorization.previous_interview_id, priorInterviewId)
+    && authorization.authorization_status === 'authorized'
+    && authorization.consumed_at == null
+    && authorization.replacement_interview_id == null
+    && authorization.reset_mode === 'reset_only'
+    && authorization.required_coverage_attested === true
+    && authorization.client_approval_status === 'acknowledged'
+    && authorization.start_status === 'not_started'
+    && Number(authorization.start_attempt_count) === 0
+    && authorization.email_status === 'not_requested'
+    && authorization.adjudication_id != null
+    && isFutureOrUnset(authorization.expires_at, nowMs);
+}
+
+async function getAuthorizedRecoveryReentry(db, {
+  candidateId,
+  roleId,
+  clientId,
+  priorInterviewId,
+  nowMs = Date.now(),
+}) {
+  const { data: eligibility, error: eligibilityError } = await db.rpc(
+    'get_interview_recovery_core_eligibility',
+    {
+      p_candidate_id: candidateId,
+      p_role_id: roleId,
+      p_client_id: clientId,
+      p_prior_interview_id: priorInterviewId,
+    }
+  );
+  if (eligibilityError) {
+    const error = new Error('recovery_reentry_lookup_failed');
+    error.code = 'temporary_service_error';
+    throw error;
+  }
+
+  const { data: authorizations, error: authorizationError } = await db
+    .from('interview_reset_events')
+    .select([
+      'id', 'adjudication_id', 'candidate_id', 'client_id', 'role_id',
+      'previous_interview_id', 'replacement_interview_id',
+      'authorization_status', 'consumed_at', 'expires_at', 'reset_mode',
+      'required_coverage_attested', 'client_approval_status',
+      'start_status', 'start_attempt_count', 'email_status',
+    ].join(','))
+    .eq('candidate_id', candidateId)
+    .eq('client_id', clientId)
+    .eq('role_id', roleId)
+    .eq('previous_interview_id', priorInterviewId)
+    .order('created_at', { ascending: false })
+    .limit(2);
+  if (authorizationError) {
+    const error = new Error('recovery_reentry_lookup_failed');
+    error.code = 'temporary_service_error';
+    throw error;
+  }
+  if (!Array.isArray(authorizations) || authorizations.length !== 1) {
+    return null;
+  }
+
+  const { data: attempts, error: attemptsError } = await db
+    .from('interviews')
+    .select('id,candidate_id,client_id,role_id,attempt_number,is_active,replacement_authorization_id')
+    .eq('candidate_id', candidateId)
+    .eq('client_id', clientId)
+    .eq('role_id', roleId)
+    .order('attempt_number', { ascending: false })
+    .limit(3);
+  if (attemptsError) {
+    const error = new Error('recovery_reentry_lookup_failed');
+    error.code = 'temporary_service_error';
+    throw error;
+  }
+
+  return exactAuthorizedRecoveryReentry({
+    authorization: authorizations[0],
+    attempts,
+    eligibility,
+    candidateId,
+    roleId,
+    clientId,
+    priorInterviewId,
+    nowMs,
+  }) ? authorizations[0] : null;
+}
+
 function stableErrorCode(error) {
   const haystack = [error?.message, error?.details, error?.hint, error?.code]
     .filter(Boolean).join(' ').toLowerCase();
@@ -258,6 +397,8 @@ module.exports = {
   publicErrorDetail,
   isInterviewRecoveryCoreEnabled,
   isInterviewRecoveryCoreEmailEnabled,
+  exactAuthorizedRecoveryReentry,
+  getAuthorizedRecoveryReentry,
   claimInterviewAttempt,
   getRecoveryEligibility,
   authorizeReplacement,

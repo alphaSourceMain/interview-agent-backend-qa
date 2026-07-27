@@ -22,6 +22,10 @@ const {
   completeCandidateSubmission,
   failCandidateSubmission
 } = require('../src/lib/candidateSubmissionIdempotency');
+const {
+  getAuthorizedRecoveryReentry,
+  isInterviewRecoveryCoreEnabled
+} = require('../src/lib/interviewAttemptService');
 const { buildBrandedEmailShell, escapeHtml } = require('../utils/mailer');
 const analyzeResume = require('../analyzeResume'); // resume analyzer
 
@@ -350,11 +354,31 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
         return respondRetryableError('TEMPORARY_SERVICE_ERROR', {}, existingByEmail.id);
       }
       if (existingInterview) {
-        return respondCandidateError(
-          getInterviewConflictCode(existingInterview.status),
-          {},
-          existingByEmail.id
-        );
+        let authorizedRecoveryReentry = null;
+        if (isInterviewRecoveryCoreEnabled()) {
+          try {
+            authorizedRecoveryReentry = await getAuthorizedRecoveryReentry(supabaseAdmin, {
+              candidateId: existingByEmail.id,
+              clientId: role.client_id,
+              roleId,
+              priorInterviewId: existingInterview.id,
+            });
+          } catch (_) {
+            console.error('[candidate-submit] recovery_reentry_lookup_failed', {
+              request_id,
+              candidate_id: existingByEmail.id,
+              role_id: roleId,
+            });
+            return respondRetryableError('TEMPORARY_SERVICE_ERROR', {}, existingByEmail.id);
+          }
+        }
+        if (!authorizedRecoveryReentry) {
+          return respondCandidateError(
+            getInterviewConflictCode(existingInterview.status),
+            {},
+            existingByEmail.id
+          );
+        }
       }
       {
         const candidate_id = existingByEmail.id;

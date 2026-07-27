@@ -12,6 +12,13 @@ const ROOT = path.resolve(__dirname, '..');
 const BOOTSTRAP = path.join(__dirname, 'fixtures', 'interview-recovery-core-disposable-bootstrap.sql');
 const PHASE_B = path.join(ROOT, 'supabase', 'migrations', '20260717120000_candidate_incident_phase_b.sql');
 const CORE = path.join(ROOT, 'supabase', 'migrations', '20260721160715_interview_recovery_core.sql');
+const SERIALIZATION = path.join(ROOT, 'supabase', 'migrations', '20260724142720_final_transcript_reconciliation_serialization.sql');
+const DIGEST_SCHEMA_COMPATIBILITY = path.join(
+  ROOT,
+  'supabase',
+  'migrations',
+  '20260727185302_fix_recovery_digest_schema_compatibility.sql',
+);
 
 const ID = {
   client: '71000000-0000-4000-8000-000000000001',
@@ -143,9 +150,18 @@ test('Recovery Core DB 1. migration applies, reapplies, and leaves historical ev
   const beforeState = sql(`select status||'|'||transcript||'|'||recording_metadata::text from public.interviews where id='${ID.rojInterview}';`).stdout;
   applyFile(TEMP_DATABASE, CORE);
   applyFile(TEMP_DATABASE, CORE);
+  applyFile(TEMP_DATABASE, SERIALIZATION);
+  applyFile(TEMP_DATABASE, DIGEST_SCHEMA_COMPATIBILITY);
+  applyFile(TEMP_DATABASE, DIGEST_SCHEMA_COMPATIBILITY);
   const afterState = sql(`select status||'|'||transcript||'|'||recording_metadata::text from public.interviews where id='${ID.rojInterview}';`).stdout;
   assert.equal(afterState, beforeState);
   assert.equal(sql(`select (attempt_mode is null)::text from public.interviews where id='${ID.rojInterview}';`).stdout, 'true');
+  assert.equal(sql("select to_regprocedure('public.digest(bytea,text)') is null;").stdout, 't');
+  assert.equal(sql("select to_regprocedure('extensions.digest(bytea,text)') is not null;").stdout, 't');
+  assert.equal(sql(`
+    select pg_catalog.pg_get_functiondef(
+      'public.authorize_interview_replacement_core(uuid,uuid,uuid,uuid,uuid,text,text,text,text,text,text,boolean,boolean,uuid)'::regprocedure
+    ) like '%pg_catalog.sha256(%';`).stdout, 't');
 });
 
 test('Recovery Core DB 2. Roj-style Analyzed partial attempt is manually eligible without reclassification', { skip: !ENABLED }, () => {

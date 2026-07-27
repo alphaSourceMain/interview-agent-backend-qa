@@ -87,6 +87,12 @@ const BOOTSTRAP = path.join(__dirname, 'fixtures', 'interview-recovery-core-disp
 const PHASE_B = path.join(ROOT, 'supabase', 'migrations', '20260717120000_candidate_incident_phase_b.sql');
 const CORE = path.join(ROOT, 'supabase', 'migrations', '20260721160715_interview_recovery_core.sql');
 const SERIALIZATION = path.join(ROOT, 'supabase', 'migrations', '20260724142720_final_transcript_reconciliation_serialization.sql');
+const DIGEST_SCHEMA_COMPATIBILITY = path.join(
+  ROOT,
+  'supabase',
+  'migrations',
+  '20260727185302_fix_recovery_digest_schema_compatibility.sql',
+);
 const OWNERSHIP_TABLE_NAME = 'interview_final_transcript_reconciliation_claims';
 const OWNERSHIP_TABLE_QUALIFIED = `private.${OWNERSHIP_TABLE_NAME}`;
 const OWNERSHIP_PRIMARY_KEY = 'interview_final_transcript_reconciliation_claims_pkey';
@@ -1282,8 +1288,32 @@ test('serialization DB 1. migration applies and reapplies without changing histo
   const before = sql("select md5(string_agg(id::text||coalesce(status,''),'' order by id)) from public.interviews;").stdout;
   applyFile(DATABASE, SERIALIZATION);
   applyFile(DATABASE, SERIALIZATION);
+  applyFile(DATABASE, DIGEST_SCHEMA_COMPATIBILITY);
+  applyFile(DATABASE, DIGEST_SCHEMA_COMPATIBILITY);
   const afterState = sql("select md5(string_agg(id::text||coalesce(status,''),'' order by id)) from public.interviews;").stdout;
   assert.equal(afterState, before);
+  assert.equal(sql(
+    "select to_regprocedure('public.digest(bytea,text)') is null;",
+  ).stdout, 't');
+  assert.equal(sql(
+    "select to_regprocedure('extensions.digest(bytea,text)') is not null;",
+  ).stdout, 't');
+  assert.equal(sql(
+    "select to_regprocedure('pg_catalog.sha256(bytea)') is not null;",
+  ).stdout, 't');
+  assert.equal(sql(`
+    select count(*)
+    from (
+      values
+        ('public.authorize_interview_replacement_core(uuid,uuid,uuid,uuid,uuid,text,text,text,text,text,text,boolean,boolean,uuid)'),
+        ('public.finalize_interview_final_transcript_reconciliation(uuid,text,uuid,bigint,text,text,text,text,jsonb,jsonb,text)')
+    ) as expected(signature)
+    where pg_catalog.pg_get_functiondef(
+      pg_catalog.to_regprocedure(expected.signature)::oid
+    ) like '%pg_catalog.sha256(%'
+      and pg_catalog.pg_get_functiondef(
+        pg_catalog.to_regprocedure(expected.signature)::oid
+      ) not like '%public.digest(%';`).stdout, '2');
   assert.equal(sql("select to_regclass('private.interview_final_transcript_reconciliation_claims') is not null;").stdout, 't');
   assert.equal(sql(
     "select to_regprocedure('private.is_valid_interview_transcript_scores(jsonb)') is not null;",
@@ -1383,6 +1413,8 @@ test('serialization DB 1b. actual QA legacy interview columns and populated valu
     }).stdout;
     applyFile(COMPATIBLE_DATABASE, SERIALIZATION);
     applyFile(COMPATIBLE_DATABASE, SERIALIZATION);
+    applyFile(COMPATIBLE_DATABASE, DIGEST_SCHEMA_COMPATIBILITY);
+    applyFile(COMPATIBLE_DATABASE, DIGEST_SCHEMA_COMPATIBILITY);
     const afterValues = sql(`
       select pg_catalog.md5(pg_catalog.string_agg(
         id::text || '|' ||
@@ -1692,6 +1724,8 @@ test('serialization DB 1f. exact populated ownership table is preserved and RPC-
 
     applyFileTransactional(OWNERSHIP_COMPATIBLE_DATABASE, SERIALIZATION);
     applyFileTransactional(OWNERSHIP_COMPATIBLE_DATABASE, SERIALIZATION);
+    applyFileTransactional(OWNERSHIP_COMPATIBLE_DATABASE, DIGEST_SCHEMA_COMPATIBILITY);
+    applyFileTransactional(OWNERSHIP_COMPATIBLE_DATABASE, DIGEST_SCHEMA_COMPATIBILITY);
     assert.equal(sql(`select row_to_json(c)::text
       from ${OWNERSHIP_TABLE_QUALIFIED} c
       where interview_id='${preserved.interviewId}';`, {

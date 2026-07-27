@@ -16,16 +16,32 @@ const DATABASE = `${PREFIX}${process.pid}`;
 const CONTRACT_PREFIX = 'alphascreen_fts_contract_';
 const COMPATIBLE_DATABASE = `${CONTRACT_PREFIX}compatible_${process.pid}`;
 const INCOMPATIBLE_DATABASES = new Map([
-  ['type', `${CONTRACT_PREFIX}type_${process.pid}`],
-  ['nullability', `${CONTRACT_PREFIX}nullability_${process.pid}`],
-  ['default', `${CONTRACT_PREFIX}default_${process.pid}`],
-  ['generated', `${CONTRACT_PREFIX}generated_${process.pid}`],
-  ['identity', `${CONTRACT_PREFIX}identity_${process.pid}`],
+  ['conversation_type', `${CONTRACT_PREFIX}conversation_type_${process.pid}`],
+  ['conversation_nullability', `${CONTRACT_PREFIX}conversation_nullability_${process.pid}`],
+  ['conversation_default', `${CONTRACT_PREFIX}conversation_default_${process.pid}`],
+  ['conversation_generated', `${CONTRACT_PREFIX}conversation_generated_${process.pid}`],
+  ['conversation_identity', `${CONTRACT_PREFIX}conversation_identity_${process.pid}`],
+  ['scores_type', `${CONTRACT_PREFIX}scores_type_${process.pid}`],
+  ['scores_json', `${CONTRACT_PREFIX}scores_json_${process.pid}`],
+  ['scores_nullability', `${CONTRACT_PREFIX}scores_nullability_${process.pid}`],
+  ['scores_default', `${CONTRACT_PREFIX}scores_default_${process.pid}`],
+  ['scores_generated', `${CONTRACT_PREFIX}scores_generated_${process.pid}`],
+  ['scores_identity', `${CONTRACT_PREFIX}scores_identity_${process.pid}`],
+  ['scores_domain', `${CONTRACT_PREFIX}scores_domain_${process.pid}`],
   ['questions_type', `${CONTRACT_PREFIX}questions_type_${process.pid}`],
+  ['questions_scalar_text', `${CONTRACT_PREFIX}questions_scalar_text_${process.pid}`],
   ['questions_nullability', `${CONTRACT_PREFIX}questions_nullability_${process.pid}`],
   ['questions_default', `${CONTRACT_PREFIX}questions_default_${process.pid}`],
   ['questions_generated', `${CONTRACT_PREFIX}questions_generated_${process.pid}`],
   ['questions_identity', `${CONTRACT_PREFIX}questions_identity_${process.pid}`],
+  ['questions_domain', `${CONTRACT_PREFIX}questions_domain_${process.pid}`],
+  ['questions_multidimensional', `${CONTRACT_PREFIX}questions_multidimensional_${process.pid}`],
+  ['questions_element_type', `${CONTRACT_PREFIX}questions_element_type_${process.pid}`],
+  ['summary_type', `${CONTRACT_PREFIX}summary_type_${process.pid}`],
+  ['summary_nullability', `${CONTRACT_PREFIX}summary_nullability_${process.pid}`],
+  ['summary_default', `${CONTRACT_PREFIX}summary_default_${process.pid}`],
+  ['summary_generated', `${CONTRACT_PREFIX}summary_generated_${process.pid}`],
+  ['summary_identity', `${CONTRACT_PREFIX}summary_identity_${process.pid}`],
   ['analysis_type', `${CONTRACT_PREFIX}analysis_type_${process.pid}`],
   ['analysis_nullability', `${CONTRACT_PREFIX}analysis_nullability_${process.pid}`],
   ['analysis_default', `${CONTRACT_PREFIX}analysis_default_${process.pid}`],
@@ -82,6 +98,22 @@ const OWNERSHIP_CLAIM_COHERENCE_CHECK =
   'interview_final_transcript_reconciliation_claims_check';
 const OWNERSHIP_ANALYSIS_COHERENCE_CHECK =
   'interview_final_transcript_reconciliation_claims_check2';
+const SESSION_DRAIN_TIMEOUT_MS = 3_000;
+const SESSION_DRAIN_INTERVAL_MS = 50;
+const SESSION_DRAIN_STABLE_ZERO_OBSERVATIONS = 3;
+const SAFE_SESSION_STATES = new Set([
+  'active',
+  'idle',
+  'idle in transaction',
+  'idle in transaction (aborted)',
+  'fastpath function call',
+  'disabled',
+  'unknown',
+]);
+
+let maximumObservedSessionDrainMs = 0;
+let maximumObservedSessionDrainAttempts = 0;
+let maximumObservedSessionDrainResets = 0;
 
 function extractOwnershipTableCreateSql() {
   const migration = fs.readFileSync(SERIALIZATION, 'utf8');
@@ -308,6 +340,206 @@ function databaseCommand(command, database) {
   return spawnSync(command, ['-h', '/tmp', '-p', '5432', database], { encoding: 'utf8' });
 }
 
+function monotonicMilliseconds() {
+  return Number(process.hrtime.bigint() / 1_000_000n);
+}
+
+function sleepMilliseconds(milliseconds) {
+  if (milliseconds <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function readDatabaseSessionState(database) {
+  assert.match(database, /^alphascreen_[a-z0-9_]+_[0-9]+$/);
+  const result = spawnSync(
+    'psql',
+    [
+      ...psqlArgs('postgres'),
+      '-c',
+      `select
+        (select count(*)
+         from pg_catalog.pg_stat_activity
+         where datname=${literal(database)}
+           and pid<>pg_backend_pid())::text||'|'||
+        coalesce((
+          select string_agg(
+            distinct coalesce(state,'unknown'),
+            ',' order by coalesce(state,'unknown')
+          )
+          from pg_catalog.pg_stat_activity
+          where datname=${literal(database)}
+            and pid<>pg_backend_pid()
+        ),'')||'|'||
+        (select count(*)
+         from pg_catalog.pg_prepared_xacts
+         where database=${literal(database)})::text||'|'||
+        (select count(*)
+         from pg_catalog.pg_locks as task_lock
+         join pg_catalog.pg_database as task_database
+           on task_database.oid=task_lock.database
+         where task_database.datname=${literal(database)})::text;`,
+    ],
+    { encoding: 'utf8' },
+  );
+  if (result.status !== 0) {
+    throw new Error(`database_session_state_read_failed database=${database}`);
+  }
+
+  const [
+    rawCount,
+    rawStates,
+    rawPreparedTransactions,
+    rawTaskLocks,
+  ] = String(result.stdout || '').trim().split('|');
+  const count = Number(rawCount);
+  const preparedTransactions = Number(rawPreparedTransactions);
+  const taskLocks = Number(rawTaskLocks);
+  if (![count, preparedTransactions, taskLocks].every(
+    (value) => Number.isInteger(value) && value >= 0,
+  )) {
+    throw new Error(`database_session_state_invalid database=${database}`);
+  }
+  const states = String(rawStates || '')
+    .split(',')
+    .filter(Boolean)
+    .map((state) => SAFE_SESSION_STATES.has(state) ? state : 'unknown')
+    .filter((state, index, values) => values.indexOf(state) === index)
+    .sort();
+  return { count, states, preparedTransactions, taskLocks };
+}
+
+function waitForDatabaseSessionsToDrain(database, options = {}) {
+  assert.match(database, /^alphascreen_[a-z0-9_]+_[0-9]+$/);
+  const timeoutMs = options.timeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
+  const intervalMs = options.intervalMs ?? SESSION_DRAIN_INTERVAL_MS;
+  const stableZeroObservations =
+    options.stableZeroObservations ?? SESSION_DRAIN_STABLE_ZERO_OBSERVATIONS;
+  const now = options.now || monotonicMilliseconds;
+  const sleep = options.sleep || sleepMilliseconds;
+  const readSessionState = options.readSessionState || readDatabaseSessionState;
+  const recordObservation = options.recordObservation !== false;
+  assert.ok(Number.isInteger(timeoutMs) && timeoutMs >= 0 && timeoutMs <= 5_000);
+  assert.ok(Number.isInteger(intervalMs) && intervalMs >= 1 && intervalMs <= 100);
+  assert.ok(
+    Number.isInteger(stableZeroObservations) &&
+      stableZeroObservations >= 2 &&
+      stableZeroObservations <= 5,
+  );
+
+  const startedAt = now();
+  let attempts = 0;
+  let consecutiveZeroCount = 0;
+  let stableZeroResetCount = 0;
+  while (true) {
+    attempts += 1;
+    const state = readSessionState(database);
+    if (!state ||
+        !Number.isInteger(state.count) ||
+        state.count < 0 ||
+        !Array.isArray(state.states) ||
+        !Number.isInteger(state.preparedTransactions) ||
+        state.preparedTransactions < 0 ||
+        !Number.isInteger(state.taskLocks) ||
+        state.taskLocks < 0) {
+      throw new Error(`database_session_state_invalid database=${database}`);
+    }
+    const elapsedMs = Math.max(0, now() - startedAt);
+    if (recordObservation) {
+      maximumObservedSessionDrainMs = Math.max(maximumObservedSessionDrainMs, elapsedMs);
+      maximumObservedSessionDrainAttempts = Math.max(
+        maximumObservedSessionDrainAttempts,
+        attempts,
+      );
+    }
+    if (
+      state.count === 0 &&
+      state.preparedTransactions === 0 &&
+      state.taskLocks === 0
+    ) {
+      consecutiveZeroCount += 1;
+      if (consecutiveZeroCount === stableZeroObservations) {
+        if (recordObservation) {
+          maximumObservedSessionDrainResets = Math.max(
+            maximumObservedSessionDrainResets,
+            stableZeroResetCount,
+          );
+        }
+        return {
+          elapsedMs,
+          attempts,
+          consecutiveZeroCount,
+          stableZeroResetCount,
+          finalSessionState: state,
+        };
+      }
+    } else {
+      if (consecutiveZeroCount > 0) {
+        stableZeroResetCount += 1;
+      }
+      consecutiveZeroCount = 0;
+    }
+    if (elapsedMs >= timeoutMs) {
+      const states = state.states
+        .map((value) => SAFE_SESSION_STATES.has(value) ? value : 'unknown')
+        .filter((value, index, values) => values.indexOf(value) === index)
+        .sort();
+      throw new Error(
+        `database_session_drain_timeout database=${database}` +
+        ` remaining_sessions=${state.count}` +
+        ` states=${states.join(',') || 'unknown'}` +
+        ` consecutive_zero_count=${consecutiveZeroCount}` +
+        ` required_stable_zero_count=${stableZeroObservations}` +
+        ` elapsed_ms=${elapsedMs}` +
+        ` attempts=${attempts}`,
+      );
+    }
+    sleep(Math.min(intervalMs, timeoutMs - elapsedMs));
+  }
+}
+
+function cleanupDisposableDatabase(database) {
+  assert.match(database, /^alphascreen_[a-z0-9_]+_[0-9]+$/);
+  const existsBefore = sql(
+    `select count(*) from pg_catalog.pg_database where datname=${literal(database)};`,
+    { database: 'postgres' },
+  ).stdout;
+  assert.equal(existsBefore, '1', `disposable_database_missing database=${database}`);
+
+  const drainResult = waitForDatabaseSessionsToDrain(database);
+  assert.equal(
+    drainResult.finalSessionState.count,
+    0,
+    `disposable_database_sessions_remain database=${database}`,
+  );
+  assert.equal(
+    drainResult.consecutiveZeroCount,
+    SESSION_DRAIN_STABLE_ZERO_OBSERVATIONS,
+    `disposable_database_session_quiescence_incomplete database=${database}`,
+  );
+  assert.equal(
+    drainResult.finalSessionState.preparedTransactions,
+    0,
+    `disposable_database_prepared_transactions_remain database=${database}`,
+  );
+  assert.equal(
+    drainResult.finalSessionState.taskLocks,
+    0,
+    `disposable_database_locks_remain database=${database}`,
+  );
+
+  const dropped = databaseCommand('dropdb', database);
+  const existsAfter = sql(
+    `select count(*) from pg_catalog.pg_database where datname=${literal(database)};`,
+    { database: 'postgres' },
+  ).stdout;
+  assert.equal(
+    dropped.status,
+    0,
+    `disposable_database_drop_failed database=${database}`,
+  );
+  assert.equal(existsAfter, '0', `disposable_database_drop_incomplete database=${database}`);
+}
+
 function applyFile(database, filename, options = {}) {
   const result = spawnSync('psql', [...psqlArgs(database), '-f', filename], { encoding: 'utf8' });
   if (!options.allowFailure && result.status !== 0) {
@@ -333,6 +565,41 @@ function applyFileTransactional(database, filename, options = {}) {
   return result;
 }
 
+function runWithPreservedCleanupFailure(callback, cleanup) {
+  let callbackResult;
+  let callbackError = null;
+  try {
+    callbackResult = callback();
+  } catch (error) {
+    callbackError = error;
+  }
+
+  let cleanupError = null;
+  try {
+    cleanup();
+  } catch (error) {
+    cleanupError = error;
+  }
+
+  if (callbackError) {
+    if (cleanupError) {
+      if (callbackError.cause === undefined) {
+        callbackError.cause = cleanupError;
+      } else {
+        Object.defineProperty(callbackError, 'cleanupError', {
+          configurable: true,
+          enumerable: false,
+          value: cleanupError,
+          writable: true,
+        });
+      }
+    }
+    throw callbackError;
+  }
+  if (cleanupError) throw cleanupError;
+  return callbackResult;
+}
+
 function withDisposableDatabase(database, callback) {
   assert.match(database, /^alphascreen_[a-z0-9_]+_[0-9]+$/);
   assert.equal(sql(
@@ -341,17 +608,10 @@ function withDisposableDatabase(database, callback) {
   ).stdout, '0');
   const created = databaseCommand('createdb', database);
   assert.equal(created.status, 0, created.stderr);
-  try {
-    callback();
-  } finally {
-    const sessions = sql(`select count(*) from pg_stat_activity
-      where datname='${database}' and pid<>pg_backend_pid();`, {
-      database: 'postgres',
-    }).stdout;
-    assert.equal(sessions, '0');
-    const dropped = databaseCommand('dropdb', database);
-    assert.equal(dropped.status, 0, dropped.stderr);
-  }
+  return runWithPreservedCleanupFailure(
+    callback,
+    () => cleanupDisposableDatabase(database),
+  );
 }
 
 function prepareOwnershipBaseline(database) {
@@ -728,7 +988,7 @@ before(() => {
     insert into public.roles(id,client_id,title,slug_or_token,status)
       values ('${ID.role}','${ID.client}','Serialization role','serialization-role','active');
   `);
-  for (let index = 1; index <= 40; index += 1) {
+  for (let index = 1; index <= 45; index += 1) {
     const item = fixture(index);
     const status = index === 18 ? 'Completed' : 'Incomplete';
     const failureCode = index === 19 ? 'INTERVIEW_DISCONNECTED' : 'INTERVIEW_PROGRESS_STALLED';
@@ -783,20 +1043,239 @@ after(() => {
       { database: 'postgres' },
     ).stdout;
     if (exists === '1') {
-      const contractSessions = sql(`select count(*) from pg_stat_activity
-        where datname='${contractDatabase}' and pid<>pg_backend_pid();`, {
-        database: 'postgres',
-      }).stdout;
-      assert.equal(contractSessions, '0');
-      const contractDropped = databaseCommand('dropdb', contractDatabase);
-      assert.equal(contractDropped.status, 0, contractDropped.stderr);
+      cleanupDisposableDatabase(contractDatabase);
     }
   }
-  const sessions = sql(`select count(*) from pg_stat_activity
-    where datname='${DATABASE}' and pid<>pg_backend_pid();`).stdout;
-  assert.equal(sessions, '0');
-  const dropped = databaseCommand('dropdb', DATABASE);
-  assert.equal(dropped.status, 0, dropped.stderr);
+  cleanupDisposableDatabase(DATABASE);
+  console.log('[serialization-db] session_drain_summary', {
+    timeout_ms: SESSION_DRAIN_TIMEOUT_MS,
+    interval_ms: SESSION_DRAIN_INTERVAL_MS,
+    stable_zero_observations: SESSION_DRAIN_STABLE_ZERO_OBSERVATIONS,
+    maximum_observed_drain_ms: maximumObservedSessionDrainMs,
+    maximum_observed_poll_attempts: maximumObservedSessionDrainAttempts,
+    maximum_observed_stable_zero_resets: maximumObservedSessionDrainResets,
+  });
+});
+
+test('serialization session-drain helper is bounded, strict, and diagnostic-safe', async (t) => {
+  const database = 'alphascreen_session_drain_999999';
+  const sessionState = (count, states = [], overrides = {}) => ({
+    count,
+    states,
+    preparedTransactions: 0,
+    taskLocks: 0,
+    ...overrides,
+  });
+
+  await t.test('requires three interval-separated zero observations', () => {
+    let currentTime = 0;
+    let reads = 0;
+    const sleeps = [];
+    const result = waitForDatabaseSessionsToDrain(database, {
+      now: () => currentTime,
+      sleep: (milliseconds) => {
+        sleeps.push(milliseconds);
+        currentTime += milliseconds;
+      },
+      readSessionState: () => {
+        reads += 1;
+        return sessionState(0);
+      },
+      recordObservation: false,
+    });
+    assert.deepEqual(result, {
+      elapsedMs: 100,
+      attempts: 3,
+      consecutiveZeroCount: 3,
+      stableZeroResetCount: 0,
+      finalSessionState: sessionState(0),
+    });
+    assert.deepEqual(sleeps, [50, 50]);
+    assert.equal(reads, 3);
+  });
+
+  await t.test('resets quiescence when a session reappears after one zero', () => {
+    let currentTime = 0;
+    let reads = 0;
+    const sleeps = [];
+    const sessionCounts = [0, 1, 0, 0, 0];
+    const result = waitForDatabaseSessionsToDrain(database, {
+      timeoutMs: 500,
+      intervalMs: 50,
+      now: () => currentTime,
+      sleep: (milliseconds) => {
+        sleeps.push(milliseconds);
+        currentTime += milliseconds;
+      },
+      readSessionState: () => sessionState(sessionCounts[reads++] ?? 0, ['idle']),
+      recordObservation: false,
+    });
+    assert.deepEqual(result, {
+      elapsedMs: 200,
+      attempts: 5,
+      consecutiveZeroCount: 3,
+      stableZeroResetCount: 1,
+      finalSessionState: sessionState(0, ['idle']),
+    });
+    assert.deepEqual(sleeps, [50, 50, 50, 50]);
+    assert.equal(reads, 5);
+  });
+
+  await t.test('resets quiescence when a session appears after two zeros', () => {
+    let currentTime = 0;
+    let reads = 0;
+    const sleeps = [];
+    const sessionCounts = [0, 0, 1, 0, 0, 0];
+    const result = waitForDatabaseSessionsToDrain(database, {
+      timeoutMs: 500,
+      intervalMs: 50,
+      now: () => currentTime,
+      sleep: (milliseconds) => {
+        sleeps.push(milliseconds);
+        currentTime += milliseconds;
+      },
+      readSessionState: () => sessionState(sessionCounts[reads++] ?? 0, ['idle']),
+      recordObservation: false,
+    });
+    assert.deepEqual(result, {
+      elapsedMs: 250,
+      attempts: 6,
+      consecutiveZeroCount: 3,
+      stableZeroResetCount: 1,
+      finalSessionState: sessionState(0, ['idle']),
+    });
+    assert.deepEqual(sleeps, [50, 50, 50, 50, 50]);
+    assert.equal(reads, 6);
+  });
+
+  await t.test('persistent sessions fail at the bounded deadline', () => {
+    let currentTime = 0;
+    let reads = 0;
+    assert.throws(
+      () => waitForDatabaseSessionsToDrain(database, {
+        timeoutMs: 100,
+        intervalMs: 40,
+        now: () => currentTime,
+        sleep: (milliseconds) => {
+          currentTime += milliseconds;
+        },
+        readSessionState: () => {
+          reads += 1;
+          return sessionState(1, ['idle', 'sensitive-application-state']);
+        },
+        recordObservation: false,
+      }),
+      (error) => {
+        assert.match(
+          error.message,
+          /^database_session_drain_timeout database=alphascreen_session_drain_999999 /,
+        );
+        assert.match(error.message, /remaining_sessions=1/);
+        assert.match(error.message, /states=idle,unknown/);
+        assert.match(error.message, /consecutive_zero_count=0/);
+        assert.match(error.message, /required_stable_zero_count=3/);
+        assert.match(error.message, /elapsed_ms=100/);
+        assert.match(error.message, /attempts=4$/);
+        assert.doesNotMatch(error.message, /sensitive-application-state/);
+        assert.doesNotMatch(error.message, /query|credential|client|address/i);
+        return true;
+      },
+    );
+    assert.equal(reads, 4);
+  });
+
+  await t.test('oscillating sessions cannot satisfy stable quiescence', () => {
+    let currentTime = 0;
+    let reads = 0;
+    const sessionCounts = [0, 1, 0, 1];
+    assert.throws(
+      () => waitForDatabaseSessionsToDrain(database, {
+        timeoutMs: 100,
+        intervalMs: 40,
+        now: () => currentTime,
+        sleep: (milliseconds) => {
+          currentTime += milliseconds;
+        },
+        readSessionState: () => sessionState(
+          sessionCounts[reads++] ?? 1,
+          ['active'],
+        ),
+        recordObservation: false,
+      }),
+      (error) => {
+        assert.match(error.message, /remaining_sessions=1/);
+        assert.match(error.message, /states=active/);
+        assert.match(error.message, /consecutive_zero_count=0/);
+        assert.match(error.message, /required_stable_zero_count=3/);
+        assert.match(error.message, /elapsed_ms=100/);
+        assert.match(error.message, /attempts=4$/);
+        return true;
+      },
+    );
+    assert.equal(reads, 4);
+  });
+
+  await t.test('late task locks reset the same bounded quiescence window', () => {
+    let currentTime = 0;
+    let reads = 0;
+    const lockCounts = [0, 3, 0, 0, 0];
+    const result = waitForDatabaseSessionsToDrain(database, {
+      timeoutMs: 500,
+      intervalMs: 50,
+      now: () => currentTime,
+      sleep: (milliseconds) => {
+        currentTime += milliseconds;
+      },
+      readSessionState: () => sessionState(0, [], {
+        taskLocks: lockCounts[reads++] ?? 0,
+      }),
+      recordObservation: false,
+    });
+    assert.deepEqual(result, {
+      elapsedMs: 200,
+      attempts: 5,
+      consecutiveZeroCount: 3,
+      stableZeroResetCount: 1,
+      finalSessionState: sessionState(0),
+    });
+    assert.equal(reads, 5);
+  });
+});
+
+test('serialization cleanup preserves primary failures deterministically', async (t) => {
+  await t.test('body failure remains primary when cleanup succeeds', () => {
+    const bodyError = new Error('synthetic_body_failure');
+    assert.throws(
+      () => runWithPreservedCleanupFailure(
+        () => { throw bodyError; },
+        () => {},
+      ),
+      (error) => error === bodyError && error.cause === undefined,
+    );
+  });
+
+  await t.test('cleanup failure is thrown when the body succeeds', () => {
+    const cleanupError = new Error('synthetic_cleanup_failure');
+    assert.throws(
+      () => runWithPreservedCleanupFailure(
+        () => 'body-result',
+        () => { throw cleanupError; },
+      ),
+      (error) => error === cleanupError,
+    );
+  });
+
+  await t.test('body failure remains primary and cleanup is attached as cause', () => {
+    const bodyError = new Error('synthetic_body_failure');
+    const cleanupError = new Error('synthetic_cleanup_failure');
+    assert.throws(
+      () => runWithPreservedCleanupFailure(
+        () => { throw bodyError; },
+        () => { throw cleanupError; },
+      ),
+      (error) => error === bodyError && error.cause === cleanupError,
+    );
+  });
 });
 
 test('serialization DB 1. migration applies and reapplies without changing historical interviews', { skip: !ENABLED }, () => {
@@ -810,13 +1289,19 @@ test('serialization DB 1. migration applies and reapplies without changing histo
     "select to_regprocedure('private.is_valid_interview_transcript_scores(jsonb)') is not null;",
   ).stdout, 't');
   assert.equal(sql(`
-    with expected(column_name, type_oid) as (
+    with expected(
+      column_name,
+      type_oid,
+      not_null,
+      default_expression,
+      dimensions
+    ) as (
       values
-        ('conversation_id', 'text'::regtype::oid),
-        ('transcript_scores', 'jsonb'::regtype::oid),
-        ('interview_summary', 'text'::regtype::oid),
-        ('unanswered_candidate_questions', 'jsonb'::regtype::oid),
-        ('interview_analysis_v2', 'jsonb'::regtype::oid)
+        ('conversation_id', 'text'::regtype::oid, false, null::text, 0),
+        ('transcript_scores', 'jsonb'::regtype::oid, true, '''{}''::jsonb', 0),
+        ('interview_summary', 'text'::regtype::oid, false, null::text, 0),
+        ('unanswered_candidate_questions', 'text[]'::regtype::oid, true, '''{}''::text[]', 1),
+        ('interview_analysis_v2', 'jsonb'::regtype::oid, false, null::text, 0)
     )
     select count(*)
     from expected
@@ -825,20 +1310,27 @@ test('serialization DB 1. migration applies and reapplies without changing histo
       and attribute.attname=expected.column_name
       and attribute.attnum>0
       and not attribute.attisdropped
+    left join pg_catalog.pg_attrdef as default_definition
+      on default_definition.adrelid=attribute.attrelid
+      and default_definition.adnum=attribute.attnum
     where attribute.atttypid=expected.type_oid
-      and not attribute.attnotnull
-      and not attribute.atthasdef
+      and attribute.attnotnull=expected.not_null
+      and pg_catalog.pg_get_expr(
+        default_definition.adbin,
+        default_definition.adrelid
+      ) is not distinct from expected.default_expression
+      and attribute.attndims=expected.dimensions
       and attribute.attgenerated=''
       and attribute.attidentity='';`).stdout, '5');
   assert.equal(sql(`select count(*) from public.interviews
     where conversation_id is not null
-      or transcript_scores is not null
+      or transcript_scores <> '{}'::jsonb
       or interview_summary is not null
-      or unanswered_candidate_questions is not null
+      or unanswered_candidate_questions <> '{}'::text[]
       or interview_analysis_v2 is not null;`).stdout, '0');
 });
 
-test('serialization DB 1b. compatible pre-existing interview columns are accepted as a no-op', { skip: !ENABLED }, () => {
+test('serialization DB 1b. actual QA legacy interview columns and populated values are preserved as a no-op', { skip: !ENABLED }, () => {
   assert.match(COMPATIBLE_DATABASE, /^alphascreen_fts_contract_compatible_[0-9]+$/);
   assert.equal(sql(
     `select count(*) from pg_database where datname='${COMPATIBLE_DATABASE}';`,
@@ -846,67 +1338,165 @@ test('serialization DB 1b. compatible pre-existing interview columns are accepte
   ).stdout, '0');
   const created = databaseCommand('createdb', COMPATIBLE_DATABASE);
   assert.equal(created.status, 0, created.stderr);
-  try {
+  runWithPreservedCleanupFailure(() => {
     applyFile(COMPATIBLE_DATABASE, BOOTSTRAP);
     applyFile(COMPATIBLE_DATABASE, PHASE_B);
     applyFile(COMPATIBLE_DATABASE, CORE);
     sql(`alter table public.interviews
-      add column conversation_id text null,
-      add column transcript_scores jsonb null,
+      add column transcript_scores jsonb not null default '{}'::jsonb,
       add column interview_summary text null,
-      add column unanswered_candidate_questions jsonb null,
+      add column unanswered_candidate_questions text[] not null default '{}'::text[],
       add column interview_analysis_v2 jsonb null;`, {
       database: COMPATIBLE_DATABASE,
     });
+    const emptyId = '77000000-0000-4000-8000-000000000071';
+    const populatedId = '77000000-0000-4000-8000-000000000072';
+    sql(`
+      insert into public.interviews(id,status,updated_at)
+        values ('${emptyId}','Incomplete','2026-07-01T00:00:00Z');
+      insert into public.interviews(
+        id,status,transcript_scores,interview_summary,
+        unanswered_candidate_questions,interview_analysis_v2,updated_at
+      ) values (
+        '${populatedId}',
+        'Completed',
+        '{"overall":81,"sentinel":"legacy"}'::jsonb,
+        'Synthetic legacy summary.',
+        array['Synthetic legacy question?']::text[],
+        '{"version":"legacy","sentinel":true}'::jsonb,
+        '2026-07-02T00:00:00Z'
+      );
+    `, { database: COMPATIBLE_DATABASE });
+    const beforeValues = sql(`
+      select pg_catalog.md5(pg_catalog.string_agg(
+        id::text || '|' ||
+        transcript_scores::text || '|' ||
+        coalesce(interview_summary,'') || '|' ||
+        unanswered_candidate_questions::text || '|' ||
+        coalesce(interview_analysis_v2::text,'') || '|' ||
+        updated_at::text,
+        E'\\n' order by id
+      ))
+      from public.interviews
+      where id in ('${emptyId}','${populatedId}');`, {
+      database: COMPATIBLE_DATABASE,
+    }).stdout;
     applyFile(COMPATIBLE_DATABASE, SERIALIZATION);
     applyFile(COMPATIBLE_DATABASE, SERIALIZATION);
+    const afterValues = sql(`
+      select pg_catalog.md5(pg_catalog.string_agg(
+        id::text || '|' ||
+        transcript_scores::text || '|' ||
+        coalesce(interview_summary,'') || '|' ||
+        unanswered_candidate_questions::text || '|' ||
+        coalesce(interview_analysis_v2::text,'') || '|' ||
+        updated_at::text,
+        E'\\n' order by id
+      ))
+      from public.interviews
+      where id in ('${emptyId}','${populatedId}');`, {
+      database: COMPATIBLE_DATABASE,
+    }).stdout;
+    assert.equal(afterValues, beforeValues);
     assert.equal(sql(`
-      select count(*)
+      select
+        pg_catalog.format_type(scores.atttypid,scores.atttypmod) || '|' ||
+        scores.attnotnull::text || '|' ||
+        pg_catalog.pg_get_expr(scores_default.adbin,scores_default.adrelid) || '|' ||
+        pg_catalog.format_type(questions.atttypid,questions.atttypmod) || '|' ||
+        questions.attnotnull::text || '|' ||
+        questions.attndims::text || '|' ||
+        pg_catalog.pg_get_expr(questions_default.adbin,questions_default.adrelid)
+      from pg_catalog.pg_attribute scores
+      join pg_catalog.pg_attribute questions
+        on questions.attrelid=scores.attrelid
+        and questions.attname='unanswered_candidate_questions'
+      join pg_catalog.pg_attrdef scores_default
+        on scores_default.adrelid=scores.attrelid
+        and scores_default.adnum=scores.attnum
+      join pg_catalog.pg_attrdef questions_default
+        on questions_default.adrelid=questions.attrelid
+        and questions_default.adnum=questions.attnum
+      where scores.attrelid='public.interviews'::regclass
+        and scores.attname='transcript_scores';`, {
+      database: COMPATIBLE_DATABASE,
+    }).stdout, "jsonb|true|'{}'::jsonb|text[]|true|1|'{}'::text[]");
+    assert.equal(sql(`
+      select pg_catalog.format_type(atttypid,atttypmod) || '|' ||
+        attnotnull::text || '|' || atthasdef::text
       from pg_catalog.pg_attribute
       where attrelid='public.interviews'::regclass
-        and attname in (
-          'conversation_id',
-          'transcript_scores',
-          'interview_summary',
-          'unanswered_candidate_questions',
-          'interview_analysis_v2'
-        )
+        and attname='conversation_id'
         and attnum>0
-        and not attisdropped
-        and not attnotnull
-        and not atthasdef
-        and attgenerated=''
-        and attidentity='';`, {
+        and not attisdropped;`, {
       database: COMPATIBLE_DATABASE,
-    }).stdout, '5');
-  } finally {
-    const sessions = sql(`select count(*) from pg_stat_activity
-      where datname='${COMPATIBLE_DATABASE}' and pid<>pg_backend_pid();`, {
-      database: 'postgres',
-    }).stdout;
-    assert.equal(sessions, '0');
-    const dropped = databaseCommand('dropdb', COMPATIBLE_DATABASE);
-    assert.equal(dropped.status, 0, dropped.stderr);
-  }
+    }).stdout, 'text|false|false');
+    assert.equal(sql(`
+      insert into public.interviews(id,status)
+        values ('77000000-0000-4000-8000-000000000073','Incomplete')
+        returning transcript_scores::text || '|' ||
+          unanswered_candidate_questions::text;`, {
+      database: COMPATIBLE_DATABASE,
+    }).stdout, '{}|{}');
+    assert.equal(sql(`
+      update public.interviews
+      set transcript_scores='{"overall":65}'::jsonb,
+          unanswered_candidate_questions=array['Synthetic old-backend question?']::text[],
+          interview_summary='Synthetic old-backend summary.',
+          interview_analysis_v2='{"version":"legacy"}'::jsonb,
+          conversation_id='synthetic-old-backend-conversation'
+      where id='77000000-0000-4000-8000-000000000073';
+      select transcript_scores->>'overall' || '|' ||
+        unanswered_candidate_questions[1] || '|' ||
+        interview_summary || '|' ||
+        (interview_analysis_v2->>'version') || '|' ||
+        conversation_id
+      from public.interviews
+      where id='77000000-0000-4000-8000-000000000073';`, {
+      database: COMPATIBLE_DATABASE,
+    }).stdout, '65|Synthetic old-backend question?|Synthetic old-backend summary.|legacy|synthetic-old-backend-conversation');
+  }, () => cleanupDisposableDatabase(COMPATIBLE_DATABASE));
 });
 
 test('serialization DB 1c. every incompatible pre-existing interview column contract fails clearly', { skip: !ENABLED }, () => {
   const definitions = new Map([
-    ['type', 'conversation_id integer null'],
-    ['nullability', 'conversation_id text not null'],
-    ['default', "conversation_id text null default 'synthetic'"],
-    ['generated', "conversation_id text generated always as ('synthetic'::text) stored"],
-    ['identity', 'conversation_id bigint generated always as identity'],
-    ['questions_type', 'unanswered_candidate_questions text null'],
-    ['questions_nullability', "unanswered_candidate_questions jsonb not null default '[]'::jsonb"],
-    ['questions_default', "unanswered_candidate_questions jsonb null default '[]'::jsonb"],
-    ['questions_generated', "unanswered_candidate_questions jsonb generated always as ('[]'::jsonb) stored"],
-    ['questions_identity', 'unanswered_candidate_questions bigint generated always as identity'],
-    ['analysis_type', 'interview_analysis_v2 text null'],
-    ['analysis_nullability', "interview_analysis_v2 jsonb not null default '{}'::jsonb"],
-    ['analysis_default', "interview_analysis_v2 jsonb null default '{}'::jsonb"],
-    ['analysis_generated', "interview_analysis_v2 jsonb generated always as ('{}'::jsonb) stored"],
-    ['analysis_identity', 'interview_analysis_v2 bigint generated always as identity'],
+    ['conversation_type', { columnSql: 'conversation_id integer null' }],
+    ['conversation_nullability', { columnSql: 'conversation_id text not null' }],
+    ['conversation_default', { columnSql: "conversation_id text null default 'synthetic'" }],
+    ['conversation_generated', { columnSql: "conversation_id text generated always as ('synthetic'::text) stored" }],
+    ['conversation_identity', { columnSql: 'conversation_id bigint generated always as identity' }],
+    ['scores_type', { columnSql: "transcript_scores text not null default ''" }],
+    ['scores_json', { columnSql: "transcript_scores json not null default '{}'::json" }],
+    ['scores_nullability', { columnSql: "transcript_scores jsonb null default '{}'::jsonb" }],
+    ['scores_default', { columnSql: "transcript_scores jsonb not null default '[]'::jsonb" }],
+    ['scores_generated', { columnSql: "transcript_scores jsonb generated always as ('{}'::jsonb) stored" }],
+    ['scores_identity', { columnSql: 'transcript_scores bigint generated always as identity' }],
+    ['scores_domain', {
+      prelude: 'create domain public.synthetic_scores_domain as jsonb;',
+      columnSql: "transcript_scores public.synthetic_scores_domain not null default '{}'::jsonb",
+    }],
+    ['questions_type', { columnSql: "unanswered_candidate_questions jsonb not null default '{}'::jsonb" }],
+    ['questions_scalar_text', { columnSql: "unanswered_candidate_questions text not null default ''" }],
+    ['questions_nullability', { columnSql: "unanswered_candidate_questions text[] null default '{}'::text[]" }],
+    ['questions_default', { columnSql: "unanswered_candidate_questions text[] not null default array['synthetic']::text[]" }],
+    ['questions_generated', { columnSql: "unanswered_candidate_questions text[] generated always as (array['synthetic']::text[]) stored" }],
+    ['questions_identity', { columnSql: 'unanswered_candidate_questions bigint generated always as identity' }],
+    ['questions_domain', {
+      prelude: 'create domain public.synthetic_questions_domain as text[];',
+      columnSql: "unanswered_candidate_questions public.synthetic_questions_domain not null default '{}'::text[]",
+    }],
+    ['questions_multidimensional', { columnSql: "unanswered_candidate_questions text[][] not null default '{}'::text[]" }],
+    ['questions_element_type', { columnSql: "unanswered_candidate_questions varchar[] not null default '{}'::varchar[]" }],
+    ['summary_type', { columnSql: 'interview_summary integer null' }],
+    ['summary_nullability', { columnSql: "interview_summary text not null default ''" }],
+    ['summary_default', { columnSql: "interview_summary text null default 'synthetic'" }],
+    ['summary_generated', { columnSql: "interview_summary text generated always as ('synthetic'::text) stored" }],
+    ['summary_identity', { columnSql: 'interview_summary bigint generated always as identity' }],
+    ['analysis_type', { columnSql: 'interview_analysis_v2 text null' }],
+    ['analysis_nullability', { columnSql: "interview_analysis_v2 jsonb not null default '{}'::jsonb" }],
+    ['analysis_default', { columnSql: "interview_analysis_v2 jsonb null default '{}'::jsonb" }],
+    ['analysis_generated', { columnSql: "interview_analysis_v2 jsonb generated always as ('{}'::jsonb) stored" }],
+    ['analysis_identity', { columnSql: 'interview_analysis_v2 bigint generated always as identity' }],
   ]);
 
   for (const [contract, contractDatabase] of INCOMPATIBLE_DATABASES) {
@@ -917,11 +1507,16 @@ test('serialization DB 1c. every incompatible pre-existing interview column cont
     ).stdout, '0');
     const created = databaseCommand('createdb', contractDatabase);
     assert.equal(created.status, 0, created.stderr);
-    try {
+    runWithPreservedCleanupFailure(() => {
       applyFile(contractDatabase, BOOTSTRAP);
       applyFile(contractDatabase, PHASE_B);
       applyFile(contractDatabase, CORE);
-      sql(`alter table public.interviews add column ${definitions.get(contract)};`, {
+      const definition = definitions.get(contract);
+      assert.ok(definition, contract);
+      if (definition.prelude) {
+        sql(definition.prelude, { database: contractDatabase });
+      }
+      sql(`alter table public.interviews add column ${definition.columnSql};`, {
         database: contractDatabase,
       });
       const rejected = applyFile(contractDatabase, SERIALIZATION, { allowFailure: true });
@@ -932,6 +1527,10 @@ test('serialization DB 1c. every incompatible pre-existing interview column cont
           `final_transcript_interview_column_contract_mismatch[\\s\\S]*column=${
             contract.startsWith('questions_')
               ? 'unanswered_candidate_questions'
+              : contract.startsWith('scores_')
+                ? 'transcript_scores'
+              : contract.startsWith('summary_')
+                ? 'interview_summary'
               : contract.startsWith('analysis_')
                 ? 'interview_analysis_v2'
               : 'conversation_id'
@@ -939,15 +1538,7 @@ test('serialization DB 1c. every incompatible pre-existing interview column cont
           'i',
         ),
       );
-    } finally {
-      const sessions = sql(`select count(*) from pg_stat_activity
-        where datname='${contractDatabase}' and pid<>pg_backend_pid();`, {
-        database: 'postgres',
-      }).stdout;
-      assert.equal(sessions, '0');
-      const dropped = databaseCommand('dropdb', contractDatabase);
-      assert.equal(dropped.status, 0, dropped.stderr);
-    }
+    }, () => cleanupDisposableDatabase(contractDatabase));
   }
 });
 
@@ -1332,6 +1923,39 @@ test('serialization DB 2d. score boundary and enum objects finalize through the 
   }
 });
 
+test('serialization DB 2e. legacy empty score defaults require scoring and change only on valid finalization', { skip: !ENABLED }, () => {
+  const item = fixture(41);
+  assert.equal(sql(`select transcript_scores='{}'::jsonb
+      and unanswered_candidate_questions='{}'::text[]
+      and transcript_scores is not null
+    from public.interviews
+    where id='${item.interviewId}';`).stdout, 't');
+
+  const claim = parseClaim(sql(claimSql(item)).stdout);
+  assert.equal(claim.outcome, 'claimed');
+  assert.equal(claim.scoringRequired, true);
+
+  const rejected = sql(finalizeSql(item, claim, { scores: {} }), {
+    allowFailure: true,
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /invalid_transcript_scores/i);
+  assert.equal(sql(`select transcript_scores='{}'::jsonb
+      and unanswered_candidate_questions='{}'::text[]
+    from public.interviews
+    where id='${item.interviewId}';`).stdout, 't');
+
+  assert.equal(
+    sql(finalizeSql(item, claim, { scores: VALID_TRANSCRIPT_SCORES })).stdout.split('|')[0],
+    'finalized',
+  );
+  assert.equal(sql(`select transcript_scores=${json(VALID_TRANSCRIPT_SCORES)}
+      and transcript_scores is not null
+      and unanswered_candidate_questions='{}'::text[]
+    from public.interviews
+    where id='${item.interviewId}';`).stdout, 't');
+});
+
 test('serialization DB 3. twenty barrier-released first claims yield one owner and nineteen busy results', { skip: !ENABLED }, async () => {
   const item = fixture(1);
   const results = await concurrentSql(Array.from({ length: 20 }, () => claimSql(item)));
@@ -1691,7 +2315,7 @@ test('serialization DB 18. authoritative unanswered questions store once and rej
     sql(persistQuestionsSql(item, claim.version, hash('wrong hash'), questions)).stdout,
     'superseded',
   );
-  assert.equal(sql(`select jsonb_array_length(unanswered_candidate_questions)
+  assert.equal(sql(`select cardinality(unanswered_candidate_questions)
     from public.interviews where id='${item.interviewId}';`).stdout, '2');
   assert.equal(sql(`select processing_state||'|'||claim_version||'|'||
     authoritative_transcript_hash||'|'||authoritative_transcript_storage_ref
@@ -1736,7 +2360,7 @@ test('serialization DB 19. incomplete claims, missing interviews, and invalid qu
       'invalid_questions',
     );
   }
-  assert.equal(sql(`select unanswered_candidate_questions is null
+  assert.equal(sql(`select unanswered_candidate_questions = '{}'::text[]
     from public.interviews where id='${item.interviewId}';`).stdout, 't');
   assert.equal(sql(releaseSql(item, claim)).stdout, 'released');
 });
@@ -1754,7 +2378,7 @@ test('serialization DB 20. concurrent authoritative question writers store exact
   const outcomes = results.map((result) => result.stdout.trim().split(/\r?\n/).at(-1));
   assert.equal(outcomes.filter((outcome) => outcome === 'stored').length, 1);
   assert.equal(outcomes.filter((outcome) => outcome === 'already_present').length, 1);
-  assert.equal(sql(`select jsonb_array_length(unanswered_candidate_questions)
+  assert.equal(sql(`select cardinality(unanswered_candidate_questions)
     from public.interviews where id='${item.interviewId}';`).stdout, '1');
 });
 
@@ -1808,7 +2432,7 @@ test('serialization DB 21. stronger finalization wins before a queued stale ques
   assert.equal(stale.status, 0, stale.stderr);
   assert.equal(finalized.stdout.trim().split(/\r?\n/).at(-1).split('|')[0], 'finalized');
   assert.equal(stale.stdout.trim().split(/\r?\n/).at(-1), 'superseded');
-  assert.equal(sql(`select unanswered_candidate_questions is null
+  assert.equal(sql(`select unanswered_candidate_questions = '{}'::text[]
     from public.interviews where id='${strong.interviewId}';`).stdout, 't');
   assert.equal(
     sql(persistQuestionsSql(
@@ -1819,7 +2443,7 @@ test('serialization DB 21. stronger finalization wins before a queued stale ques
     )).stdout,
     'stored',
   );
-  assert.equal(sql(`select jsonb_array_length(unanswered_candidate_questions)
+  assert.equal(sql(`select cardinality(unanswered_candidate_questions)
     from public.interviews where id='${strong.interviewId}';`).stdout, '1');
 });
 
@@ -1838,7 +2462,7 @@ test('serialization DB 22. failed question persistence rolls back without changi
   sql(`
     create function public.synthetic_question_persistence_failure() returns trigger language plpgsql as $$
     begin
-      if new.unanswered_candidate_questions is not null then
+      if cardinality(new.unanswered_candidate_questions) > 0 then
         raise exception 'synthetic_question_persistence_failure';
       end if;
       return new;
@@ -1853,7 +2477,7 @@ test('serialization DB 22. failed question persistence rolls back without changi
   );
   assert.notEqual(failed.status, 0);
   assert.match(failed.stderr, /synthetic_question_persistence_failure/i);
-  assert.equal(sql(`select unanswered_candidate_questions is null
+  assert.equal(sql(`select unanswered_candidate_questions = '{}'::text[]
     from public.interviews where id='${item.interviewId}';`).stdout, 't');
   assert.equal(sql(`select row_to_json(c)::text
     from private.interview_final_transcript_reconciliation_claims c

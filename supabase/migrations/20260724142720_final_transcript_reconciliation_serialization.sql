@@ -5,63 +5,125 @@ create schema if not exists private;
 
 alter table public.interviews
   add column if not exists conversation_id text null,
-  add column if not exists transcript_scores jsonb null,
+  add column if not exists transcript_scores jsonb not null default '{}'::jsonb,
   add column if not exists interview_summary text null,
-  add column if not exists unanswered_candidate_questions jsonb null,
+  add column if not exists unanswered_candidate_questions text[] not null default '{}'::text[],
   add column if not exists interview_analysis_v2 jsonb null;
 
 do $$
 declare
-  v_column_name text;
-  v_expected_type oid;
+  v_expected record;
   v_actual_type oid;
+  v_actual_typmod integer;
   v_not_null boolean;
-  v_has_default boolean;
+  v_default_expression text;
   v_generated text;
   v_identity text;
+  v_dimensions integer;
+  v_collation oid;
 begin
-  for v_column_name, v_expected_type in
+  for v_expected in
     select *
     from (values
-      ('conversation_id', 'text'::regtype::oid),
-      ('transcript_scores', 'jsonb'::regtype::oid),
-      ('interview_summary', 'text'::regtype::oid),
-      ('unanswered_candidate_questions', 'jsonb'::regtype::oid),
-      ('interview_analysis_v2', 'jsonb'::regtype::oid)
-    ) as expected(column_name, expected_type)
+      (
+        'conversation_id',
+        'text'::regtype::oid,
+        -1,
+        false,
+        null::text,
+        0,
+        'pg_catalog."default"'::regcollation::oid
+      ),
+      (
+        'transcript_scores',
+        'jsonb'::regtype::oid,
+        -1,
+        true,
+        '''{}''::jsonb',
+        0,
+        0::oid
+      ),
+      (
+        'interview_summary',
+        'text'::regtype::oid,
+        -1,
+        false,
+        null::text,
+        0,
+        'pg_catalog."default"'::regcollation::oid
+      ),
+      (
+        'unanswered_candidate_questions',
+        'text[]'::regtype::oid,
+        -1,
+        true,
+        '''{}''::text[]',
+        1,
+        'pg_catalog."default"'::regcollation::oid
+      ),
+      (
+        'interview_analysis_v2',
+        'jsonb'::regtype::oid,
+        -1,
+        false,
+        null::text,
+        0,
+        0::oid
+      )
+    ) as expected(
+      column_name,
+      expected_type,
+      expected_typmod,
+      expected_not_null,
+      expected_default_expression,
+      expected_dimensions,
+      expected_collation
+    )
   loop
     select
       attribute.atttypid,
+      attribute.atttypmod,
       attribute.attnotnull,
-      attribute.atthasdef,
+      pg_catalog.pg_get_expr(
+        default_definition.adbin,
+        default_definition.adrelid
+      ),
       attribute.attgenerated::text,
-      attribute.attidentity::text
+      attribute.attidentity::text,
+      attribute.attndims,
+      attribute.attcollation
     into
       v_actual_type,
+      v_actual_typmod,
       v_not_null,
-      v_has_default,
+      v_default_expression,
       v_generated,
-      v_identity
+      v_identity,
+      v_dimensions,
+      v_collation
     from pg_catalog.pg_attribute as attribute
+    left join pg_catalog.pg_attrdef as default_definition
+      on default_definition.adrelid = attribute.attrelid
+      and default_definition.adnum = attribute.attnum
     where attribute.attrelid = 'public.interviews'::regclass
-      and attribute.attname = v_column_name
+      and attribute.attname = v_expected.column_name
       and attribute.attnum > 0
       and not attribute.attisdropped;
 
     if not found
-      or v_actual_type <> v_expected_type
-      or v_not_null
-      or v_has_default
+      or v_actual_type <> v_expected.expected_type
+      or v_actual_typmod <> v_expected.expected_typmod
+      or v_not_null <> v_expected.expected_not_null
+      or v_default_expression is distinct from
+        v_expected.expected_default_expression
       or v_generated <> ''
-      or v_identity <> '' then
+      or v_identity <> ''
+      or v_dimensions <> v_expected.expected_dimensions
+      or v_collation <> v_expected.expected_collation then
       raise exception using
         errcode = 'P0001',
         message = 'final_transcript_interview_column_contract_mismatch',
-        detail = format(
-          'column=%I expected_type=%s nullable=true default=none generated=none identity=none',
-          v_column_name,
-          pg_catalog.format_type(v_expected_type, null)
-        );
+        detail = format('column=%I category=definition', v_expected.column_name);
     end if;
   end loop;
 end
@@ -1867,6 +1929,7 @@ as $$
 declare
   v_claim private.interview_final_transcript_reconciliation_claims%rowtype;
   v_interview public.interviews%rowtype;
+  v_questions text[];
 begin
   if p_interview_id is null
     or p_expected_claim_version is null
@@ -1882,6 +1945,14 @@ begin
     return query select 'invalid_questions'::text;
     return;
   end if;
+
+  select pg_catalog.array_agg(
+    question.value #>> '{}'
+    order by question.ordinality
+  )
+  into v_questions
+  from pg_catalog.jsonb_array_elements(p_questions)
+    with ordinality as question(value, ordinality);
 
   select c.* into v_claim
   from private.interview_final_transcript_reconciliation_claims c
@@ -1916,25 +1987,13 @@ begin
     return;
   end if;
 
-  if v_interview.unanswered_candidate_questions is not null then
-    if jsonb_typeof(v_interview.unanswered_candidate_questions) = 'array' then
-      if jsonb_array_length(v_interview.unanswered_candidate_questions) > 0 then
-        return query select 'already_present'::text;
-        return;
-      end if;
-    elsif jsonb_typeof(v_interview.unanswered_candidate_questions) = 'string' then
-      if btrim(v_interview.unanswered_candidate_questions #>> '{}') <> '' then
-        return query select 'already_present'::text;
-        return;
-      end if;
-    else
-      return query select 'already_present'::text;
-      return;
-    end if;
+  if pg_catalog.cardinality(v_interview.unanswered_candidate_questions) > 0 then
+    return query select 'already_present'::text;
+    return;
   end if;
 
   update public.interviews i
-  set unanswered_candidate_questions = p_questions
+  set unanswered_candidate_questions = v_questions
   where i.id = p_interview_id;
 
   return query select 'stored'::text;

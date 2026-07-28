@@ -3,6 +3,11 @@
 const express = require('express');
 const axios = require('axios');
 const { supabaseAdmin } = require('../src/lib/supabaseClient');
+const {
+  decodeTelemetryAuthorization,
+  diagnosticDedupeKey,
+  validateTelemetryPayload,
+} = require('../src/lib/interviewReliabilityDiagnostics');
 
 const router = express.Router();
 const EARLY_END_GRACE_MS = 15000;
@@ -336,46 +341,149 @@ router.post('/tavus/end-conversation', express.json({ limit: '1mb' }), async (re
   }
 });
 
-// Lightweight browser telemetry is intentionally separate from ending a Tavus
-// conversation. It contains only bounded lifecycle state, never transcript or
-// candidate-entered text, and is bound to the same interview/role/conversation.
-router.post('/tavus/client-telemetry', express.json({ limit: '32kb' }), async (req, res) => {
-  try {
-    const interviewId = String(req.body?.interview_id || '').trim();
-    const conversationId = String(req.body?.conversation_id || '').trim();
-    const roleToken = String(req.body?.role_token || '').trim();
-    const event = String(req.body?.event || '').trim().toLowerCase();
-    const reason = normalizeEndReason(req.body?.reason);
-    const allowedEvents = new Set(['watchdog_started', 'watchdog_timeout', 'reconnect_attempted', 'reconnect_succeeded', 'reconnect_failed', 'browser_closed_or_navigation']);
-    if (!interviewId || !conversationId || !roleToken || !allowedEvents.has(event)) {
-      return res.status(400).json({ error: 'bad_request', code: 'MISSING_REQUIRED_PARAMS' });
+function createClientTelemetryHandler({
+  database = supabaseAdmin,
+  now = () => new Date().toISOString(),
+  warn = (category) => console.warn('[tavus/client-telemetry] bounded_failure', { category }),
+} = {}) {
+  return async (req, res) => {
+    const validation = validateTelemetryPayload(req.body);
+    if (!validation.ok) {
+      return res.status(400).json({ error: 'bad_request', code: validation.code });
     }
-    const { data: role } = await supabaseAdmin.from('roles').select('id').eq('slug_or_token', roleToken).maybeSingle();
-    const { data: interview, error } = await supabaseAdmin
-      .from('interviews')
-      .select('id,role_id,tavus_application_id,reconnect_attempt_count')
-      .eq('id', interviewId)
-      .maybeSingle();
-    if (error || !role || !interview || String(interview.role_id) !== String(role.id) || String(interview.tavus_application_id) !== conversationId) {
+    if (!database) {
+      warn('database_unavailable');
+      return res.status(503).json({ error: 'temporary_service_error', code: 'CLIENT_TELEMETRY_UNAVAILABLE' });
+    }
+
+    const telemetry = validation.telemetry;
+    const headerBinding = decodeTelemetryAuthorization(req.headers?.authorization);
+    const roleToken = headerBinding?.roleToken || telemetry.roleToken;
+    const conversationId = headerBinding?.conversationId || telemetry.conversationId;
+    if (!roleToken || !conversationId) {
+      return res.status(400).json({ error: 'bad_request', code: 'MISSING_TELEMETRY_BINDING' });
+    }
+    if (
+      headerBinding &&
+      (
+        (telemetry.roleToken && telemetry.roleToken !== headerBinding.roleToken) ||
+        (telemetry.conversationId && telemetry.conversationId !== headerBinding.conversationId)
+      )
+    ) {
       return res.status(403).json({ error: 'forbidden', code: 'INTERVIEW_BINDING_MISMATCH' });
     }
-    const now = new Date().toISOString();
-    const update = { updated_at: now };
-    if (event === 'watchdog_timeout') update.watchdog_no_progress_at = now;
-    if (event === 'reconnect_attempted') {
-      update.reconnect_attempted = true;
-      update.reconnect_attempt_count = Math.min(1, Number(interview.reconnect_attempt_count || 0) + 1);
+    try {
+      const roleLookup = await database
+        .from('roles')
+        .select('id')
+        .eq('slug_or_token', roleToken)
+        .maybeSingle();
+      if (roleLookup.error) {
+        warn('role_lookup_failed');
+        return res.status(503).json({ error: 'temporary_service_error', code: 'CLIENT_TELEMETRY_UNAVAILABLE' });
+      }
+      const role = roleLookup.data;
+
+      const { data: interview, error: interviewError } = await database
+        .from('interviews')
+        .select('id,role_id,client_id,candidate_id,attempt_number,tavus_application_id,reconnect_attempt_count')
+        .eq('id', telemetry.interviewId)
+        .maybeSingle();
+      if (interviewError) {
+        warn('interview_lookup_failed');
+        return res.status(503).json({ error: 'temporary_service_error', code: 'CLIENT_TELEMETRY_UNAVAILABLE' });
+      }
+      if (
+        !role ||
+        !interview ||
+        !interview.client_id ||
+        !interview.candidate_id ||
+        !Number.isInteger(Number(interview.attempt_number)) ||
+        String(interview.role_id) !== String(role.id) ||
+        String(interview.tavus_application_id) !== conversationId
+      ) {
+        return res.status(403).json({ error: 'forbidden', code: 'INTERVIEW_BINDING_MISMATCH' });
+      }
+
+      const receivedAt = now();
+      const { error: insertError } = await database
+        .from('interview_lifecycle_events')
+        .insert({
+          interview_id: interview.id,
+          client_id: interview.client_id,
+          event_type: `client.${telemetry.event}`,
+          vendor_event_id: null,
+          dedupe_key: diagnosticDedupeKey(telemetry.eventSequence, telemetry.observedAt),
+          speaker_role: 'system',
+          utterance_classification: null,
+          observed_at: telemetry.observedAt,
+          received_at: receivedAt,
+          metadata: {
+            ...telemetry.metadata,
+            event_sequence: telemetry.eventSequence,
+          },
+        });
+
+      if (insertError?.code === '23505') {
+        return res.json({ ok: true, duplicate: true });
+      }
+      if (insertError) {
+        warn('lifecycle_persist_failed');
+        return res.status(503).json({ error: 'temporary_service_error', code: 'CLIENT_TELEMETRY_UNAVAILABLE' });
+      }
+
+      // Preserve the pre-existing Phase B summary fields for legacy events.
+      const update = {};
+      if (telemetry.event === 'watchdog_timeout') update.watchdog_no_progress_at = receivedAt;
+      if (telemetry.event === 'reconnect_attempted') {
+        update.reconnect_attempted = true;
+        update.reconnect_attempt_count = Math.min(1, Number(interview.reconnect_attempt_count || 0) + 1);
+      }
+      if (telemetry.event === 'reconnect_succeeded' || telemetry.event === 'reconnect_failed') {
+        update.reconnect_result = telemetry.event;
+      }
+      if (telemetry.event === 'browser_closed_or_navigation') {
+        update.client_end_reason = 'browser_closed_or_navigation';
+      }
+      if (
+        telemetry.reason &&
+        (
+          telemetry.event === 'watchdog_timeout' ||
+          telemetry.event === 'reconnect_attempted' ||
+          telemetry.event === 'reconnect_succeeded' ||
+          telemetry.event === 'reconnect_failed' ||
+          telemetry.event === 'browser_closed_or_navigation'
+        )
+      ) {
+        update.client_end_reason = telemetry.reason;
+      }
+
+      if (Object.keys(update).length > 0) {
+        update.updated_at = receivedAt;
+        const { error: updateError } = await database
+          .from('interviews')
+          .update(update)
+          .eq('id', interview.id);
+        if (updateError) {
+          warn('legacy_summary_update_failed');
+          return res.status(503).json({ error: 'temporary_service_error', code: 'CLIENT_TELEMETRY_UNAVAILABLE' });
+        }
+      }
+
+      return res.json({ ok: true, duplicate: false });
+    } catch {
+      warn('unexpected_failure');
+      return res.status(503).json({ error: 'temporary_service_error', code: 'CLIENT_TELEMETRY_UNAVAILABLE' });
     }
-    if (event === 'reconnect_succeeded' || event === 'reconnect_failed') update.reconnect_result = event;
-    if (event === 'browser_closed_or_navigation') update.client_end_reason = 'browser_closed_or_navigation';
-    if (reason && reason !== 'vendor_end_event') update.client_end_reason = reason;
-    const { error: updateError } = await supabaseAdmin.from('interviews').update(update).eq('id', interviewId);
-    if (updateError) throw updateError;
-    return res.json({ ok: true });
-  } catch (error) {
-    console.warn('[tavus/client-telemetry] update failed', { error: error?.message || error });
-    return res.status(503).json({ error: 'temporary_service_error', code: 'CLIENT_TELEMETRY_UNAVAILABLE' });
-  }
-});
+  };
+}
+
+// Diagnostic delivery is best effort and separate from interview control.
+router.post(
+  '/tavus/client-telemetry',
+  express.json({ limit: '8kb' }),
+  createClientTelemetryHandler(),
+);
 
 module.exports = router;
+module.exports.createClientTelemetryHandler = createClientTelemetryHandler;

@@ -132,6 +132,64 @@ test('valid telemetry is normalized without arbitrary values', () => {
   assert.equal(result.telemetry.roleToken, '');
 });
 
+test('candidate-speaking watchdog transitions use only bounded allowlisted enums', () => {
+  const cases = [
+    {
+      event: 'progress_checkpoint_updated',
+      metadata: {
+        progress_source: 'candidate_speaking_started',
+        watchdog_reset_source: 'progress_checkpoint',
+        elapsed_ms: 45000,
+        recovery_attempt: 0,
+        recovery_phase: 'idle',
+        is_recovery_active: false,
+      },
+    },
+    {
+      event: 'progress_checkpoint_updated',
+      metadata: {
+        progress_source: 'candidate_speaking_ended',
+        watchdog_reset_source: 'progress_checkpoint',
+        elapsed_ms: 60000,
+        recovery_attempt: 0,
+        recovery_phase: 'idle',
+        is_recovery_active: false,
+      },
+    },
+    {
+      event: 'watchdog_deadline_evaluated',
+      metadata: {
+        watchdog_evaluation: 'candidate_speaking_active',
+        progress_age_ms: 60000,
+        recovery_attempt: 0,
+        recovery_phase: 'idle',
+        is_recovery_active: false,
+      },
+    },
+    {
+      event: 'watchdog_deadline_evaluated',
+      metadata: {
+        watchdog_evaluation: 'candidate_speaking_protection_expired',
+        progress_age_ms: 120000,
+        recovery_attempt: 0,
+        recovery_phase: 'idle',
+        is_recovery_active: false,
+      },
+    },
+  ];
+
+  for (const [index, telemetry] of cases.entries()) {
+    const result = validateTelemetryPayload({
+      ...BASE_PAYLOAD,
+      event_sequence: index + 10,
+      reason: undefined,
+      ...telemetry,
+    });
+    assert.equal(result.ok, true, `${telemetry.event}:${telemetry.metadata.progress_source || telemetry.metadata.watchdog_evaluation}`);
+    assert.deepEqual(result.telemetry.metadata, telemetry.metadata);
+  }
+});
+
 test('unknown events, fields, metadata, nested values, and invalid bounds fail closed', () => {
   const cases = [
     [{ ...BASE_PAYLOAD, event: 'raw_provider_payload' }, 'UNKNOWN_TELEMETRY_EVENT'],

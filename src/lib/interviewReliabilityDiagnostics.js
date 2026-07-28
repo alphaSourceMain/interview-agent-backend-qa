@@ -73,12 +73,16 @@ const ENUM_FIELDS = Object.freeze({
     'replica_started_speaking',
     'replica_utterance',
     'candidate_utterance',
+    'candidate_speaking_started',
+    'candidate_speaking_ended',
   ]),
   watchdog_reset_source: new Set(['progress_checkpoint', 'reconnect_practical_progress']),
   watchdog_evaluation: new Set([
     'recovery_threshold_reached',
     'recovery_deadline_expired',
     'post_recovery_progress_stale',
+    'candidate_speaking_active',
+    'candidate_speaking_protection_expired',
   ]),
   terminal_reason: new Set([
     'watchdog_timeout',

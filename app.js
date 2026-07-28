@@ -71,6 +71,7 @@ const { normalizeCriteriaConfig, stableStringify } = require('./src/lib/candidat
 const { getRoleInterviewAvailability } = require('./src/lib/roleInterviewAvailability')
 const { getRoleJdReplacementEligibility } = require('./src/lib/roleJdReplacement')
 const { createInterviewRecoveryRouter } = require('./routes/interviewRecovery')
+const { createAdminInterviewReliabilityRouter } = require('./routes/adminInterviewReliability')
 const { normalizeUuid } = require('./src/lib/strictRequestValidation')
 const { isInterviewRecoveryCoreEnabled, isInterviewRecoveryCoreEmailEnabled } = require('./src/lib/interviewAttemptService')
 const { cleanupNoSubstantiveRecordings } = require('./src/lib/recordingCleanup')
@@ -1661,6 +1662,7 @@ const adminRouter = express.Router()
 // legacy candidate CRUD handlers: it is admin-only, client/role-bound, and
 // writes an immutable reset event through the Phase B RPC.
 adminRouter.use('/interview-recovery', requireAuth, requireAdmin, createInterviewRecoveryRouter())
+adminRouter.use('/interview-reliability', requireAuth, requireAdmin, createAdminInterviewReliabilityRouter())
 const PUBLIC_PURCHASE_PLAYBOOK_PDF_PATH = path.join(__dirname, 'templates', 'pdf', 'alphascreen-public-purchase-support-playbook.pdf')
 
 // Helper: ensure a user exists/invite; return user_id + optional action_link

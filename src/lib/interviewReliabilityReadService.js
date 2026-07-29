@@ -1,6 +1,6 @@
 'use strict';
 
-const DEFAULT_PAGE_SIZE = 25;
+const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
 const MAX_SCAN_ROWS = 2000;
 const PROCESSING_OVERDUE_MS = 60 * 60 * 1000;

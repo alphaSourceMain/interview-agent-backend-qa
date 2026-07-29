@@ -239,6 +239,7 @@ function assertNoSensitiveContent(payload) {
 }
 
 test('list query validation fails closed for unknown filters, malformed values, and oversized pages', () => {
+  assert.equal(parseListQuery({}, NOW).page_size, 20);
   assert.throws(() => parseListQuery({ surprise: 'yes' }, NOW), /Unsupported filter/);
   assert.throws(() => parseListQuery({ page_size: '101' }, NOW), /page_size is invalid/);
   assert.throws(() => parseListQuery({ sort: 'candidate_email' }, NOW), /sort is invalid/);

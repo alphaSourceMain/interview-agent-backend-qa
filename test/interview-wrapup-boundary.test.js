@@ -71,14 +71,35 @@ test('conversation context treats runtime timing state as private behavior contr
   assert.doesNotMatch(context, /If the system or front-end sends a time warning/i);
 });
 
-test('closing question is offered once and no candidate acknowledgment is required', async () => {
+test('question lock overrides rubric coverage, follow-ups, and question-count goals', async () => {
   const payload = await captureConversationPayload();
   const context = String(payload?.conversational_context || '');
 
-  assert.match(context, /invite one final candidate question when practical/i);
-  assert.match(context, /answer it briefly[\s\S]*then close immediately/i);
+  assert.match(context, /QUESTION_LOCKED/);
+  assert.match(context, /do not begin another rubric, follow-up, clarification, or assessment question/i);
+  assert.match(context, /overrides remaining rubric coverage, follow-up requirements, and question-count goals/i);
+});
+
+test('application owns the candidate-question invitation and no acknowledgment is required', async () => {
+  const payload = await captureConversationPayload();
+  const context = String(payload?.conversational_context || '');
+
+  assert.match(context, /application deterministically owns the final candidate-question invitation/i);
+  assert.match(context, /Never create or repeat that invitation independently/i);
+  assert.match(context, /answer at most one direct candidate question/i);
   assert.match(context, /do not require (?:a )?candidate acknowledgment/i);
+  assert.doesNotMatch(context, /Do you have any questions for me before we wrap up\?/i);
   assert.doesNotMatch(context, /Any other questions\? If not, just say 'no'\./i);
+});
+
+test('closing and termination states yield to the application-owned end path', async () => {
+  const payload = await captureConversationPayload();
+  const context = String(payload?.conversational_context || '');
+
+  assert.match(context, /CLOSING_ONLY/);
+  assert.match(context, /application owns that invitation/i);
+  assert.match(context, /TERMINATION_ONLY/);
+  assert.match(context, /application farewell and end-conversation backstop/i);
 });
 
 test('provider duration remains an independent hard upper bound', async () => {

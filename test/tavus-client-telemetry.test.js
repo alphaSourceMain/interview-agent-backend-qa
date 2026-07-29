@@ -12,7 +12,7 @@ const {
   diagnosticDedupeKey,
   validateTelemetryPayload,
 } = require('../src/lib/interviewReliabilityDiagnostics');
-const { createClientTelemetryHandler } = require('../routes/tavus');
+const { createClientTelemetryHandler, isIdempotentEndState } = require('../routes/tavus');
 
 const BASE_PAYLOAD = Object.freeze({
   interview_id: '00000000-0000-4000-8000-000000000001',
@@ -112,10 +112,75 @@ function createFakeDatabase(options = {}) {
 test('diagnostic contract exposes only the bounded event and metadata allowlists', () => {
   assert.equal(TELEMETRY_EVENTS.has('reconnect_started'), true);
   assert.equal(TELEMETRY_EVENTS.has('interview_terminal_requested'), true);
+  assert.equal(TELEMETRY_EVENTS.has('question_lock_entered'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_only_entered'), true);
+  assert.equal(TELEMETRY_EVENTS.has('candidate_question_invitation_sent'), true);
+  assert.equal(TELEMETRY_EVENTS.has('candidate_question_received'), true);
+  assert.equal(TELEMETRY_EVENTS.has('candidate_question_response_completed'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_farewell_started'), true);
+  assert.equal(TELEMETRY_EVENTS.has('termination_only_entered'), true);
+  assert.equal(TELEMETRY_EVENTS.has('provider_end_requested'), true);
+  assert.equal(TELEMETRY_EVENTS.has('provider_end_confirmed'), true);
+  assert.equal(TELEMETRY_EVENTS.has('post_closing_question_violation'), true);
   assert.equal(TELEMETRY_EVENTS.has('transcript_received'), false);
   assert.equal(METADATA_KEYS.has('remote_audio_state'), true);
   assert.equal(METADATA_KEYS.has('message'), false);
   assert.equal(METADATA_KEYS.has('conversation_id'), false);
+});
+
+test('provider-end state suppresses repeated terminal requests without masking a different active failure', () => {
+  assert.equal(isIdempotentEndState('ending_requested', 'completed_normally', 'completed_normally'), true);
+  assert.equal(isIdempotentEndState('ReadyForAnalysis', null, 'completed_normally'), true);
+  assert.equal(isIdempotentEndState('Ended', 'candidate_ended', 'completed_normally'), true);
+  assert.equal(isIdempotentEndState('started', null, 'completed_normally'), false);
+  assert.equal(isIdempotentEndState('ending_requested', 'completed_normally', 'reconnect_failed'), false);
+});
+
+test('closing diagnostics accept only bounded state, time, turn, and interruption metadata', () => {
+  const events = [
+    'question_lock_entered',
+    'closing_only_entered',
+    'candidate_question_invitation_sent',
+    'candidate_question_received',
+    'candidate_question_response_completed',
+    'closing_farewell_started',
+    'termination_only_entered',
+    'provider_end_requested',
+    'provider_end_confirmed',
+    'post_closing_question_violation',
+  ];
+  for (const [index, event] of events.entries()) {
+    const result = validateTelemetryPayload({
+      ...BASE_PAYLOAD,
+      event,
+      event_sequence: index + 100,
+      reason: undefined,
+      metadata: {
+        closing_state: event === 'provider_end_confirmed' ? 'ENDED' : 'CLOSING_ONLY',
+        remaining_time_bucket: '11_30',
+        turn_index: index,
+        ...(event === 'post_closing_question_violation' ? { speech_interrupted: true } : {}),
+      },
+    });
+    assert.equal(result.ok, true, event);
+  }
+
+  for (const metadata of [
+    { question_text: 'synthetic' },
+    { transcript: 'synthetic' },
+    { inference_id: 'synthetic' },
+    { provider_url: 'https://example.invalid' },
+    { closing_state: 'closing_only' },
+    { remaining_time_bucket: '29_seconds' },
+    { turn_index: 10_001 },
+  ]) {
+    assert.equal(validateTelemetryPayload({
+      ...BASE_PAYLOAD,
+      event: 'post_closing_question_violation',
+      reason: undefined,
+      metadata,
+    }).ok, false);
+  }
 });
 
 test('valid telemetry is normalized without arbitrary values', () => {

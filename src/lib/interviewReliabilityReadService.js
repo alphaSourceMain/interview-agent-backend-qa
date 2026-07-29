@@ -137,6 +137,16 @@ const EVENT_DEFINITIONS = Object.freeze({
   'client.browser_offline': ['Browser offline', 'session'],
   'client.browser_visibility_changed': ['Browser visibility changed', 'session'],
   'client.interview_terminal_requested': ['Interview termination requested', 'terminal'],
+  'client.question_lock_entered': ['Question lock entered', 'closing'],
+  'client.closing_only_entered': ['Closing-only state entered', 'closing'],
+  'client.candidate_question_invitation_sent': ['Candidate question invitation sent', 'closing'],
+  'client.candidate_question_received': ['Candidate question received', 'closing'],
+  'client.candidate_question_response_completed': ['Candidate question response completed', 'closing'],
+  'client.closing_farewell_started': ['Closing farewell started', 'closing'],
+  'client.termination_only_entered': ['Termination-only state entered', 'terminal'],
+  'client.provider_end_requested': ['Provider end requested', 'terminal'],
+  'client.provider_end_confirmed': ['Provider end confirmed', 'terminal'],
+  'client.post_closing_question_violation': ['Post-closing question blocked', 'closing'],
   'client.browser_closed_or_navigation': ['Browser closed or navigated away', 'terminal'],
   'system.replica_joined': ['Replica joined', 'participant'],
   'system.shutdown': ['Session ended', 'terminal'],
@@ -149,10 +159,12 @@ const TECHNICAL_INTEGER_FIELDS = Object.freeze({
   progress_age_ms: [0, 3_600_000],
   recovery_age_ms: [0, 3_600_000],
   participant_count: [0, 16],
+  turn_index: [0, 10_000],
 });
 const TECHNICAL_BOOLEAN_FIELDS = new Set([
   'remote_participant_present',
   'is_recovery_active',
+  'speech_interrupted',
 ]);
 const TECHNICAL_ENUM_FIELDS = Object.freeze({
   recovery_phase: new Set([
@@ -191,6 +203,19 @@ const TECHNICAL_ENUM_FIELDS = Object.freeze({
     'watchdog_timeout',
     'reconnect_failed',
     'browser_closed_or_navigation',
+  ]),
+  closing_state: new Set([
+    'INTERVIEWING',
+    'QUESTION_LOCKED',
+    'CLOSING_ONLY',
+    'TERMINATION_ONLY',
+    'ENDED',
+  ]),
+  remaining_time_bucket: new Set([
+    'over_45',
+    '31_45',
+    '11_30',
+    '0_10',
   ]),
 });
 const TECHNICAL_METADATA_FIELDS = Object.freeze([

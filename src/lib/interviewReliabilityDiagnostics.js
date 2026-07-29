@@ -20,6 +20,16 @@ const TELEMETRY_EVENTS = new Set([
   'browser_offline',
   'browser_visibility_changed',
   'interview_terminal_requested',
+  'question_lock_entered',
+  'closing_only_entered',
+  'candidate_question_invitation_sent',
+  'candidate_question_received',
+  'candidate_question_response_completed',
+  'closing_farewell_started',
+  'termination_only_entered',
+  'provider_end_requested',
+  'provider_end_confirmed',
+  'post_closing_question_violation',
   // Existing Phase B events retained for deployment compatibility.
   'watchdog_started',
   'watchdog_timeout',
@@ -44,11 +54,13 @@ const INTEGER_FIELDS = Object.freeze({
   progress_age_ms: [0, 3_600_000],
   recovery_age_ms: [0, 3_600_000],
   participant_count: [0, 16],
+  turn_index: [0, 10_000],
 });
 
 const BOOLEAN_FIELDS = new Set([
   'remote_participant_present',
   'is_recovery_active',
+  'speech_interrupted',
 ]);
 
 const ENUM_FIELDS = Object.freeze({
@@ -88,6 +100,19 @@ const ENUM_FIELDS = Object.freeze({
     'watchdog_timeout',
     'reconnect_failed',
     'browser_closed_or_navigation',
+  ]),
+  closing_state: new Set([
+    'INTERVIEWING',
+    'QUESTION_LOCKED',
+    'CLOSING_ONLY',
+    'TERMINATION_ONLY',
+    'ENDED',
+  ]),
+  remaining_time_bucket: new Set([
+    'over_45',
+    '31_45',
+    '11_30',
+    '0_10',
   ]),
 });
 

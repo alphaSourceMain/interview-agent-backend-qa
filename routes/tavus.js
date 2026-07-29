@@ -48,6 +48,26 @@ function normalizeEndReason(value) {
   return END_REASON_MAP[normalized] || 'vendor_end_event';
 }
 
+function isIdempotentEndState(status, currentEndReason, requestedEndReason) {
+  const currentStatus = String(status || '').trim().toLowerCase();
+  const storedReason = String(currentEndReason || '').trim().toLowerCase();
+  const requestedReason = String(requestedEndReason || '').trim().toLowerCase();
+  if (new Set([
+    'analyzed',
+    'complete',
+    'completed',
+    'ended',
+    'readyforanalysis',
+    'transcribed',
+    'transcriptionreceived',
+  ]).has(currentStatus)) {
+    return true;
+  }
+  return currentStatus === 'ending_requested'
+    && Boolean(storedReason)
+    && storedReason === requestedReason;
+}
+
 function hasNonEmptyText(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
@@ -114,7 +134,7 @@ router.post('/tavus/end-conversation', express.json({ limit: '1mb' }), async (re
 
     const { data: interview, error: interviewError } = await supabaseAdmin
       .from('interviews')
-      .select('id, role_id, tavus_application_id, status')
+      .select('id, role_id, tavus_application_id, status, client_end_reason')
       .eq('id', interview_id)
       .maybeSingle();
 
@@ -148,6 +168,10 @@ router.post('/tavus/end-conversation', express.json({ limit: '1mb' }), async (re
         hint: null,
         request_id
       });
+    }
+
+    if (isIdempotentEndState(interview.status, interview.client_end_reason, reason)) {
+      return res.json({ ok: true, duplicate: true, request_id });
     }
 
     const apiKey = String(process.env.TAVUS_API_KEY || '').trim();
@@ -487,3 +511,4 @@ router.post(
 
 module.exports = router;
 module.exports.createClientTelemetryHandler = createClientTelemetryHandler;
+module.exports.isIdempotentEndState = isIdempotentEndState;

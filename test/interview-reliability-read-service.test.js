@@ -302,6 +302,35 @@ test('metadata projection allowlists bounded technical fields and strips arbitra
   assert.equal(JSON.stringify(invalidValues).includes('SECRET_'), false);
 });
 
+test('closing lifecycle diagnostics render bounded labels without raw payload data', () => {
+  const sanitized = sanitizeLifecycleEvent({
+    id: 'closing-event',
+    interview_id: INTERVIEW_A,
+    event_type: 'client.post_closing_question_violation',
+    source: 'browser',
+    occurred_at: '2026-07-28T16:00:00.000Z',
+    received_at: '2026-07-28T16:00:00.100Z',
+    metadata: {
+      closing_state: 'CLOSING_ONLY',
+      remaining_time_bucket: '11_30',
+      turn_index: 4,
+      speech_interrupted: true,
+      transcript_text: 'SECRET_TRANSCRIPT_MARKER',
+      inference_id: 'SECRET_INFERENCE_MARKER',
+    },
+  }, '2026-07-28T16:00:01.000Z');
+
+  assert.equal(sanitized.event_code, 'client.post_closing_question_violation');
+  assert.equal(sanitized.event, 'Post-closing question blocked');
+  assert.deepEqual(sanitized.technical_details, {
+    closing_state: 'CLOSING_ONLY',
+    remaining_time_bucket: '11_30',
+    turn_index: 4,
+    speech_interrupted: true,
+  });
+  assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
+});
+
 test('evidence completeness is a documented signal count, not an AI score', () => {
   const timeline = lifecycleEvents().map((event) => sanitizeLifecycleEvent(event, '2026-07-28T16:00:00.000Z'));
   const complete = deriveEvidenceCompleteness(timeline, { completed_interview: true, transcript_reconciliation: 'complete' });

@@ -1804,7 +1804,7 @@ test('identical duplicate delivery cannot duplicate Analysis V2 or reconciliatio
   });
 });
 
-test('new finalization preserves unanswered-question capture and duplicate delivery cannot repeat it', async () => {
+test('new finalization excludes an answered closing-stage candidate question and duplicate delivery is deterministic', async () => {
   await withScenario({}, async (app, db) => {
     const transcript = [
       { role: 'assistant', content: 'Do you have any questions before we wrap up?' },
@@ -1817,17 +1817,17 @@ test('new finalization preserves unanswered-question capture and duplicate deliv
     const first = await postTranscription(app, { transcript });
     assert.equal(first.status, 200);
     await drainDeferred();
-    assert.equal(db.tracker.questionRpcCalls, 1);
-    assert.deepEqual(db.tracker.questionRpcOutcomes, ['stored']);
-    assert.equal(db.tracker.questionUpdates, 1);
-    assert.equal(db.interview.unanswered_candidate_questions.length, 1);
+    assert.equal(db.tracker.questionRpcCalls, 0);
+    assert.deepEqual(db.tracker.questionRpcOutcomes, []);
+    assert.equal(db.tracker.questionUpdates, 0);
+    assert.deepEqual(db.interview.unanswered_candidate_questions, []);
 
     db.options.claimOutcome = 'already_reconciled';
     const duplicate = await postTranscription(app, { transcript });
     assert.equal(duplicate.status, 200);
     await drainDeferred();
-    assert.equal(db.tracker.questionRpcCalls, 1);
-    assert.equal(db.tracker.questionUpdates, 1);
+    assert.equal(db.tracker.questionRpcCalls, 0);
+    assert.equal(db.tracker.questionUpdates, 0);
   });
 });
 

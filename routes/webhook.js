@@ -17,6 +17,9 @@ const {
   projectReconciliationLog,
   validateTranscriptScores,
 } = require('../src/lib/finalTranscriptReconciliation');
+const {
+  extractCandidateQuestions,
+} = require('../src/lib/unansweredCandidateQuestions');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -1507,61 +1510,6 @@ async function applyTranscriptScoringForInterview({ interview, fresh, transcript
   return { updated: true, substantive: substantiveCheck.ok, reason: substantiveCheck.reason };
 }
 
-function extractCandidateQuestions(transcriptText) {
-  if (!transcriptText || typeof transcriptText !== 'string') return [];
-  const markerRe = /\[\[UNANSWERED_QUESTION:\s*([^\]]+?)\s*\]\]/g;
-  const markerSet = new Set();
-  let match;
-  while ((match = markerRe.exec(transcriptText)) !== null) {
-    const text = String(match[1] || '').trim();
-    if (text) markerSet.add(text);
-  }
-  if (markerSet.size) return Array.from(markerSet);
-
-  const lines = transcriptText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const out = new Set();
-  const interrogativeRe = /^(who|what|when|where|why|how|can|could|would|do|does|is|are|should)\b/i;
-  const closingQuestionRe = /\b(do you have|any|any other)\b.{0,40}\bquestions?\b|\bquestions?\b.{0,40}\bbefore we wrap up\b/i;
-  const refusalRe = /note it for the hiring manager|i don't have that information|i do not have that information|i can't answer|i cannot answer|i will pass it to the hiring manager|i'll pass it to the hiring manager|i will note it for the hiring manager|i'll note it for the hiring manager/i;
-  const candidateQuestionText = (text) => {
-    const cleanedText = String(text || '').trim();
-    if (!cleanedText) return '';
-    const words = cleanedText.split(/\s+/).filter(Boolean);
-    const sentenceMarks = cleanedText.match(/[.!?]+(?=\s|$)/g) || [];
-    if (words.length > 35 || sentenceMarks.length > 2) return '';
-    const lead = cleanedText.replace(/^(?:um+|uh+|so|and|also|just|yeah|yes|no|ok(?:ay)?|hey|hi)[,\s]+/i, '').trim();
-    return cleanedText.includes('?') || interrogativeRe.test(lead) ? cleanedText : '';
-  };
-  let closingQuestionAsked = false;
-  let lastCandidateQuestion = '';
-  for (const line of lines) {
-    const upper = line.toUpperCase();
-    const isInterviewer = upper.startsWith('INTERVIEWER:');
-    const isCandidate = upper.startsWith('CANDIDATE:');
-    let cleaned = line;
-    if (isInterviewer) cleaned = line.slice('INTERVIEWER:'.length).trim();
-    if (isCandidate) cleaned = line.slice('CANDIDATE:'.length).trim();
-
-    if (isCandidate) {
-      const question = candidateQuestionText(cleaned);
-      lastCandidateQuestion = question;
-      if (question && closingQuestionAsked) {
-        out.add(question);
-      }
-      continue;
-    }
-
-    if (isInterviewer && closingQuestionRe.test(cleaned)) {
-      closingQuestionAsked = true;
-    }
-
-    if (isInterviewer && refusalRe.test(cleaned) && lastCandidateQuestion) {
-      out.add(lastCandidateQuestion);
-    }
-  }
-  return Array.from(out).slice(0, 10);
-}
-
 function isEmptyQuestionList(value) {
   if (value == null) return true;
   if (Array.isArray(value)) return value.length === 0;
@@ -2035,14 +1983,7 @@ function queueFinalTranscriptPostProcessing({
 
   let questions;
   try {
-    const questionText = Array.isArray(transcriptItems)
-      ? transcriptItems
-        .map((item) => extractSanitizedContent(item, { preserveQuestionMarkers: true }))
-        .filter(Boolean)
-        .join('\n\n')
-        .trim()
-      : '';
-    questions = extractCandidateQuestions(questionText);
+    questions = extractCandidateQuestions(transcriptItems);
   } catch {
     console.error('[webhook] final_transcript_post_processing', {
       outcome: 'failed',

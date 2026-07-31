@@ -10,6 +10,19 @@ const {
 } = require('../src/lib/tavusVendorReconciliation');
 const { requireConfiguredInterviewDuration } = require('../src/lib/interviewDuration');
 
+const SILENCE_ENGAGEMENT_OWNER_PROMPT = 'prompt';
+const SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT = 'tavus_patient';
+const SILENCE_ENGAGEMENT_PROMPT_LINES = Object.freeze([
+  '- After asking a question, if the candidate does not begin responding after a short pause, about 4 to 5 seconds, check in once naturally and address the candidate by first name (for example, "Hi there, are you still with me?").',
+  '- If there is still no response after that one check-in, briefly restate the question once or move on naturally. Do not remain in indefinite silence, sound annoyed, or repeat the same check-in.'
+]);
+
+function resolveSilenceEngagementOwner(env = process.env) {
+  return String(env?.INTERVIEW_SILENCE_ENGAGEMENT_OWNER || '').trim().toLowerCase() === SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT
+    ? SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT
+    : SILENCE_ENGAGEMENT_OWNER_PROMPT;
+}
+
 /**
  * Create a Tavus v2 conversation for a candidate/role.
  * - Attaches role KB via document_ids when available.
@@ -31,6 +44,7 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
   const RECORDING_S3_BUCKET_REGION = String(process.env.TAVUS_RECORDING_S3_BUCKET_REGION || '').trim();
   const RECORDING_S3_BUCKET_NAME = String(process.env.TAVUS_RECORDING_S3_BUCKET_NAME || '').trim();
   const recordingRequested = process.env.TAVUS_ENABLE_RECORDING === 'true';
+  const silenceEngagementOwner = resolveSilenceEngagementOwner();
   const recordingConfigComplete =
     recordingRequested &&
     !!RECORDING_AWS_ASSUME_ROLE_ARN &&
@@ -100,8 +114,15 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
     companyName,
     spokenRubricQuestions,
     roleSpecificPrompt,
-    maxInterviewMinutes
+    maxInterviewMinutes,
+    silenceEngagementOwner
   );
+
+  console.info('[tavus-silence-engagement]', {
+    ownership_mode: silenceEngagementOwner,
+    prompt_silence_instruction_included: silenceEngagementOwner === SILENCE_ENGAGEMENT_OWNER_PROMPT,
+    idle_engagement_expectation: silenceEngagementOwner === SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT ? 'patient' : 'off'
+  });
 
   const conversationName = deterministicConversationName(options.interviewId);
 
@@ -281,7 +302,15 @@ function buildCustomGreeting(candidateName, roleTitle, companyName, firstQuestio
   return `${greeting} ${openingQuestion}`;
 }
 
-function buildConversationalContext(candidateName, roleTitle, companyName, rubricQuestions = [], roleSpecificPrompt = '', maxInterviewMinutes = null) {
+function buildConversationalContext(
+  candidateName,
+  roleTitle,
+  companyName,
+  rubricQuestions = [],
+  roleSpecificPrompt = '',
+  maxInterviewMinutes = null,
+  silenceEngagementOwner = SILENCE_ENGAGEMENT_OWNER_PROMPT
+) {
   const lines = [
     'Interview Details:',
     `- Candidate: ${candidateName}`,
@@ -329,8 +358,7 @@ function buildConversationalContext(candidateName, roleTitle, companyName, rubri
     '- Keep transitions varied and brief, such as "Thanks, that helps.", "Got it.", or "That makes sense."',
     '- Expand common business/job-title abbreviations when speaking naturally.',
     '- Use these spoken expansions: Sr/SR = Senior, Jr/JR = Junior, VP = Vice President, SVP = Senior Vice President, EVP = Executive Vice President, Dir = Director, Mgr = Manager, Ops = Operations, HR = Human Resources, IT = Information Technology.',
-    '- After asking a question, if the candidate does not begin responding after a short pause, about 4 to 5 seconds, check in once naturally and address the candidate by first name (for example, "Hi there, are you still with me?").',
-    '- If there is still no response after that one check-in, briefly restate the question once or move on naturally. Do not remain in indefinite silence, sound annoyed, or repeat the same check-in.',
+    ...(silenceEngagementOwner === SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT ? [] : SILENCE_ENGAGEMENT_PROMPT_LINES),
     '- If an answer is very short, vague, non-specific, or does not answer the question, briefly acknowledge it and ask exactly one short follow-up tied to the candidate\'s answer.',
     '- If no targeted follow-up is obvious, ask: "Could you share one specific example?"',
     '- Very short answers, "I don\'t know", or incomplete answers should use this one-follow-up rule or move on; they should not trigger the KB/unavailable-information response.',
@@ -413,4 +441,11 @@ function normalizeSpokenTextAbbreviations(value) {
   return out.replace(/\s{2,}/g, ' ').trim();
 }
 
-module.exports = { createTavusInterviewHandler };
+module.exports = {
+  SILENCE_ENGAGEMENT_OWNER_PROMPT,
+  SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT,
+  SILENCE_ENGAGEMENT_PROMPT_LINES,
+  buildConversationalContext,
+  createTavusInterviewHandler,
+  resolveSilenceEngagementOwner
+};

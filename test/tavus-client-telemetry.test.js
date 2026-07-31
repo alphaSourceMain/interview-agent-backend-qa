@@ -117,7 +117,11 @@ test('diagnostic contract exposes only the bounded event and metadata allowlists
   assert.equal(TELEMETRY_EVENTS.has('candidate_question_invitation_sent'), true);
   assert.equal(TELEMETRY_EVENTS.has('candidate_question_received'), true);
   assert.equal(TELEMETRY_EVENTS.has('candidate_question_response_completed'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_farewell_reserved'), true);
   assert.equal(TELEMETRY_EVENTS.has('closing_farewell_started'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_farewell_completed'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_farewell_interrupted'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_farewell_completion_timeout'), true);
   assert.equal(TELEMETRY_EVENTS.has('termination_only_entered'), true);
   assert.equal(TELEMETRY_EVENTS.has('provider_end_requested'), true);
   assert.equal(TELEMETRY_EVENTS.has('provider_end_confirmed'), true);
@@ -198,7 +202,11 @@ test('closing diagnostics accept only bounded state, time, turn, and interruptio
     'candidate_question_invitation_sent',
     'candidate_question_received',
     'candidate_question_response_completed',
+    'closing_farewell_reserved',
     'closing_farewell_started',
+    'closing_farewell_completed',
+    'closing_farewell_interrupted',
+    'closing_farewell_completion_timeout',
     'termination_only_entered',
     'provider_end_requested',
     'provider_end_confirmed',
@@ -215,6 +223,7 @@ test('closing diagnostics accept only bounded state, time, turn, and interruptio
         remaining_time_bucket: '11_30',
         turn_index: index,
         ...(event === 'post_closing_question_violation' ? { speech_interrupted: true } : {}),
+        ...(event === 'provider_end_requested' ? { hard_deadline: false } : {}),
       },
     });
     assert.equal(result.ok, true, event);

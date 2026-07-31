@@ -142,7 +142,11 @@ const EVENT_DEFINITIONS = Object.freeze({
   'client.candidate_question_invitation_sent': ['Candidate question invitation sent', 'closing'],
   'client.candidate_question_received': ['Candidate question received', 'closing'],
   'client.candidate_question_response_completed': ['Candidate question response completed', 'closing'],
+  'client.closing_farewell_reserved': ['Closing farewell reserved', 'closing'],
   'client.closing_farewell_started': ['Closing farewell started', 'closing'],
+  'client.closing_farewell_completed': ['Closing farewell completed', 'closing'],
+  'client.closing_farewell_interrupted': ['Closing farewell interrupted', 'closing'],
+  'client.closing_farewell_completion_timeout': ['Closing farewell completion timed out', 'closing'],
   'client.termination_only_entered': ['Termination-only state entered', 'terminal'],
   'client.provider_end_requested': ['Provider end requested', 'terminal'],
   'client.provider_end_confirmed': ['Provider end confirmed', 'terminal'],
@@ -177,6 +181,7 @@ const TECHNICAL_BOOLEAN_FIELDS = new Set([
   'replica_present',
   'remote_audio_ready',
   'runtime_owner',
+  'hard_deadline',
 ]);
 const TECHNICAL_ENUM_FIELDS = Object.freeze({
   recovery_phase: new Set([

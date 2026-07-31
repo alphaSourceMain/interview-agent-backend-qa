@@ -332,6 +332,36 @@ test('closing lifecycle diagnostics render bounded labels without raw payload da
   assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
 });
 
+test('single-flight farewell diagnostics expose bounded completion and deadline evidence only', () => {
+  const sanitized = sanitizeLifecycleEvent({
+    id: 'farewell-event',
+    interview_id: INTERVIEW_A,
+    event_type: 'client.closing_farewell_completed',
+    source: 'browser',
+    occurred_at: '2026-07-28T16:00:00.000Z',
+    received_at: '2026-07-28T16:00:00.100Z',
+    metadata: {
+      closing_state: 'TERMINATION_ONLY',
+      remaining_time_bucket: '0_10',
+      turn_index: 5,
+      hard_deadline: false,
+      inference_id: 'SECRET_INFERENCE_MARKER',
+      farewell_text: 'SECRET_FAREWELL_MARKER',
+      conversation_id: 'SECRET_CONVERSATION_MARKER',
+    },
+  }, '2026-07-28T16:00:01.000Z');
+
+  assert.equal(sanitized.event_code, 'client.closing_farewell_completed');
+  assert.equal(sanitized.event, 'Closing farewell completed');
+  assert.deepEqual(sanitized.technical_details, {
+    closing_state: 'TERMINATION_ONLY',
+    remaining_time_bucket: '0_10',
+    turn_index: 5,
+    hard_deadline: false,
+  });
+  assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
+});
+
 test('evidence completeness is a documented signal count, not an AI score', () => {
   const timeline = lifecycleEvents().map((event) => sanitizeLifecycleEvent(event, '2026-07-28T16:00:00.000Z'));
   const complete = deriveEvidenceCompleteness(timeline, { completed_interview: true, transcript_reconciliation: 'complete' });

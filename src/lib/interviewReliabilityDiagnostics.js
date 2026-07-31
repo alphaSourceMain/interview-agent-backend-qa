@@ -25,7 +25,11 @@ const TELEMETRY_EVENTS = new Set([
   'candidate_question_invitation_sent',
   'candidate_question_received',
   'candidate_question_response_completed',
+  'closing_farewell_reserved',
   'closing_farewell_started',
+  'closing_farewell_completed',
+  'closing_farewell_interrupted',
+  'closing_farewell_completion_timeout',
   'termination_only_entered',
   'provider_end_requested',
   'provider_end_confirmed',
@@ -73,6 +77,7 @@ const BOOLEAN_FIELDS = new Set([
   'replica_present',
   'remote_audio_ready',
   'runtime_owner',
+  'hard_deadline',
 ]);
 
 const ENUM_FIELDS = Object.freeze({

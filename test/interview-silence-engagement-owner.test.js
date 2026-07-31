@@ -2,6 +2,8 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
 const axios = require('axios');
 
 process.env.SUPABASE_URL ||= 'http://127.0.0.1:54321';
@@ -9,6 +11,7 @@ process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'synthetic-service-role-key';
 process.env.SUPABASE_ANON_KEY ||= 'synthetic-anon-key';
 
 const {
+  SILENCE_ENGAGEMENT_OWNER_APPLICATION_INACTIVITY,
   SILENCE_ENGAGEMENT_OWNER_PROMPT,
   SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT,
   SILENCE_ENGAGEMENT_PROMPT_LINES,
@@ -72,7 +75,7 @@ async function captureConversation(owner, options = {}) {
   };
 
   try {
-    await createTavusInterviewHandler(
+    const result = await createTavusInterviewHandler(
       { id: 'synthetic-candidate', name: 'Synthetic Candidate' },
       {
         id: 'synthetic-role',
@@ -88,7 +91,7 @@ async function captureConversation(owner, options = {}) {
         ...options,
       },
     );
-    return { infoEvents, payload };
+    return { infoEvents, payload, result };
   } finally {
     axios.post = originalPost;
     console.info = originalInfo;
@@ -114,6 +117,28 @@ test('ownership setting defaults and fails safely to prompt', () => {
       resolveSilenceEngagementOwner({ INTERVIEW_SILENCE_ENGAGEMENT_OWNER: value }),
       SILENCE_ENGAGEMENT_OWNER_PROMPT,
     );
+  }
+});
+
+test('application inactivity is a distinct server-controlled ownership mode', () => {
+  assert.equal(SILENCE_ENGAGEMENT_OWNER_APPLICATION_INACTIVITY, 'application_inactivity');
+  assert.equal(
+    resolveSilenceEngagementOwner({ INTERVIEW_SILENCE_ENGAGEMENT_OWNER: 'application_inactivity' }),
+    SILENCE_ENGAGEMENT_OWNER_APPLICATION_INACTIVITY,
+  );
+});
+
+test('application inactivity omits exactly the two prompt-owned silence instructions', () => {
+  const promptContext = contextFor(SILENCE_ENGAGEMENT_OWNER_PROMPT);
+  const applicationContext = contextFor(SILENCE_ENGAGEMENT_OWNER_APPLICATION_INACTIVITY);
+  const promptWithoutSilenceInstructions = promptContext
+    .split('\n')
+    .filter((line) => !SILENCE_ENGAGEMENT_PROMPT_LINES.includes(line))
+    .join('\n');
+
+  assert.equal(applicationContext, promptWithoutSilenceInstructions);
+  for (const line of SILENCE_ENGAGEMENT_PROMPT_LINES) {
+    assert.equal(occurrences(applicationContext, line), 0);
   }
 });
 
@@ -162,6 +187,27 @@ test('ordinary and replacement-style provider creation both receive tavus patien
   }
 });
 
+test('application inactivity is snapshotted in the immutable conversation result', async () => {
+  const { result } = await captureConversation(SILENCE_ENGAGEMENT_OWNER_APPLICATION_INACTIVITY);
+  assert.deepEqual({
+    silence_engagement_owner: result.silence_engagement_owner,
+    prompt_silence_instruction_included: result.prompt_silence_instruction_included,
+    application_inactivity_control_enabled: result.application_inactivity_control_enabled,
+  }, {
+    silence_engagement_owner: SILENCE_ENGAGEMENT_OWNER_APPLICATION_INACTIVITY,
+    prompt_silence_instruction_included: false,
+    application_inactivity_control_enabled: true,
+  });
+});
+
+test('create route returns only the server snapshot and never reads ownership from the request', () => {
+  const source = readFileSync(join(__dirname, '..', 'routes', 'createTavusInterview.js'), 'utf8');
+  assert.match(source, /silence_engagement_owner: result\.silence_engagement_owner/);
+  assert.match(source, /application_inactivity_control_enabled: result\.application_inactivity_control_enabled/);
+  assert.doesNotMatch(source, /req\.body\.(?:silence_engagement_owner|application_inactivity_control_enabled)/);
+  assert.doesNotMatch(source, /silenceEngagementOwner:\s*req\./);
+});
+
 test('conversation options cannot override the server-controlled owner', async () => {
   const { payload } = await captureConversation(SILENCE_ENGAGEMENT_OWNER_PROMPT, {
     silenceEngagementOwner: SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT,
@@ -179,9 +225,11 @@ test('bounded ownership evidence contains only allowlisted configuration state',
   assert.deepEqual(evidence[1], {
     ownership_mode: SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT,
     prompt_silence_instruction_included: false,
+    application_inactivity_control_enabled: false,
     idle_engagement_expectation: 'patient',
   });
   assert.deepEqual(Object.keys(evidence[1]).sort(), [
+    'application_inactivity_control_enabled',
     'idle_engagement_expectation',
     'ownership_mode',
     'prompt_silence_instruction_included',
@@ -197,6 +245,7 @@ test('absent and malformed settings retain default prompt behavior in provider p
     const evidence = infoEvents.find(([label]) => label === '[tavus-silence-engagement]');
     assert.equal(evidence?.[1]?.ownership_mode, SILENCE_ENGAGEMENT_OWNER_PROMPT);
     assert.equal(evidence?.[1]?.prompt_silence_instruction_included, true);
+    assert.equal(evidence?.[1]?.application_inactivity_control_enabled, false);
     assert.equal(evidence?.[1]?.idle_engagement_expectation, 'off');
   }
 });

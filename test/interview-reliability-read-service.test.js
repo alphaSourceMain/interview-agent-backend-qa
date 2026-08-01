@@ -312,7 +312,7 @@ test('closing lifecycle diagnostics render bounded labels without raw payload da
     occurred_at: '2026-07-28T16:00:00.000Z',
     received_at: '2026-07-28T16:00:00.100Z',
     metadata: {
-      closing_state: 'CLOSING_ONLY',
+      closing_state: 'FORCED_WIND_DOWN',
       remaining_time_bucket: '11_30',
       turn_index: 4,
       speech_interrupted: true,
@@ -324,7 +324,7 @@ test('closing lifecycle diagnostics render bounded labels without raw payload da
   assert.equal(sanitized.event_code, 'client.post_closing_question_violation');
   assert.equal(sanitized.event, 'Post-closing question blocked');
   assert.deepEqual(sanitized.technical_details, {
-    closing_state: 'CLOSING_ONLY',
+    closing_state: 'FORCED_WIND_DOWN',
     remaining_time_bucket: '11_30',
     turn_index: 4,
     speech_interrupted: true,

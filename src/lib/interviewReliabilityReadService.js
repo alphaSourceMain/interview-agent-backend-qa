@@ -152,6 +152,10 @@ const EVENT_DEFINITIONS = Object.freeze({
   'client.closing_farewell_completed': ['Closing farewell completed', 'closing'],
   'client.closing_farewell_interrupted': ['Closing farewell interrupted', 'closing'],
   'client.closing_farewell_completion_timeout': ['Closing farewell completion timed out', 'closing'],
+  'client.closing_candidate_audio_lock_requested': ['Candidate audio lock requested', 'closing'],
+  'client.closing_candidate_audio_locked': ['Candidate audio publication locked', 'closing'],
+  'client.closing_candidate_audio_lock_failed': ['Candidate audio lock failed', 'closing'],
+  'client.closing_candidate_activity_suppressed': ['Candidate activity suppressed during closing', 'closing'],
   'client.termination_only_entered': ['Termination-only state entered', 'terminal'],
   'client.provider_end_requested': ['Provider end requested', 'terminal'],
   'client.provider_end_confirmed': ['Provider end confirmed', 'terminal'],
@@ -175,6 +179,7 @@ const TECHNICAL_INTEGER_FIELDS = Object.freeze({
   turn_index: [0, 10_000],
   threshold_ms: [0, 60_000],
   turn_sequence: [0, 1_000_000_000],
+  attempt_count: [0, 2],
 });
 const TECHNICAL_BOOLEAN_FIELDS = new Set([
   'remote_participant_present',
@@ -187,6 +192,7 @@ const TECHNICAL_BOOLEAN_FIELDS = new Set([
   'remote_audio_ready',
   'runtime_owner',
   'hard_deadline',
+  'audio_publication_enabled',
 ]);
 const TECHNICAL_ENUM_FIELDS = Object.freeze({
   recovery_phase: new Set([
@@ -281,6 +287,15 @@ const TECHNICAL_ENUM_FIELDS = Object.freeze({
   ]),
   timer_lateness_bucket: new Set(['on_time', 'within_2s', 'over_2s']),
   ownership_mode: new Set(['prompt', 'tavus_patient', 'application_inactivity']),
+  lock_result_category: new Set([
+    'requested',
+    'confirmed_disabled',
+    'already_disabled',
+    'definite_failure',
+    'ambiguous',
+    'unsupported',
+  ]),
+  suppression_reason: new Set(['final_closing_audio_lock']),
 });
 const TECHNICAL_METADATA_FIELDS = Object.freeze([
   ...Object.keys(TECHNICAL_INTEGER_FIELDS),

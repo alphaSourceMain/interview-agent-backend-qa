@@ -391,6 +391,37 @@ test('single-flight farewell diagnostics expose bounded completion and deadline 
   assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
 });
 
+test('final-closing audio lock evidence exposes bounded publication state only', () => {
+  const sanitized = sanitizeLifecycleEvent({
+    id: 'audio-lock-event',
+    interview_id: INTERVIEW_A,
+    event_type: 'client.closing_candidate_audio_locked',
+    source: 'browser',
+    occurred_at: '2026-07-28T16:00:00.000Z',
+    received_at: '2026-07-28T16:00:00.100Z',
+    metadata: {
+      closing_state: 'FINAL_FAREWELL_ELIGIBLE',
+      remaining_time_bucket: '11_30',
+      lock_result_category: 'confirmed_disabled',
+      audio_publication_enabled: false,
+      attempt_count: 1,
+      participant_id: 'SECRET_PARTICIPANT_MARKER',
+      provider_payload: 'SECRET_PROVIDER_MARKER',
+    },
+  }, '2026-07-28T16:00:01.000Z');
+
+  assert.equal(sanitized.event_code, 'client.closing_candidate_audio_locked');
+  assert.equal(sanitized.event, 'Candidate audio publication locked');
+  assert.deepEqual(sanitized.technical_details, {
+    closing_state: 'FINAL_FAREWELL_ELIGIBLE',
+    remaining_time_bucket: '11_30',
+    lock_result_category: 'confirmed_disabled',
+    audio_publication_enabled: false,
+    attempt_count: 1,
+  });
+  assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
+});
+
 test('evidence completeness is a documented signal count, not an AI score', () => {
   const timeline = lifecycleEvents().map((event) => sanitizeLifecycleEvent(event, '2026-07-28T16:00:00.000Z'));
   const complete = deriveEvidenceCompleteness(timeline, { completed_interview: true, transcript_reconciliation: 'complete' });

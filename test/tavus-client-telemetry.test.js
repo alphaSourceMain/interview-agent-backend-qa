@@ -127,6 +127,10 @@ test('diagnostic contract exposes only the bounded event and metadata allowlists
   assert.equal(TELEMETRY_EVENTS.has('closing_farewell_completed'), true);
   assert.equal(TELEMETRY_EVENTS.has('closing_farewell_interrupted'), true);
   assert.equal(TELEMETRY_EVENTS.has('closing_farewell_completion_timeout'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_candidate_audio_lock_requested'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_candidate_audio_locked'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_candidate_audio_lock_failed'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_candidate_activity_suppressed'), true);
   assert.equal(TELEMETRY_EVENTS.has('termination_only_entered'), true);
   assert.equal(TELEMETRY_EVENTS.has('provider_end_requested'), true);
   assert.equal(TELEMETRY_EVENTS.has('provider_end_confirmed'), true);
@@ -139,6 +143,57 @@ test('diagnostic contract exposes only the bounded event and metadata allowlists
   assert.equal(METADATA_KEYS.has('remote_audio_state'), true);
   assert.equal(METADATA_KEYS.has('message'), false);
   assert.equal(METADATA_KEYS.has('conversation_id'), false);
+});
+
+test('final-closing audio lock diagnostics accept only bounded publication metadata', () => {
+  for (const [index, [event, lock_result_category]] of [
+    ['closing_candidate_audio_lock_requested', 'requested'],
+    ['closing_candidate_audio_locked', 'confirmed_disabled'],
+    ['closing_candidate_audio_lock_failed', 'definite_failure'],
+  ].entries()) {
+    const result = validateTelemetryPayload({
+      ...BASE_PAYLOAD,
+      event,
+      event_sequence: 700 + index,
+      reason: undefined,
+      metadata: {
+        closing_state: 'FINAL_FAREWELL_ELIGIBLE',
+        remaining_time_bucket: '11_30',
+        lock_result_category,
+        audio_publication_enabled: event === 'closing_candidate_audio_lock_failed',
+        attempt_count: index,
+      },
+    });
+    assert.equal(result.ok, true, event);
+  }
+  assert.equal(validateTelemetryPayload({
+    ...BASE_PAYLOAD,
+    event: 'closing_candidate_activity_suppressed',
+    event_sequence: 710,
+    reason: undefined,
+    metadata: {
+      closing_state: 'FINAL_FAREWELL_ELIGIBLE',
+      remaining_time_bucket: '11_30',
+      suppression_reason: 'final_closing_audio_lock',
+    },
+  }).ok, true);
+
+  for (const metadata of [
+    { utterance: 'synthetic' },
+    { participant_id: 'synthetic' },
+    { provider_conversation_id: 'synthetic' },
+    { lock_result_category: 'raw_daily_failure' },
+    { attempt_count: 3 },
+    { suppression_reason: 'synthetic-sensitive-reason' },
+  ]) {
+    assert.equal(validateTelemetryPayload({
+      ...BASE_PAYLOAD,
+      event: 'closing_candidate_audio_lock_failed',
+      event_sequence: 720,
+      reason: undefined,
+      metadata,
+    }).ok, false);
+  }
 });
 
 test('inactivity diagnostics accept only bounded lifecycle metadata', () => {

@@ -60,46 +60,42 @@ async function captureConversationPayload(maxInterviewMinutes = 10) {
   }
 }
 
-test('conversation context treats runtime timing state as private behavior control', async () => {
+test('conversation context keeps browser warnings visual without hidden closing state', async () => {
   const payload = await captureConversationPayload();
   const context = String(payload?.conversational_context || '');
 
-  assert.match(context, /runtime closing control state/i);
-  assert.match(context, /never (?:quote|mention|summarize|paraphrase|reveal)/i);
   assert.match(context, /two-minute and one-minute browser warnings are visual-only/i);
+  assert.doesNotMatch(context, /runtime closing control state/i);
   assert.doesNotMatch(context, /briefly acknowledge that time is running low/i);
   assert.doesNotMatch(context, /If the system or front-end sends a time warning/i);
 });
 
-test('question lock overrides rubric coverage, follow-ups, and question-count goals', async () => {
+test('obsolete staged timing states and question lock are absent', async () => {
   const payload = await captureConversationPayload();
   const context = String(payload?.conversational_context || '');
 
-  assert.match(context, /QUESTION_LOCKED/);
-  assert.match(context, /do not begin another rubric, follow-up, clarification, or assessment question/i);
-  assert.match(context, /overrides remaining rubric coverage, follow-up requirements, and question-count goals/i);
+  assert.doesNotMatch(context, /QUESTION_LOCKED|CLOSING_ONLY|TERMINATION_ONLY/);
+  assert.doesNotMatch(context, /question-count goals|application farewell|provider-end backstop/i);
 });
 
-test('application owns the candidate-question invitation and no acknowledgment is required', async () => {
+test('PAL context contains no application-owned candidate-question invitation or farewell', async () => {
   const payload = await captureConversationPayload();
   const context = String(payload?.conversational_context || '');
 
-  assert.match(context, /application deterministically owns the final candidate-question invitation/i);
-  assert.match(context, /Never create or repeat that invitation independently/i);
-  assert.match(context, /answer at most one direct candidate question/i);
-  assert.match(context, /do not require (?:a )?candidate acknowledgment/i);
+  assert.doesNotMatch(context, /application deterministically owns the final candidate-question invitation/i);
+  assert.doesNotMatch(context, /Never create or repeat that invitation independently/i);
+  assert.doesNotMatch(context, /answer at most one direct candidate question/i);
+  assert.doesNotMatch(context, /candidate acknowledgment|final closing line/i);
   assert.doesNotMatch(context, /Do you have any questions for me before we wrap up\?/i);
   assert.doesNotMatch(context, /Any other questions\? If not, just say 'no'\./i);
 });
 
-test('closing and termination states yield to the application-owned end path', async () => {
+test('PAL context contains no hidden closing or termination instructions', async () => {
   const payload = await captureConversationPayload();
   const context = String(payload?.conversational_context || '');
 
-  assert.match(context, /CLOSING_ONLY/);
-  assert.match(context, /application owns that invitation/i);
-  assert.match(context, /TERMINATION_ONLY/);
-  assert.match(context, /application farewell and end-conversation backstop/i);
+  assert.doesNotMatch(context, /CLOSING_ONLY|TERMINATION_ONLY/);
+  assert.doesNotMatch(context, /application owns that invitation|application farewell|end-conversation backstop/i);
 });
 
 test('provider duration remains an independent hard upper bound', async () => {

@@ -469,6 +469,37 @@ test('asynchronous audio-lock timeout diagnostics remain bounded and content-fre
   assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
 });
 
+test('zero-deadline local closing diagnostics render bounded labels without content', () => {
+  const sanitized = sanitizeLifecycleEvent({
+    id: 'local-closing-event',
+    interview_id: INTERVIEW_A,
+    event_type: 'client.local_closing_audio_completed',
+    source: 'browser',
+    occurred_at: '2026-07-28T16:00:00.000Z',
+    received_at: '2026-07-28T16:00:00.100Z',
+    metadata: {
+      closing_state: 'LOCAL_CLOSING',
+      remaining_time_bucket: '0_10',
+      playback_result_category: 'completed',
+      audio_duration_bucket: '4_5_seconds',
+      transcript_text: 'SECRET_TRANSCRIPT_MARKER',
+      closing_text: 'SECRET_CLOSING_MARKER',
+      provider_conversation_id: 'SECRET_PROVIDER_MARKER',
+      file_path: 'SECRET_PATH_MARKER',
+    },
+  }, '2026-07-28T16:00:01.000Z');
+
+  assert.equal(sanitized.event_code, 'client.local_closing_audio_completed');
+  assert.equal(sanitized.event, 'Local closing audio completed');
+  assert.deepEqual(sanitized.technical_details, {
+    closing_state: 'LOCAL_CLOSING',
+    remaining_time_bucket: '0_10',
+    playback_result_category: 'completed',
+    audio_duration_bucket: '4_5_seconds',
+  });
+  assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
+});
+
 test('evidence completeness is a documented signal count, not an AI score', () => {
   const timeline = lifecycleEvents().map((event) => sanitizeLifecycleEvent(event, '2026-07-28T16:00:00.000Z'));
   const complete = deriveEvidenceCompleteness(timeline, { completed_interview: true, transcript_reconciliation: 'complete' });

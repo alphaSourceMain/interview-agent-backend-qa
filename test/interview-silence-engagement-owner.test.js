@@ -163,16 +163,16 @@ test('tavus patient owner omits only the two autonomous silence instructions', (
   }
 });
 
-test('timer, closing, question lock, and provider-end instructions are unchanged in patient mode', () => {
-  const context = contextFor(SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT);
-  for (const invariant of [
-    'The two-minute and one-minute browser warnings are visual-only.',
-    'When runtime control state becomes QUESTION_LOCKED',
-    'When runtime control state becomes CLOSING_ONLY',
-    'When runtime control state becomes TERMINATION_ONLY',
-    'The application deterministically owns the final candidate-question invitation, farewell, and provider-end request.',
+test('timer warnings remain visual while obsolete PAL closing instructions are absent in every mode', () => {
+  for (const owner of [
+    SILENCE_ENGAGEMENT_OWNER_PROMPT,
+    SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT,
+    SILENCE_ENGAGEMENT_OWNER_APPLICATION_INACTIVITY,
   ]) {
-    assert.match(context, new RegExp(invariant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    const context = contextFor(owner);
+    assert.match(context, /The two-minute and one-minute browser warnings are visual-only\./);
+    assert.doesNotMatch(context, /QUESTION_LOCKED|CLOSING_ONLY|TERMINATION_ONLY/);
+    assert.doesNotMatch(context, /final candidate-question invitation|application farewell|final closing line/i);
   }
 });
 

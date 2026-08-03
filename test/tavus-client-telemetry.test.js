@@ -128,8 +128,11 @@ test('diagnostic contract exposes only the bounded event and metadata allowlists
   assert.equal(TELEMETRY_EVENTS.has('closing_farewell_interrupted'), true);
   assert.equal(TELEMETRY_EVENTS.has('closing_farewell_completion_timeout'), true);
   assert.equal(TELEMETRY_EVENTS.has('closing_candidate_audio_lock_requested'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_candidate_audio_lock_waiting'), true);
   assert.equal(TELEMETRY_EVENTS.has('closing_candidate_audio_locked'), true);
   assert.equal(TELEMETRY_EVENTS.has('closing_candidate_audio_lock_failed'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_candidate_audio_lock_timed_out'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_candidate_audio_lock_cancelled'), true);
   assert.equal(TELEMETRY_EVENTS.has('closing_candidate_activity_suppressed'), true);
   assert.equal(TELEMETRY_EVENTS.has('termination_only_entered'), true);
   assert.equal(TELEMETRY_EVENTS.has('provider_end_requested'), true);
@@ -148,8 +151,11 @@ test('diagnostic contract exposes only the bounded event and metadata allowlists
 test('final-closing audio lock diagnostics accept only bounded publication metadata', () => {
   for (const [index, [event, lock_result_category]] of [
     ['closing_candidate_audio_lock_requested', 'requested'],
+    ['closing_candidate_audio_lock_waiting', 'requested'],
     ['closing_candidate_audio_locked', 'confirmed_disabled'],
     ['closing_candidate_audio_lock_failed', 'definite_failure'],
+    ['closing_candidate_audio_lock_timed_out', 'timed_out'],
+    ['closing_candidate_audio_lock_cancelled', 'cancelled_terminal'],
   ].entries()) {
     const result = validateTelemetryPayload({
       ...BASE_PAYLOAD,
@@ -161,7 +167,20 @@ test('final-closing audio lock diagnostics accept only bounded publication metad
         remaining_time_bucket: '11_30',
         lock_result_category,
         audio_publication_enabled: event === 'closing_candidate_audio_lock_failed',
-        attempt_count: index,
+        attempt_count: Math.min(2, index),
+        confirmation_source: event === 'closing_candidate_audio_locked'
+          ? 'participant_updated'
+          : 'none',
+        publication_state: event === 'closing_candidate_audio_locked'
+          ? 'off'
+          : event === 'closing_candidate_audio_lock_failed'
+            ? 'enabled'
+            : 'unknown',
+        elapsed_time_bucket: 'under_250',
+        ...(event === 'closing_candidate_audio_lock_timed_out'
+          ? { timeout_category: 'bounded_timeout' }
+          : {}),
+        reconnect_active: false,
       },
     });
     assert.equal(result.ok, true, event);
@@ -185,6 +204,10 @@ test('final-closing audio lock diagnostics accept only bounded publication metad
     { lock_result_category: 'raw_daily_failure' },
     { attempt_count: 3 },
     { suppression_reason: 'synthetic-sensitive-reason' },
+    { confirmation_source: 'raw_daily_event' },
+    { publication_state: 'SECRET_TRACK_STATE' },
+    { elapsed_time_bucket: '1800_exact' },
+    { timeout_category: 'raw_timeout_reason' },
   ]) {
     assert.equal(validateTelemetryPayload({
       ...BASE_PAYLOAD,

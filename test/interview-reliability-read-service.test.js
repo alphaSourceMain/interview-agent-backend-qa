@@ -405,6 +405,10 @@ test('final-closing audio lock evidence exposes bounded publication state only',
       lock_result_category: 'confirmed_disabled',
       audio_publication_enabled: false,
       attempt_count: 1,
+      confirmation_source: 'participant_updated',
+      publication_state: 'off',
+      elapsed_time_bucket: '250_749',
+      reconnect_active: false,
       participant_id: 'SECRET_PARTICIPANT_MARKER',
       provider_payload: 'SECRET_PROVIDER_MARKER',
     },
@@ -418,6 +422,49 @@ test('final-closing audio lock evidence exposes bounded publication state only',
     lock_result_category: 'confirmed_disabled',
     audio_publication_enabled: false,
     attempt_count: 1,
+    confirmation_source: 'participant_updated',
+    publication_state: 'off',
+    elapsed_time_bucket: '250_749',
+    reconnect_active: false,
+  });
+  assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
+});
+
+test('asynchronous audio-lock timeout diagnostics remain bounded and content-free', () => {
+  const sanitized = sanitizeLifecycleEvent({
+    id: 'audio-lock-timeout-event',
+    interview_id: INTERVIEW_A,
+    event_type: 'client.closing_candidate_audio_lock_timed_out',
+    source: 'browser',
+    occurred_at: '2026-07-28T16:00:00.000Z',
+    received_at: '2026-07-28T16:00:00.100Z',
+    metadata: {
+      closing_state: 'FINAL_FAREWELL_ELIGIBLE',
+      remaining_time_bucket: '11_30',
+      lock_result_category: 'timed_out',
+      confirmation_source: 'none',
+      publication_state: 'loading',
+      elapsed_time_bucket: '1500_1999',
+      timeout_category: 'bounded_timeout',
+      attempt_count: 1,
+      reconnect_active: false,
+      participant_id: 'SECRET_PARTICIPANT_MARKER',
+      raw_daily_payload: 'SECRET_DAILY_MARKER',
+    },
+  }, '2026-07-28T16:00:02.000Z');
+
+  assert.equal(sanitized.event_code, 'client.closing_candidate_audio_lock_timed_out');
+  assert.equal(sanitized.event, 'Candidate audio lock confirmation timed out');
+  assert.deepEqual(sanitized.technical_details, {
+    closing_state: 'FINAL_FAREWELL_ELIGIBLE',
+    remaining_time_bucket: '11_30',
+    lock_result_category: 'timed_out',
+    confirmation_source: 'none',
+    publication_state: 'loading',
+    elapsed_time_bucket: '1500_1999',
+    timeout_category: 'bounded_timeout',
+    attempt_count: 1,
+    reconnect_active: false,
   });
   assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
 });

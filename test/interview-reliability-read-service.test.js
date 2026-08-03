@@ -332,6 +332,35 @@ test('closing lifecycle diagnostics render bounded labels without raw payload da
   assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
 });
 
+test('single 20-second closing interrupt renders bounded evidence only', () => {
+  const sanitized = sanitizeLifecycleEvent({
+    id: 'single-closing-interrupt',
+    interview_id: INTERVIEW_A,
+    event_type: 'client.closing_forced_interrupt',
+    source: 'browser',
+    occurred_at: '2026-07-28T16:00:00.000Z',
+    received_at: '2026-07-28T16:00:00.100Z',
+    metadata: {
+      closing_state: 'FINAL_FAREWELL_ELIGIBLE',
+      remaining_time_bucket: '11_30',
+      turn_index: 0,
+      speech_interrupted: true,
+      transcript_text: 'SECRET_TRANSCRIPT_MARKER',
+      conversation_id: 'SECRET_CONVERSATION_MARKER',
+    },
+  }, '2026-07-28T16:00:01.000Z');
+
+  assert.equal(sanitized.event_code, 'client.closing_forced_interrupt');
+  assert.equal(sanitized.event, 'Final closing interrupt applied');
+  assert.deepEqual(sanitized.technical_details, {
+    closing_state: 'FINAL_FAREWELL_ELIGIBLE',
+    remaining_time_bucket: '11_30',
+    turn_index: 0,
+    speech_interrupted: true,
+  });
+  assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
+});
+
 test('single-flight farewell diagnostics expose bounded completion and deadline evidence only', () => {
   const sanitized = sanitizeLifecycleEvent({
     id: 'farewell-event',

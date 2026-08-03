@@ -24,6 +24,7 @@ const TELEMETRY_EVENTS = new Set([
   'closing_only_entered',
   'wind_down_entered',
   'wind_down_forced_interrupt',
+  'closing_forced_interrupt',
   'candidate_question_invitation_sent',
   'candidate_question_invitation_skipped',
   'candidate_question_received',

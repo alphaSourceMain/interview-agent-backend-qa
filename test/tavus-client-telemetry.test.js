@@ -116,6 +116,7 @@ test('diagnostic contract exposes only the bounded event and metadata allowlists
   assert.equal(TELEMETRY_EVENTS.has('closing_only_entered'), true);
   assert.equal(TELEMETRY_EVENTS.has('wind_down_entered'), true);
   assert.equal(TELEMETRY_EVENTS.has('wind_down_forced_interrupt'), true);
+  assert.equal(TELEMETRY_EVENTS.has('closing_forced_interrupt'), true);
   assert.equal(TELEMETRY_EVENTS.has('candidate_question_invitation_sent'), true);
   assert.equal(TELEMETRY_EVENTS.has('candidate_question_invitation_skipped'), true);
   assert.equal(TELEMETRY_EVENTS.has('candidate_question_received'), true);
@@ -205,6 +206,7 @@ test('closing diagnostics accept only bounded state, time, turn, and interruptio
     'closing_only_entered',
     'wind_down_entered',
     'wind_down_forced_interrupt',
+    'closing_forced_interrupt',
     'candidate_question_invitation_sent',
     'candidate_question_invitation_skipped',
     'candidate_question_received',

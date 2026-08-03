@@ -141,6 +141,7 @@ const EVENT_DEFINITIONS = Object.freeze({
   'client.closing_only_entered': ['Closing-only state entered', 'closing'],
   'client.wind_down_entered': ['Wind-down entered', 'closing'],
   'client.wind_down_forced_interrupt': ['Forced wind-down decision applied', 'closing'],
+  'client.closing_forced_interrupt': ['Final closing interrupt applied', 'closing'],
   'client.candidate_question_invitation_sent': ['Candidate question invitation sent', 'closing'],
   'client.candidate_question_invitation_skipped': ['Candidate question invitation skipped', 'closing'],
   'client.candidate_question_received': ['Candidate question received', 'closing'],

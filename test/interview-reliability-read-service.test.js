@@ -332,6 +332,37 @@ test('closing lifecycle diagnostics render bounded labels without raw payload da
   assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
 });
 
+test('terminal-closing lifecycle diagnostics render canonical bounded labels', () => {
+  const events = [
+    ['client.closing_terminal_reserved', 'Terminal closing reserved'],
+    ['client.closing_foreign_pal_audio_muted', 'Ordinary PAL audio muted'],
+    ['client.closing_interrupt_dispatched', 'Closing interrupt dispatched'],
+    ['client.closing_farewell_dispatched', 'Closing farewell dispatched'],
+    ['client.closing_farewell_dispatch_failed', 'Closing farewell dispatch failed'],
+    ['client.closing_farewell_started', 'Closing farewell started'],
+    ['client.closing_farewell_completed', 'Closing farewell completed'],
+    ['client.closing_farewell_interrupted', 'Closing farewell interrupted'],
+    ['client.closing_foreign_inference_suppressed', 'Foreign closing inference suppressed'],
+    ['client.closing_farewell_start_timed_out', 'Closing farewell start timed out'],
+    ['client.closing_farewell_completion_timed_out', 'Closing farewell completion timed out'],
+  ];
+  for (const [event_type, expectedLabel] of events) {
+    const sanitized = sanitizeLifecycleEvent({
+      id: event_type,
+      event_type,
+      observed_at: '2026-08-04T12:00:00.000Z',
+      received_at: '2026-08-04T12:00:00.100Z',
+      metadata: {
+        closing_state: 'FAREWELL_DISPATCHED',
+        remaining_time_bucket: '0_10',
+        raw_payload: 'SECRET_CLOSING_MARKER',
+      },
+    }, '2026-08-04T12:00:00.000Z');
+    assert.equal(sanitized.event, expectedLabel);
+    assert.equal(JSON.stringify(sanitized).includes('SECRET_CLOSING_MARKER'), false);
+  }
+});
+
 test('single 20-second closing interrupt renders bounded evidence only', () => {
   const sanitized = sanitizeLifecycleEvent({
     id: 'single-closing-interrupt',

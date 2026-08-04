@@ -8,7 +8,10 @@ const {
   annotateTavusCreateError,
   deterministicConversationName,
 } = require('../src/lib/tavusVendorReconciliation');
-const { requireConfiguredInterviewDuration } = require('../src/lib/interviewDuration');
+const {
+  requireConfiguredInterviewDuration,
+  resolveProviderMaxCallDurationSeconds,
+} = require('../src/lib/interviewDuration');
 
 const SILENCE_ENGAGEMENT_OWNER_PROMPT = 'prompt';
 const SILENCE_ENGAGEMENT_OWNER_TAVUS_PATIENT = 'tavus_patient';
@@ -99,7 +102,7 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
   }
 
   const maxInterviewMinutes = requireConfiguredInterviewDuration(options?.maxInterviewMinutes);
-  const maxCallDurationSeconds = maxInterviewMinutes * 60;
+  const maxCallDurationSeconds = resolveProviderMaxCallDurationSeconds(maxInterviewMinutes);
 
   const companyNameRaw = (options.companyName || role.company_name || '').trim();
   const companyName = /^the hiring organization$/i.test(companyNameRaw) ? '' : companyNameRaw;

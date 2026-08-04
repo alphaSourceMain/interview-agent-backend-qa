@@ -3,6 +3,12 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const axios = require('axios');
+const {
+  MAX_INTERVIEW_MINUTES,
+  PROVIDER_CLOSING_GRACE_SECONDS,
+  PROVIDER_MAX_CALL_DURATION_SECONDS,
+  resolveProviderMaxCallDurationSeconds,
+} = require('../src/lib/interviewDuration');
 
 const SYNTHETIC_INTERVIEW_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -98,11 +104,37 @@ test('PAL context contains no hidden closing or termination instructions', async
   assert.doesNotMatch(context, /application owns that invitation|application farewell|end-conversation backstop/i);
 });
 
-test('provider duration remains an independent hard upper bound', async () => {
+test('provider duration reserves bounded farewell grace beyond the visible product timer', async () => {
   const payload = await captureConversationPayload();
 
-  assert.equal(payload?.properties?.max_call_duration, 600);
+  assert.equal(payload?.properties?.max_call_duration, 620);
   assert.equal(payload?.properties?.participant_left_timeout, 60);
+});
+
+test('three-minute QA conversations preserve a three-minute product timer with provider-only grace', async () => {
+  const payload = await captureConversationPayload(3);
+
+  assert.equal(payload?.properties?.max_call_duration, 200);
+  assert.match(String(payload?.conversational_context || ''), /Time limit: 3 minutes/i);
+  assert.doesNotMatch(String(payload?.conversational_context || ''), /3 minutes and 20 seconds/i);
+});
+
+test('duration contract always reserves provider farewell headroom within Tavus limits', () => {
+  assert.equal(PROVIDER_CLOSING_GRACE_SECONDS, 20);
+  assert.equal(PROVIDER_MAX_CALL_DURATION_SECONDS, 3600);
+  assert.equal(MAX_INTERVIEW_MINUTES, 59);
+  assert.equal(resolveProviderMaxCallDurationSeconds(3), 200);
+  assert.equal(resolveProviderMaxCallDurationSeconds(10), 620);
+  assert.equal(resolveProviderMaxCallDurationSeconds(MAX_INTERVIEW_MINUTES), 3560);
+});
+
+test('provider maximum is fail-closed when farewell grace cannot be reserved', async () => {
+  await assert.rejects(
+    () => captureConversationPayload(60),
+    (error) =>
+      error?.code === 'INTERVIEW_DURATION_NOT_CONFIGURED' &&
+      error?.durationReason === 'duration_above_provider_limit',
+  );
 });
 
 test('provider handler fails closed before Tavus when duration is invalid', async () => {

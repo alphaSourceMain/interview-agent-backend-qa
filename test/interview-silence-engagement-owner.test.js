@@ -182,7 +182,7 @@ test('ordinary and replacement-style provider creation both receive tavus patien
     for (const line of SILENCE_ENGAGEMENT_PROMPT_LINES) {
       assert.equal(occurrences(payload.conversational_context, line), 0);
     }
-    assert.equal(payload.properties.max_call_duration, 600);
+    assert.equal(payload.properties.max_call_duration, 620);
     assert.equal(payload.properties.participant_left_timeout, 60);
   }
 });

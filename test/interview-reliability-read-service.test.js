@@ -285,7 +285,11 @@ test('classification and processing rules are deterministic at the one-hour exis
 test('metadata projection allowlists bounded technical fields and strips arbitrary metadata', () => {
   const source = lifecycleEvents()[1];
   const sanitized = sanitizeLifecycleEvent(source, '2026-07-28T16:00:00.000Z');
-  assert.deepEqual(sanitized.technical_details, { track_kind: 'audio', track_state: 'playable' });
+  assert.deepEqual(sanitized.technical_details, {
+    track_kind: 'audio',
+    track_state: 'playable',
+    webhook_latency_bucket: 'under_1_second',
+  });
   assert.equal(Object.keys(sanitized.technical_details).every((key) => TECHNICAL_METADATA_FIELDS.includes(key)), true);
   assertNoSensitiveContent(sanitized);
 
@@ -299,8 +303,67 @@ test('metadata projection allowlists bounded technical fields and strips arbitra
       terminal_reason: { secret: 'SECRET_NESTED_MARKER' },
     },
   }, '2026-07-28T16:00:00.000Z');
-  assert.deepEqual(invalidValues.technical_details, {});
+  assert.deepEqual(invalidValues.technical_details, { webhook_latency_bucket: 'under_1_second' });
   assert.equal(JSON.stringify(invalidValues).includes('SECRET_'), false);
+});
+
+test('provider occurrence and receipt timing derives bounded webhook latency without conflating late occurrence', () => {
+  const underOne = sanitizeLifecycleEvent({
+    event_type: 'system.replica_joined',
+    observed_at: '2026-08-05T12:01:20.000Z',
+    received_at: '2026-08-05T12:01:20.411Z',
+    created_at: '2026-08-05T12:01:20.500Z',
+    metadata: {},
+  }, '2026-08-05T12:00:00.000Z');
+  assert.equal(underOne.technical_details.webhook_latency_bucket, 'under_1_second');
+  assert.equal(underOne.elapsed_ms, 80000);
+  assert.equal(underOne.persistence_timestamp, '2026-08-05T12:01:20.500Z');
+
+  for (const [received_at, expected] of [
+    ['2026-08-05T12:00:04.000Z', '1_5_seconds'],
+    ['2026-08-05T12:00:12.000Z', '5_15_seconds'],
+    ['2026-08-05T12:00:20.000Z', 'over_15_seconds'],
+  ]) {
+    const result = sanitizeLifecycleEvent({
+      event_type: 'system.replica_joined',
+      observed_at: '2026-08-05T12:00:00.000Z',
+      received_at,
+      metadata: {},
+    }, '2026-08-05T12:00:00.000Z');
+    assert.equal(result.technical_details.webhook_latency_bucket, expected);
+  }
+
+  const unavailable = sanitizeLifecycleEvent({
+    event_type: 'system.replica_joined',
+    received_at: '2026-08-05T12:00:01.000Z',
+    metadata: {},
+  }, '2026-08-05T12:00:00.000Z');
+  assert.equal('webhook_latency_bucket' in unavailable.technical_details, false);
+});
+
+test('new startup and media events render bounded labels and identity-free metadata', () => {
+  const sanitized = sanitizeLifecycleEvent({
+    event_type: 'client.daily_remote_participant_snapshot',
+    observed_at: '2026-08-05T12:00:00.000Z',
+    received_at: '2026-08-05T12:00:00.100Z',
+    metadata: {
+      remote_participant_count_bucket: 'one',
+      audio_track_state: 'playable',
+      video_track_state: 'loading',
+      startup_readiness_state: 'remote_video_loading',
+      participant_id: 'SECRET_PARTICIPANT_MARKER',
+      track_id: 'SECRET_TRACK_MARKER',
+    },
+  }, '2026-08-05T12:00:00.000Z');
+  assert.equal(sanitized.event, 'Remote participant snapshot');
+  assert.deepEqual(sanitized.technical_details, {
+    audio_track_state: 'playable',
+    video_track_state: 'loading',
+    remote_participant_count_bucket: 'one',
+    startup_readiness_state: 'remote_video_loading',
+    webhook_latency_bucket: 'under_1_second',
+  });
+  assert.equal(JSON.stringify(sanitized).includes('SECRET_'), false);
 });
 
 test('closing lifecycle diagnostics render bounded labels without raw payload data', () => {

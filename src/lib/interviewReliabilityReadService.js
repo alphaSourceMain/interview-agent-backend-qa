@@ -128,6 +128,12 @@ const EVENT_DEFINITIONS = Object.freeze({
   'client.daily_participant_left': ['Participant left', 'participant'],
   'client.daily_remote_track_started': ['Remote media started', 'media'],
   'client.daily_remote_track_stopped': ['Remote media stopped', 'media'],
+  'client.daily_remote_participant_snapshot': ['Remote participant snapshot', 'media'],
+  'client.daily_remote_track_state_changed': ['Remote track state changed', 'media'],
+  'client.daily_receive_settings_snapshot': ['Daily receive settings snapshot', 'media'],
+  'client.remote_video_attachment_result': ['Remote video attachment result', 'media'],
+  'client.reconnect_media_binding_snapshot': ['Reconnect media binding snapshot', 'reconnect'],
+  'client.startup_readiness_changed': ['Startup readiness changed', 'media'],
   'client.app_message_received': ['Replica progress received', 'replica_progress'],
   'client.progress_checkpoint_updated': ['Progress checkpoint updated', 'candidate_progress'],
   'client.watchdog_started': ['Progress watchdog started', 'watchdog'],
@@ -216,6 +222,15 @@ const TECHNICAL_BOOLEAN_FIELDS = new Set([
   'hard_deadline',
   'audio_publication_enabled',
   'inference_match',
+  'audio_track_present',
+  'video_track_present',
+  'track_present',
+  'audio_persistent_track_present',
+  'video_persistent_track_present',
+  'persistent_track_present',
+  'audio_attached',
+  'video_attached',
+  'element_visible',
 ]);
 const TECHNICAL_ENUM_FIELDS = Object.freeze({
   recovery_phase: new Set([
@@ -228,10 +243,14 @@ const TECHNICAL_ENUM_FIELDS = Object.freeze({
     'failed',
   ]),
   participant_role: new Set(['candidate', 'replica', 'unknown']),
-  remote_audio_state: new Set(['absent', 'loading', 'playable', 'stopped', 'unavailable', 'unknown']),
-  remote_video_state: new Set(['absent', 'loading', 'playable', 'stopped', 'unavailable', 'unknown']),
+  remote_audio_state: new Set(['absent', 'blocked', 'off', 'sendable', 'loading', 'interrupted', 'playable', 'stopped', 'unavailable', 'unknown']),
+  remote_video_state: new Set(['absent', 'blocked', 'off', 'sendable', 'loading', 'interrupted', 'playable', 'stopped', 'unavailable', 'unknown']),
+  audio_track_state: new Set(['absent', 'blocked', 'off', 'sendable', 'loading', 'interrupted', 'playable', 'unavailable', 'unknown']),
+  video_track_state: new Set(['absent', 'blocked', 'off', 'sendable', 'loading', 'interrupted', 'playable', 'unavailable', 'unknown']),
   track_kind: new Set(['audio', 'video']),
-  track_state: new Set(['started', 'stopped', 'playable', 'unavailable', 'unknown']),
+  track_state: new Set(['started', 'stopped', 'absent', 'blocked', 'off', 'sendable', 'loading', 'interrupted', 'playable', 'unavailable', 'unknown']),
+  previous_track_state: new Set(['absent', 'blocked', 'off', 'sendable', 'loading', 'interrupted', 'playable', 'unavailable', 'unknown']),
+  next_track_state: new Set(['absent', 'blocked', 'off', 'sendable', 'loading', 'interrupted', 'playable', 'unavailable', 'unknown']),
   meeting_state: new Set(['joined', 'left', 'reconnecting', 'unknown']),
   network_state: new Set(['online', 'offline', 'unknown']),
   visibility_state: new Set(['visible', 'hidden', 'prerender', 'unknown']),
@@ -388,6 +407,52 @@ const TECHNICAL_ENUM_FIELDS = Object.freeze({
     'stale_owner_takeover',
     'observer_reload',
   ]),
+  remote_participant_count_bucket: new Set(['zero', 'one', 'multiple']),
+  local_remote_classification: new Set(['all_non_local_as_replica', 'none', 'unknown']),
+  audio_subscription_state: new Set(['subscribed', 'staged', 'unsubscribed', 'unknown']),
+  video_subscription_state: new Set(['subscribed', 'staged', 'unsubscribed', 'unknown']),
+  subscription_state: new Set(['subscribed', 'staged', 'unsubscribed', 'unknown']),
+  startup_readiness_state: new Set([
+    'waiting_for_remote_participant', 'remote_participant_present', 'remote_participant_audio_only',
+    'remote_video_loading', 'remote_video_playable', 'replica_progress_confirmed', 'startup_ready',
+    'startup_recovering', 'startup_failed',
+  ]),
+  reconnect_phase: new Set([
+    'idle', 'reconnecting_transport', 'awaiting_remote_presence', 'awaiting_remote_media',
+    'awaiting_practical_progress', 'recovered', 'failed',
+  ]),
+  snapshot_reason: new Set([
+    'initial_discovery', 'participant_joined', 'participant_updated', 'participant_left',
+    'track_started', 'track_stopped', 'reconnect_rediscovery', 'recovery_deadline',
+    'terminal_failure', 'watchdog_snapshot',
+  ]),
+  transition_source: new Set([
+    'participant_joined', 'participant_updated', 'participant_left', 'track_started',
+    'track_stopped', 'reconnect_enumeration', 'watchdog_snapshot',
+  ]),
+  elapsed_since_join_bucket: new Set(['under_15_seconds', '15_45_seconds', '46_75_seconds', 'over_75_seconds', 'unavailable']),
+  audio_receive_state: new Set(['automatic', 'off', 'full', 'base', 'unavailable', 'unknown']),
+  video_receive_state: new Set(['automatic', 'off', 'full', 'base', 'thumbnail', 'unavailable', 'unknown']),
+  settings_source: new Set(['explicit', 'inherited_default', 'unavailable']),
+  video_attachment_result: new Set([
+    'no_track', 'track_loading', 'src_object_attached', 'play_resolved', 'play_rejected_policy',
+    'play_rejected_media', 'play_rejected_unknown', 'element_not_ready', 'track_ended',
+    'detached_for_reconnect', 'replaced_after_reconnect',
+  ]),
+  element_ready_state_bucket: new Set(['empty', 'metadata', 'current_data', 'future_data', 'enough_data', 'unavailable']),
+  element_size_bucket: new Set(['zero', 'nonzero', 'unavailable']),
+  reconnect_binding_phase: new Set(['initiation', 'post_leave', 'rejoin_success', 'participant_rediscovery', 'track_rebinding', 'recovery_deadline']),
+  participant_continuity: new Set(['same_runtime_reference', 'replacement_reference', 'absent', 'unknown']),
+  audio_track_continuity: new Set(['retained', 'replaced', 'absent', 'unknown']),
+  video_track_continuity: new Set(['retained', 'replaced', 'absent', 'unknown']),
+  recovery_age_bucket: new Set(['under_5_seconds', '5_15_seconds', '16_30_seconds', 'over_30_seconds', 'unavailable']),
+  missing_progress_reason: new Set([
+    'no_remote_participant', 'audio_only', 'video_unavailable', 'video_loading',
+    'no_replica_speech', 'no_replica_utterance', 'no_candidate_activity',
+    'media_attachment_unconfirmed', 'multiple_conditions', 'unknown',
+  ]),
+  video_unavailable_duration_bucket: new Set(['under_15_seconds', '15_45_seconds', '46_75_seconds', 'over_75_seconds', 'unavailable']),
+  webhook_latency_bucket: new Set(['under_1_second', '1_5_seconds', '5_15_seconds', 'over_15_seconds', 'unavailable']),
 });
 const TECHNICAL_METADATA_FIELDS = Object.freeze([
   ...Object.keys(TECHNICAL_INTEGER_FIELDS),
@@ -807,14 +872,30 @@ function sanitizeLifecycleEvent(event, startedAt) {
   }
   const receivedAt = event?.received_at || null;
   const observedAt = event?.observed_at || null;
+  const persistedAt = event?.created_at || event?.persisted_at || null;
   const startedMs = parseDateMs(startedAt);
   const eventMs = parseDateMs(observedAt) || parseDateMs(receivedAt);
+  const observedMs = parseDateMs(observedAt);
+  const receivedMs = parseDateMs(receivedAt);
+  const latencyMs = observedMs != null && receivedMs != null && receivedMs >= observedMs
+    ? receivedMs - observedMs
+    : null;
+  if (latencyMs != null) {
+    technicalDetails.webhook_latency_bucket = latencyMs < 1000
+      ? 'under_1_second'
+      : latencyMs <= 5000
+        ? '1_5_seconds'
+        : latencyMs <= 15000
+          ? '5_15_seconds'
+          : 'over_15_seconds';
+  }
   return {
     event: definition[0],
     event_code: EVENT_DEFINITIONS[trimText(event?.event_type, 100)] ? trimText(event.event_type, 100) : 'other',
     group,
     server_timestamp: receivedAt,
     observed_timestamp: observedAt,
+    persistence_timestamp: persistedAt,
     elapsed_ms: startedMs != null && eventMs != null ? Math.max(0, eventMs - startedMs) : null,
     speaker_role: ['candidate', 'ai', 'system'].includes(event?.speaker_role) ? event.speaker_role : 'system',
     utterance_classification: [

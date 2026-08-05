@@ -174,6 +174,61 @@ test('diagnostic contract exposes only the bounded event and metadata allowlists
   assert.equal(METADATA_KEYS.has('conversation_id'), false);
 });
 
+test('startup-readiness and remote-media telemetry accepts only the bounded canonical contract', () => {
+  for (const event of [
+    'daily_remote_participant_snapshot',
+    'daily_remote_track_state_changed',
+    'daily_receive_settings_snapshot',
+    'remote_video_attachment_result',
+    'reconnect_media_binding_snapshot',
+    'startup_readiness_changed',
+  ]) assert.equal(TELEMETRY_EVENTS.has(event), true, event);
+
+  const snapshot = validateTelemetryPayload({
+    ...BASE_PAYLOAD,
+    event: 'daily_remote_participant_snapshot',
+    metadata: {
+      remote_participant_count_bucket: 'one',
+      local_remote_classification: 'all_non_local_as_replica',
+      audio_track_state: 'playable',
+      video_track_state: 'loading',
+      audio_persistent_track_present: true,
+      video_persistent_track_present: true,
+      audio_subscription_state: 'subscribed',
+      video_subscription_state: 'staged',
+      startup_readiness_state: 'remote_video_loading',
+      reconnect_phase: 'idle',
+      snapshot_reason: 'participant_updated',
+    },
+  });
+  assert.equal(snapshot.ok, true);
+
+  const attachment = validateTelemetryPayload({
+    ...BASE_PAYLOAD,
+    event_sequence: 2,
+    event: 'remote_video_attachment_result',
+    metadata: {
+      video_attachment_result: 'play_rejected_policy',
+      video_track_state: 'playable',
+      element_ready_state_bucket: 'metadata',
+      element_visible: true,
+      element_size_bucket: 'nonzero',
+      reconnect_active: false,
+      elapsed_since_join_bucket: 'under_15_seconds',
+      startup_readiness_state: 'remote_video_playable',
+    },
+  });
+  assert.equal(attachment.ok, true);
+
+  const raw = validateTelemetryPayload({
+    ...BASE_PAYLOAD,
+    event_sequence: 3,
+    event: 'daily_remote_track_state_changed',
+    metadata: { track_id: 'forbidden' },
+  });
+  assert.deepEqual(raw, { ok: false, code: 'UNKNOWN_TELEMETRY_METADATA' });
+});
+
 test('zero-deadline local closing diagnostics accept only bounded metadata', () => {
   const cases = [
     ['local_closing_reserved', { closing_state: 'LOCAL_CLOSING', remaining_time_bucket: '0_10' }],

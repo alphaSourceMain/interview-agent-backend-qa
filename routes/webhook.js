@@ -12,6 +12,7 @@ const { INSUFFICIENT_SUMMARY, isSubstantiveTranscript, scoreInterview } = requir
 const { getRoleInterviewAvailability, syncRoleInterviewLimitNotification } = require('../src/lib/roleInterviewAvailability');
 const { transcriptCompletionTransition } = require('../src/lib/interviewLifecycle');
 const { classifyCandidateUtterance } = require('../src/lib/interviewUtteranceClassifier');
+const { excludeWarmupFromTranscript, excludeWarmupFromTranscriptItems } = require('../src/lib/warmupExclusion');
 const {
   buildEvidenceSnapshot,
   projectReconciliationLog,
@@ -1367,7 +1368,7 @@ async function getRoleJdText(roleId, requestId, interviewId, conversationId, opt
 }
 
 async function applyTranscriptScoringForInterview({ interview, fresh, transcriptText, requestId, conversationId }) {
-  const transcript = typeof transcriptText === 'string' ? transcriptText.trim() : '';
+  const transcript = excludeWarmupFromTranscript(transcriptText);
   const substantiveCheck = isSubstantiveTranscript(transcript);
   const transcriptWordCount = transcript ? transcript.split(/\s+/).filter(Boolean).length : 0;
   const candidateResponseTurns = (transcript.match(/^(CANDIDATE|USER)\s*:/gim) || []).length;
@@ -1983,7 +1984,7 @@ function queueFinalTranscriptPostProcessing({
 
   let questions;
   try {
-    questions = extractCandidateQuestions(transcriptItems);
+    questions = extractCandidateQuestions(excludeWarmupFromTranscriptItems(transcriptItems));
   } catch {
     console.error('[webhook] final_transcript_post_processing', {
       outcome: 'failed',

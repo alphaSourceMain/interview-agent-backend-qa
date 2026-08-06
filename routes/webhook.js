@@ -21,6 +21,7 @@ const {
 const {
   extractCandidateQuestions,
 } = require('../src/lib/unansweredCandidateQuestions');
+const { isTerminalInterviewToolName } = require('../src/lib/tavusTerminalTool');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -2738,7 +2739,7 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
     let preserveRecordingState = false;
     let suppressRecordingReadyState = false;
 
-    if (isToolCall && toolName === 'end_interview' && conversationId && interview?.id) {
+    if (isToolCall && isTerminalInterviewToolName(toolName) && conversationId && interview?.id) {
       try {
         const apiKey = String(process.env.TAVUS_API_KEY || '').trim();
         if (!apiKey) {
@@ -2800,7 +2801,7 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
               });
             } else {
               statusAfter = 'ending_requested';
-              console.log('[webhook] tool_call end_interview processed', {
+              console.log('[webhook] terminal tool_call processed', {
                 request_id: requestId || null,
                 conversation_id: conversationId || null,
                 interview_id: interview.id,
@@ -2811,7 +2812,7 @@ router.post('/tavus', express.json({ limit: '10mb' }), async (req, res) => {
           }
         }
       } catch (err) {
-        console.error('[webhook] tool_call end_interview failed', {
+        console.error('[webhook] terminal tool_call failed', {
           request_id: requestId || null,
           conversation_id: conversationId || null,
           interview_id: interview.id,

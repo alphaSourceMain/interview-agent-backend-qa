@@ -9,6 +9,8 @@
 //   TAVUS_SOURCE_PERSONA_ID=p7cb30e9c407 TAVUS_TARGET_PERSONA_ID=p75bb8779b7d node scripts/syncTavusPersona.js --apply
 'use strict';
 
+const { createTavusHttpClient } = require('../src/lib/tavusHttpClient');
+
 try {
   require('dotenv').config();
 } catch (error) {
@@ -17,7 +19,8 @@ try {
 }
 
 const API_KEY = String(process.env.TAVUS_API_KEY || '').trim();
-const API_BASE = String(process.env.TAVUS_API_BASE_URL || 'https://tavusapi.com/v2').trim().replace(/\/+$/, '');
+const API_BASE = String(process.env.TAVUS_API_BASE_URL || '').trim().replace(/\/+$/, '') || undefined;
+const tavusHttpClient = createTavusHttpClient({ apiKey: API_KEY, baseUrl: API_BASE });
 const APPLY = process.argv.includes('--apply');
 
 const COPY_PATHS = [
@@ -149,42 +152,14 @@ function buildPatchAndProposedPersona(source, target) {
   return { patch, proposed, changed };
 }
 
-async function readJsonResponse(response) {
-  const text = await response.text();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
 async function fetchPersona(personaId) {
-  const response = await fetch(`${API_BASE}/personas/${encodeURIComponent(personaId)}`, {
-    method: 'GET',
-    headers: { 'x-api-key': API_KEY }
-  });
-  const body = await readJsonResponse(response);
-  if (!response.ok) {
-    throw new Error(`fetch_persona_failed id=${personaId} status=${response.status} body=${JSON.stringify(body)}`);
-  }
-  return body || {};
+  return await tavusHttpClient.getPersona(personaId) || {};
 }
 
 async function patchPersona(personaId, patch) {
-  const response = await fetch(`${API_BASE}/personas/${encodeURIComponent(personaId)}`, {
-    method: 'PATCH',
-    headers: {
-      'x-api-key': API_KEY,
-      'Content-Type': 'application/json-patch+json'
-    },
-    body: JSON.stringify(patch)
+  return tavusHttpClient.patchPersona(personaId, patch, {
+    contentType: 'application/json-patch+json',
   });
-  const body = await readJsonResponse(response);
-  if (!response.ok) {
-    throw new Error(`patch_persona_failed id=${personaId} status=${response.status} body=${JSON.stringify(body)}`);
-  }
-  return body;
 }
 
 async function main() {
@@ -200,15 +175,11 @@ async function main() {
     console.error('Source and target persona IDs must be different.');
     process.exit(1);
   }
-  if (typeof fetch !== 'function') {
-    throw new Error('This script requires a Node runtime with built-in fetch.');
-  }
-
   console.log('Tavus persona sync');
   console.log('Source persona id:', SOURCE_PERSONA_ID);
   console.log('Target persona id:', TARGET_PERSONA_ID);
   console.log('Mode:', APPLY ? 'apply' : 'dry-run');
-  console.log('Tavus API base:', API_BASE);
+  console.log('Tavus API base:', API_BASE || 'shared-client-default');
 
   const source = await fetchPersona(SOURCE_PERSONA_ID);
   const target = await fetchPersona(TARGET_PERSONA_ID);

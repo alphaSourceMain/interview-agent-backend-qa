@@ -13,6 +13,7 @@ const DATABASE = `alphascreen_durable_otp_${process.pid}`;
 const ROOT = path.resolve(__dirname, '..');
 const BOOTSTRAP = path.join(__dirname, 'fixtures', 'durable-otp-bootstrap.sql');
 const MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260810144400_durable_otp_challenge_architecture.sql');
+const SINGLE_ACTIVE_MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260810155800_durable_otp_single_active_resource.sql');
 
 const FIXTURE = {
   candidate: '82000000-0000-4000-8000-000000000021',
@@ -53,10 +54,10 @@ function apply(filename) {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
 
-function issue(challengeId, bindingFingerprint, verifier = 'a') {
+function issue(challengeId, bindingFingerprint, verifier = 'a', submissionId = FIXTURE.submission) {
   return `set role service_role; select challenge_id from public.service_issue_otp_challenge(
     '${challengeId}','interview_access','email',1::smallint,repeat('${verifier}',64),repeat('${bindingFingerprint}',64),
-    '${FIXTURE.candidate}','${FIXTURE.client}','${FIXTURE.role}','${FIXTURE.submission}',
+    '${FIXTURE.candidate}','${FIXTURE.client}','${FIXTURE.role}','${submissionId}',
     '${FIXTURE.interview}','${FIXTURE.recovery}',repeat('c',64),600,5,'pending');`;
 }
 
@@ -67,6 +68,7 @@ before(() => {
   assert.equal(created.status, 0, created.stderr);
   apply(BOOTSTRAP);
   apply(MIGRATION);
+  apply(SINGLE_ACTIVE_MIGRATION);
 });
 
 after(() => {
@@ -121,6 +123,21 @@ test('successful atomic consume updates only the bound candidate verification st
   assert.equal(sql("select verified from public.candidates where id='82000000-0000-4000-8000-000000000022';").stdout, 'f');
 });
 
+test('renewed submission binding supersedes the prior active resource challenge', { skip: !ENABLED }, () => {
+  sql(issue('82000000-0000-4000-8000-000000000067', '7', '7'));
+  sql(issue('82000000-0000-4000-8000-000000000068', '8', '8', '82000000-0000-4000-8000-000000000033'));
+  assert.equal(
+    sql(`select count(*) filter(where consumed_at is null and superseded_at is null)||'|'||count(*) filter(where superseded_at is not null)
+         from private_auth.otp_challenges
+         where challenge_id in ('82000000-0000-4000-8000-000000000067','82000000-0000-4000-8000-000000000068');`).stdout,
+    '1|1',
+  );
+  assert.equal(
+    sql("select superseded_reason from private_auth.otp_challenges where challenge_id='82000000-0000-4000-8000-000000000067';").stdout,
+    'resource_replaced',
+  );
+});
+
 test('failed attempts are atomic and the configured fifth failure locks the challenge', { skip: !ENABLED }, () => {
   sql(issue('82000000-0000-4000-8000-000000000063', 'e', 'e'));
   const statuses = [];
@@ -145,6 +162,7 @@ test('cross-client candidate/role binding is rejected before insertion', { skip:
 
 test('migration replay is catalog-safe and does not duplicate policies or indexes', { skip: !ENABLED }, () => {
   apply(MIGRATION);
+  apply(SINGLE_ACTIVE_MIGRATION);
   assert.equal(sql("select count(*) from pg_indexes where schemaname='private_auth' and tablename='otp_challenges';").stdout, '4');
   assert.equal(sql("select count(*) from pg_policies where schemaname='private_auth' and tablename='otp_challenges';").stdout, '0');
 });

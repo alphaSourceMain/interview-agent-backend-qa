@@ -11,7 +11,7 @@ The private schema and table grant no access to `PUBLIC`, `anon`, `authenticated
 ## Lifecycle
 
 1. Candidate submission or an authorized recovery creates a new challenge through one atomic RPC.
-2. Issuance takes a transaction-scoped advisory lock on the canonical binding, supersedes any prior active challenge, inserts exactly one new row, and neutralizes any matching active legacy token.
+2. Issuance takes a transaction-scoped advisory lock on the canonical candidate/client/role resource, supersedes every prior active challenge for that resource and channel even when a renewed submission changes the binding fingerprint, inserts exactly one new row, and neutralizes any matching active legacy token.
 3. Email delivery updates only `pending`, `sent`, or `failed` state. Logs contain bounded IDs/status metadata, never the destination or code.
 4. Resend accepts only the prior opaque challenge ID, resolves the server-side binding, and atomically replaces it. The old code cannot be consumed.
 5. Verification retrieves the service-only HMAC context, performs `crypto.timingSafeEqual`, then calls an atomic row-locking consume RPC with only the boolean verifier decision.

@@ -7,7 +7,6 @@
     "start": "node app.js",
     "dev": "nodemon app.js",
     "test": "node --test test/*.test.js",
-    "monitor:support-voice": "node scripts/monitor-support-voice-scale.js",
     "build:render": "echo \"no build step required\""
   },
   "keywords": [],

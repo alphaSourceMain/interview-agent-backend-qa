@@ -11,6 +11,7 @@ const voiceFiles = [
   'src/lib/supportVoiceKnowledge.js',
   'src/lib/supportVoiceMembership.js',
   'src/lib/supportVoiceProtocol.js',
+  'src/lib/supportVoiceSessionStore.js',
 ].map((relative) => ({ relative, source: fs.readFileSync(path.join(root, relative), 'utf8') }));
 
 test('voice call graph has no tenant, candidate, billing, transcript, account-action, tool, or selected-scope path', () => {
@@ -24,7 +25,8 @@ test('voice call graph has no tenant, candidate, billing, transcript, account-ac
     /function_call_output|tools\s*:/i,
   ]) assert.doesNotMatch(combined, forbidden);
   assert.match(combined, /\.from\('client_members'\)/);
-  assert.match(combined, /\.from\('request_rate_limits'\)/);
+  assert.match(combined, /rpc\('service_reserve_support_voice_session'/);
+  assert.doesNotMatch(combined, /\.from\('support_voice_sessions'\)/);
 });
 
 test('authoritative support prompt is bounded, informational-only, and produces an audio-only no-tool session', () => {

@@ -4,6 +4,7 @@ const net = require('node:net');
 const WebSocket = require('ws');
 const { WebSocketServer } = WebSocket;
 const { hasAnyActiveClientMembership } = require('./supportVoiceMembership');
+const { createSupportVoiceSessionStore } = require('./supportVoiceSessionStore');
 const { buildSupportVoicePrompt, getSupportVoiceKnowledgeReadiness, SUPPORT_GREETING } = require('./supportVoiceKnowledge');
 const {
   BROWSER_MAX_PAYLOAD,
@@ -18,14 +19,12 @@ const {
   validateSessionUpdated,
 } = require('./supportVoiceProtocol');
 
-const QA_ORIGIN = 'https://alphasourceai-com.onrender.com';
 const PROTOCOL = 'alphascreen-support-v1';
 const SESSION_PATH = '/api/support/voice';
 const PENDING_TTL_MS = 60_000;
 const MAX_SESSION_MS = 10 * 60_000;
 const IDLE_MS = 120_000;
 const PCM_BYTES_PER_MILLISECOND = 24_000 * 2 / 1000;
-const MAX_SESSIONS = 20;
 const MAX_PREAUTH = 50;
 const ALL_FRAME_RATE = 40;
 const ALL_FRAME_BURST = 80;
@@ -49,7 +48,7 @@ const DIAGNOSTIC_PROVIDER_EVENTS = new Set([
 ]);
 const FINAL_REASONS = new Set([
   'ended', 'idle_timeout', 'max_duration', 'shutdown', 'expired', 'response_failed',
-  'protocol_error', 'support_voice_unavailable',
+  'protocol_error', 'support_voice_unavailable', 'client_disconnected',
 ]);
 const CLIENT_CLOSE_REASONS = new Set([
   'user_end', 'popover_closed', 'signed_out', 'component_unmounted', 'server_ended', 'client_cancelled',
@@ -113,7 +112,9 @@ function noStore(res) {
 function exactOrigin(req, env = process.env) {
   const origin = req.headers.origin;
   if (Array.isArray(origin) || typeof origin !== 'string' || !origin) return false;
-  const allowed = new Set([QA_ORIGIN]);
+  const allowed = new Set();
+  const configured = String(env.SUPPORT_VOICE_ALLOWED_ORIGIN || '').trim();
+  if (configured) allowed.add(configured);
   if (env.NODE_ENV !== 'production' && env.SUPPORT_VOICE_ALLOW_LOCAL_DEV === 'true') {
     allowed.add('http://localhost:5173');
     allowed.add('http://127.0.0.1:5173');
@@ -121,6 +122,20 @@ function exactOrigin(req, env = process.env) {
   try {
     const parsed = new URL(origin);
     return parsed.origin === origin && !parsed.username && !parsed.password && parsed.pathname === '/' && !parsed.search && !parsed.hash && allowed.has(origin);
+  } catch {
+    return false;
+  }
+}
+
+function validAllowedOrigin(env = process.env) {
+  const configured = String(env.SUPPORT_VOICE_ALLOWED_ORIGIN || '').trim();
+  try {
+    const parsed = new URL(configured);
+    if (parsed.origin !== configured || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return false;
+    if (env.NODE_ENV === 'production') return parsed.protocol === 'https:';
+    if (parsed.protocol === 'https:') return true;
+    return env.SUPPORT_VOICE_ALLOW_LOCAL_DEV === 'true' &&
+      (configured === 'http://localhost:5173' || configured === 'http://127.0.0.1:5173');
   } catch {
     return false;
   }
@@ -173,13 +188,13 @@ function safeIp(req, mode) {
   throw new Error('SUPPORT_VOICE_IP_UNAVAILABLE');
 }
 
-function isConfigurationReady(env, knowledge, scaleLeaseHealthy) {
+function isConfigurationReady(env, knowledge, sessionStoreHealthy) {
   return env.SUPPORT_VOICE_ENABLED === 'true' &&
-    env.SUPPORT_VOICE_SINGLE_INSTANCE_CONFIRMED === 'true' &&
     (env.SUPPORT_VOICE_XFF_MODE === 'strict' || env.SUPPORT_VOICE_XFF_MODE === 'best_effort') &&
     (env.SUPPORT_VOICE_ALLOW_LOCAL_DEV !== 'true' || env.NODE_ENV !== 'production') &&
+    validAllowedOrigin(env) &&
     typeof env.XAI_API_KEY === 'string' && env.XAI_API_KEY.trim().length >= 20 &&
-    knowledge.ok === true && scaleLeaseHealthy === true;
+    knowledge.ok === true && sessionStoreHealthy === true;
 }
 
 function createSupportVoiceGateway(options = {}) {
@@ -190,31 +205,24 @@ function createSupportVoiceGateway(options = {}) {
   if (typeof requireAuth !== 'function') throw new Error('SUPPORT_VOICE_REQUIRE_AUTH_REQUIRED');
   const rateLimit = options.rateLimit || require('./rateLimit').checkAndIncrementRateLimit;
   const WebSocketClient = options.WebSocketClient || WebSocket;
+  const sessionStore = options.sessionStore || createSupportVoiceSessionStore({ serviceDb });
   const testDuration = (name, fallback) => env.NODE_ENV === 'test' && Number.isInteger(options[name]) && options[name] > 0 ? options[name] : fallback;
   const idleMs = testDuration('idleMs', IDLE_MS);
   const maxSessionMs = testDuration('maxSessionMs', MAX_SESSION_MS);
-  const pendingTtlMs = testDuration('pendingTtlMs', PENDING_TTL_MS);
   const heartbeatIntervalMs = testDuration('heartbeatIntervalMs', HEARTBEAT_INTERVAL_MS);
   const heartbeatGraceMs = testDuration('heartbeatGraceMs', HEARTBEAT_GRACE_MS);
   const rateTimeoutMs = testDuration('rateTimeoutMs', 2000);
+  const closeRetryBaseMs = testDuration('closeRetryBaseMs', 250);
   const router = express.Router();
-  const monitorRouter = express.Router();
   const sessions = new Map();
-  const userSessions = new Map();
+  const durableClosures = new Map();
   let preauthCount = 0;
-  let scaleLeaseHealthy = options.scaleLeaseHealthy === true;
-  let scaleLeaseUpdatedAt = scaleLeaseHealthy ? Date.now() : 0;
-  let scalePollTimer = null;
   let attachedServer = null;
-  const renderCommit = String(env.RENDER_GIT_COMMIT || '').trim();
-  const renderServiceId = String(env.RENDER_SERVICE_ID || '').trim();
-  const leaseRoute = renderCommit ? `support_voice_scale_lease:${renderCommit}` : '';
-  const leaseSubject = renderServiceId ? digest(`ia-backend-qa\u001f${renderServiceId}`) : '';
 
   function configuration() {
     const knowledge = getSupportVoiceKnowledgeReadiness();
-    const leaseFresh = scaleLeaseHealthy && Date.now() - scaleLeaseUpdatedAt <= 5000;
-    return { knowledge, ready: isConfigurationReady(env, knowledge, leaseFresh), scaleLeaseHealthy: leaseFresh };
+    const sessionStoreHealthy = sessionStore.isHealthy();
+    return { knowledge, ready: isConfigurationReady(env, knowledge, sessionStoreHealthy), sessionStoreHealthy };
   }
 
   function publicHealth() {
@@ -226,7 +234,55 @@ function createSupportVoiceGateway(options = {}) {
       version: config.knowledge.version || null,
       sha256: config.knowledge.sha256 || null,
       xff_mode: ['strict', 'best_effort'].includes(env.SUPPORT_VOICE_XFF_MODE) ? env.SUPPORT_VOICE_XFF_MODE : null,
-      scale_lease_ok: config.scaleLeaseHealthy,
+      session_store_ok: config.sessionStoreHealthy,
+    };
+  }
+
+  function scheduleDurableClose(sessionId, reason, deadlineMs) {
+    if (typeof sessionId !== 'string' || durableClosures.has(sessionId)) return;
+    const safeReason = FINAL_REASONS.has(reason) ? reason : 'other';
+    const deadline = Number.isFinite(deadlineMs) ? deadlineMs : Date.now() + MAX_SESSION_MS;
+    const task = { attempt: 0, deadline, timer: null };
+    durableClosures.set(sessionId, task);
+    const run = async () => {
+      try {
+        const result = await sessionStore.close({ sessionId, reason: safeReason });
+        if (result.status === 'missing' && Date.now() < task.deadline) {
+          throw new Error('SUPPORT_VOICE_DURABLE_CLOSE_NOT_VISIBLE');
+        }
+        durableClosures.delete(sessionId);
+      } catch {
+        if (Date.now() >= task.deadline) {
+          durableClosures.delete(sessionId);
+          logger.warn?.('[support-voice] durable_close_expired', { reason: safeReason });
+          return;
+        }
+        const delay = Math.min(5000, closeRetryBaseMs * (2 ** task.attempt));
+        task.attempt += 1;
+        task.timer = setTimeout(() => { void run(); }, delay);
+        task.timer.unref?.();
+      }
+    };
+    void run();
+  }
+
+  function createActiveEntry(row) {
+    const expiresAt = Date.parse(row.expires_at);
+    return {
+      sessionId: row.session_id,
+      phase: 'consumed',
+      expiresAt,
+      browser: null,
+      upstream: null,
+      timers: new Set(),
+      speaking: false,
+      responseEpoch: 0,
+      responseActive: false,
+      suppressedSpeechEvent: false,
+      playbackEndsAt: 0,
+      lastProviderEvent: null,
+      browserToUpstream: { frames: 0, bytes: 0 },
+      upstreamToBrowser: { frames: 0, bytes: 0 },
     };
   }
 
@@ -245,10 +301,8 @@ function createSupportVoiceGateway(options = {}) {
     }
     for (const timer of entry.timers) clearTimeout(timer);
     entry.timers.clear();
-    if (entry.userHash) userSessions.delete(entry.userHash);
     if (entry.sessionId) sessions.delete(entry.sessionId);
-    entry.credentialDigest = null;
-    entry.userHash = null;
+    scheduleDurableClose(entry.sessionId, safeReason, entry.expiresAt);
     const upstream = entry.upstream;
     try {
       if (entry.browser && entry.browser.readyState === WebSocket.OPEN) {
@@ -283,137 +337,6 @@ function createSupportVoiceGateway(options = {}) {
     for (const entry of [...sessions.values()]) finalize(entry, reason);
   }
 
-  async function refreshScaleLease() {
-    if (env.NODE_ENV === 'test' && options.scaleLeaseHealthy === true) return;
-    if (!leaseRoute || !leaseSubject || typeof serviceDb.from !== 'function') {
-      scaleLeaseHealthy = false;
-      scaleLeaseUpdatedAt = 0;
-      finalizeAll('support_voice_unavailable');
-      return;
-    }
-    try {
-      const query = serviceDb.from('request_rate_limits').select('updated_at').eq('route_name', leaseRoute).eq('subject_key', leaseSubject);
-      const result = typeof query.maybeSingle === 'function' ? await query.maybeSingle() : await query;
-      const timestamp = result?.data?.updated_at;
-      const parsed = typeof timestamp === 'string' ? Date.parse(timestamp) : NaN;
-      const fresh = !result?.error && Number.isFinite(parsed) && parsed <= Date.now() + 1000 && Date.now() - parsed <= 5000;
-      scaleLeaseHealthy = fresh;
-      scaleLeaseUpdatedAt = fresh ? parsed : 0;
-      if (!fresh) finalizeAll('support_voice_unavailable');
-    } catch {
-      scaleLeaseHealthy = false;
-      scaleLeaseUpdatedAt = 0;
-      finalizeAll('support_voice_unavailable');
-    }
-  }
-
-  function validMonitorToken(req) {
-    const expected = String(env.SUPPORT_VOICE_MONITOR_TOKEN || '');
-    const header = String(req.headers.authorization || '');
-    if (!/^[A-Za-z0-9_-]{43}$/.test(expected) || !header.startsWith('Bearer ')) return false;
-    const supplied = header.slice(7);
-    if (supplied.length !== expected.length) return false;
-    return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
-  }
-
-  monitorRouter.use((req, res, next) => {
-    noStore(res);
-    if (!validMonitorToken(req)) return res.status(401).json({ error: 'unauthorized' });
-    next();
-  });
-  monitorRouter.get('/instance', (_req, res) => {
-    const instance = String(env.RENDER_INSTANCE_ID || env.HOSTNAME || '').trim();
-    return res.json({
-      service_id: renderServiceId || null,
-      commit: renderCommit || null,
-      instance_sha256: instance ? digest(instance) : null,
-    });
-  });
-  monitorRouter.post('/scale-lease', express.json({ limit: '4kb', strict: true }), async (req, res) => {
-    const body = req.body;
-    const observedAt = typeof body?.observed_at === 'string' ? Date.parse(body.observed_at) : NaN;
-    const instanceIds = Array.isArray(body?.instance_ids) ? body.instance_ids : [];
-    const valid = exactKeys(body, ['service_id', 'commit', 'running_instances', 'autoscaling', 'active_deploy', 'observed_at', 'instance_ids']) &&
-      body.service_id === renderServiceId && body.commit === renderCommit && body.running_instances === 1 &&
-      body.autoscaling === false && body.active_deploy === false && instanceIds.length === 1 &&
-      typeof instanceIds[0] === 'string' && /^[a-f0-9]{64}$/.test(instanceIds[0]) &&
-      Number.isFinite(observedAt) && observedAt <= Date.now() + 1000 && Date.now() - observedAt <= 5000 &&
-      leaseRoute === `support_voice_scale_lease:${renderCommit}`;
-    if (!valid || typeof serviceDb.rpc !== 'function') {
-      scaleLeaseHealthy = false;
-      scaleLeaseUpdatedAt = 0;
-      finalizeAll('support_voice_unavailable');
-      return res.status(409).json({ ok: false });
-    }
-    try {
-      const { data, error } = await serviceDb.rpc('check_and_increment_rate_limit', {
-        p_route_name: leaseRoute,
-        p_subject_key: leaseSubject,
-        p_window_ms: 60000,
-        p_max_count: 2147483647,
-      });
-      const row = Array.isArray(data) ? data[0] : data;
-      if (error || !row || row.allowed !== true) throw new Error('lease');
-      scaleLeaseHealthy = true;
-      scaleLeaseUpdatedAt = Date.now();
-      return res.json({ ok: true });
-    } catch {
-      scaleLeaseHealthy = false;
-      scaleLeaseUpdatedAt = 0;
-      finalizeAll('support_voice_unavailable');
-      return res.status(503).json({ ok: false });
-    }
-  });
-  monitorRouter.delete('/scale-lease', async (_req, res) => {
-    scaleLeaseHealthy = false;
-    scaleLeaseUpdatedAt = 0;
-    finalizeAll('support_voice_unavailable');
-    try {
-      if (!leaseRoute || !leaseSubject || typeof serviceDb.from !== 'function') throw new Error('lease');
-      const table = serviceDb.from('request_rate_limits');
-      if (!table || typeof table.delete !== 'function') throw new Error('lease');
-      const query = table.delete().eq('route_name', leaseRoute).eq('subject_key', leaseSubject);
-      const result = await query;
-      if (result?.error) throw new Error('lease');
-      return res.status(204).end();
-    } catch {
-      return res.status(503).json({ ok: false });
-    }
-  });
-
-  function reserve(userHash) {
-    if (userSessions.has(userHash)) return { error: 'conflict' };
-    if (sessions.size >= MAX_SESSIONS) return { error: 'capacity' };
-    const sessionId = base64url(16);
-    const credential = base64url(32);
-    const now = Date.now();
-    const entry = {
-      sessionId,
-      credentialDigest: digest(credential),
-      userHash,
-      phase: 'pending',
-      createdAt: now,
-      expiresAt: now + pendingTtlMs,
-      browser: null,
-      upstream: null,
-      timers: new Set(),
-      speaking: false,
-      responseEpoch: 0,
-      responseActive: false,
-      suppressedSpeechEvent: false,
-      playbackEndsAt: 0,
-      lastProviderEvent: null,
-      browserToUpstream: { frames: 0, bytes: 0 },
-      upstreamToBrowser: { frames: 0, bytes: 0 },
-    };
-    const ttl = setTimeout(() => finalize(entry, 'expired'), pendingTtlMs);
-    ttl.unref?.();
-    entry.timers.add(ttl);
-    sessions.set(sessionId, entry);
-    userSessions.set(userHash, entry);
-    return { entry, credential };
-  }
-
   async function increment(action, subject, windowMs, maxCount) {
     if (!RATE_ACTIONS.has(action)) throw new Error('SUPPORT_VOICE_RATE_ACTION_INVALID');
     const result = await Promise.race([
@@ -443,6 +366,8 @@ function createSupportVoiceGateway(options = {}) {
   router.post('/sessions', rejectRequestBody, requireAuth, async (req, res) => {
     const rawUserId = req.user?.id;
     const isAdmin = req.isGlobalAdmin === true;
+    let sessionId = null;
+    let reserveDeadline = 0;
     delete req.userToken;
     if (req.user) req.user.email = null;
     if (typeof rawUserId !== 'string' || !rawUserId) return res.status(401).json({ error: 'support_voice_unauthorized' });
@@ -455,29 +380,41 @@ function createSupportVoiceGateway(options = {}) {
       if (!await increment('support_voice_session_create:user', userHash, 15 * 60_000, 5)) return res.status(429).json({ error: 'support_voice_rate_limited' });
       const ip = safeIp(req, env.SUPPORT_VOICE_XFF_MODE);
       if (ip && !await increment('support_voice_session_create:ip', ip, 15 * 60_000, 20)) return res.status(429).json({ error: 'support_voice_rate_limited' });
-      const reserved = reserve(userHash);
-      if (reserved.error === 'conflict') return res.status(409).json({ error: 'support_voice_already_open' });
-      if (reserved.error) return res.status(503).json({ error: 'support_voice_unavailable' });
-      const onClose = () => { if (!res.writableFinished) finalize(reserved.entry, 'response_failed'); };
+      sessionId = base64url(16);
+      reserveDeadline = Date.now() + PENDING_TTL_MS;
+      const credential = `${sessionId}.${base64url(32)}`;
+      const reserved = await sessionStore.reserve({
+        sessionId,
+        credentialDigest: digest(credential),
+        userFingerprint: userHash,
+      });
+      if (reserved.status === 'conflict') return res.status(409).json({ error: 'support_voice_already_open' });
+      if (reserved.status !== 'created') return res.status(503).json({ error: 'support_voice_unavailable' });
+      const expiresAt = Date.parse(reserved.expires_at);
+      const onClose = () => {
+        if (!res.writableFinished) scheduleDurableClose(sessionId, 'response_failed', expiresAt);
+      };
       res.once('close', onClose);
       res.once('error', onClose);
       return res.status(201).json({
-        session_id: reserved.entry.sessionId,
-        credential: reserved.credential,
-        expires_at: new Date(reserved.entry.expiresAt).toISOString(),
+        session_id: sessionId,
+        credential,
+        expires_at: reserved.expires_at,
       });
     } catch (_error) {
+      if (sessionId) scheduleDurableClose(sessionId, 'response_failed', reserveDeadline);
       return res.status(503).json({ error: 'support_voice_unavailable' });
     }
   });
 
-  router.delete('/sessions/pending', rejectRequestBody, requireAuth, (req, res) => {
+  router.delete('/sessions/pending', rejectRequestBody, requireAuth, async (req, res) => {
     const rawUserId = req.user?.id;
     delete req.userToken;
     if (req.user) req.user.email = null;
     if (typeof rawUserId === 'string' && rawUserId) {
-      const entry = userSessions.get(digest(rawUserId));
-      if (entry?.phase === 'pending') finalize(entry, 'abandoned');
+      try {
+        await sessionStore.closePending({ userFingerprint: digest(rawUserId), reason: 'abandoned' });
+      } catch {}
     }
     return res.status(204).end();
   });
@@ -493,18 +430,27 @@ function createSupportVoiceGateway(options = {}) {
     handleProtocols(protocols) { return protocols.size === 1 && protocols.has(PROTOCOL) ? PROTOCOL : false; },
   });
 
-  function consumeCredential(credential) {
-    if (typeof credential !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(credential)) return null;
-    const credentialDigest = digest(credential);
-    const now = Date.now();
-    for (const entry of sessions.values()) {
-      if (entry.phase === 'pending' && now < entry.expiresAt && entry.credentialDigest && crypto.timingSafeEqual(Buffer.from(entry.credentialDigest), Buffer.from(credentialDigest))) {
-        entry.phase = 'consumed';
-        entry.credentialDigest = null;
-        return entry;
-      }
+  async function consumeCredential(credential) {
+    if (typeof credential !== 'string') return null;
+    const match = /^([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})$/.exec(credential);
+    if (!match) return null;
+    const sessionId = match[1];
+    let consumed;
+    try {
+      consumed = await sessionStore.consume({ credentialDigest: digest(credential) });
+    } catch (error) {
+      scheduleDurableClose(sessionId, 'response_failed', Date.now() + PENDING_TTL_MS);
+      throw error;
     }
-    return null;
+    if (consumed.status !== 'consumed') return null;
+    if (consumed.session_id !== sessionId) {
+      scheduleDurableClose(sessionId, 'protocol_error', Date.now() + PENDING_TTL_MS);
+      scheduleDurableClose(consumed.session_id, 'protocol_error', Date.parse(consumed.expires_at));
+      return null;
+    }
+    const entry = createActiveEntry(consumed);
+    sessions.set(entry.sessionId, entry);
+    return entry;
   }
 
   function guardedSend(entry, direction, socket, encoded, maxPayload) {
@@ -706,7 +652,7 @@ function createSupportVoiceGateway(options = {}) {
   wss.on('connection', (socket) => {
     preauthCount += 1;
     let entry = null;
-    let authenticated = false;
+    let authState = 'awaiting_first';
     let preauthReleased = false;
     const allFrames = createTokenBucket(ALL_FRAME_RATE, ALL_FRAME_BURST);
     const releasePreauth = () => {
@@ -716,43 +662,53 @@ function createSupportVoiceGateway(options = {}) {
     };
     const authTimer = setTimeout(() => { try { socket.close(1008, 'unauthorized'); } catch {} }, 5000);
     authTimer.unref?.();
-    socket.once('message', (raw, isBinary) => {
-      clearTimeout(authTimer);
-      releasePreauth();
-      if (!consumeToken(allFrames) || isBinary || raw.length > 1024) return socket.close(1008, 'unauthorized');
-      const auth = parseJsonTextFrame(raw, 1024);
-      if (!auth) return socket.close(1008, 'unauthorized');
-      if (!exactKeys(auth, ['type', 'credential']) || auth.type !== 'authenticate') return socket.close(1008, 'unauthorized');
-      entry = consumeCredential(auth.credential);
-      auth.credential = null;
-      if (!entry) return socket.close(1008, 'unauthorized');
-      authenticated = true;
-      entry.browser = socket;
-      entry.allFrames = allFrames;
-      entry.audioFrames = createTokenBucket(AUDIO_FRAME_RATE, AUDIO_FRAME_BURST);
-      entry.audioBytes = createTokenBucket(AUDIO_BYTE_RATE, AUDIO_BYTE_BURST);
-      const maximum = setTimeout(() => finalize(entry, 'max_duration'), maxSessionMs);
-      maximum.unref?.();
-      entry.timers.add(maximum);
-      startHeartbeat(entry);
-      try { connectUpstream(entry); } catch { return finalize(entry, 'support_voice_unavailable'); }
-      socket.on('message', (frame, binary) => {
-        if (!authenticated || !entry || !consumeToken(entry.allFrames) || binary || frame.length > BROWSER_MAX_PAYLOAD || entry.phase !== 'ready') return finalize(entry, 'protocol_error');
-        const event = parseJsonTextFrame(frame, BROWSER_MAX_PAYLOAD);
-        if (!event) return finalize(entry, 'protocol_error');
-        const validated = validateBrowserEvent(event);
-        if (!validated || entry.upstream?.readyState !== WebSocket.OPEN) return finalize(entry, 'protocol_error');
-        if (validated.type === 'input_audio_buffer.append') {
-          const audioBytes = Buffer.from(validated.audio, 'base64').length;
-          if (!consumeToken(entry.audioFrames) || !consumeToken(entry.audioBytes, audioBytes)) return finalize(entry, 'protocol_error');
-          if (entry.responseActive) return;
+    socket.on('message', async (raw, isBinary) => {
+      if (authState === 'consuming') return socket.close(1008, 'unauthorized');
+      if (authState === 'awaiting_first') {
+        authState = 'consuming';
+        clearTimeout(authTimer);
+        releasePreauth();
+        if (!consumeToken(allFrames) || isBinary || raw.length > 1024) return socket.close(1008, 'unauthorized');
+        const auth = parseJsonTextFrame(raw, 1024);
+        if (!auth || !exactKeys(auth, ['type', 'credential']) || auth.type !== 'authenticate') return socket.close(1008, 'unauthorized');
+        try {
+          entry = await consumeCredential(auth.credential);
+        } catch {
+          entry = null;
+        } finally {
+          auth.credential = null;
         }
-        if (!sendUpstream(entry, validated)) return finalize(entry, 'support_voice_unavailable');
-      });
+        if (!entry) return socket.close(1008, 'unauthorized');
+        if (socket.readyState !== WebSocket.OPEN) return finalize(entry, 'client_disconnected');
+        authState = 'authenticated';
+        entry.browser = socket;
+        entry.allFrames = allFrames;
+        entry.audioFrames = createTokenBucket(AUDIO_FRAME_RATE, AUDIO_FRAME_BURST);
+        entry.audioBytes = createTokenBucket(AUDIO_BYTE_RATE, AUDIO_BYTE_BURST);
+        const maximumDelay = Math.max(1, Math.min(maxSessionMs, entry.expiresAt - Date.now()));
+        const maximum = setTimeout(() => finalize(entry, 'max_duration'), maximumDelay);
+        maximum.unref?.();
+        entry.timers.add(maximum);
+        startHeartbeat(entry);
+        try { connectUpstream(entry); } catch { finalize(entry, 'support_voice_unavailable'); }
+        return;
+      }
+
+      if (!entry || !consumeToken(entry.allFrames) || isBinary || raw.length > BROWSER_MAX_PAYLOAD || entry.phase !== 'ready') return finalize(entry, 'protocol_error');
+      const event = parseJsonTextFrame(raw, BROWSER_MAX_PAYLOAD);
+      if (!event) return finalize(entry, 'protocol_error');
+      const validated = validateBrowserEvent(event);
+      if (!validated || entry.upstream?.readyState !== WebSocket.OPEN) return finalize(entry, 'protocol_error');
+      if (validated.type === 'input_audio_buffer.append') {
+        const audioBytes = Buffer.from(validated.audio, 'base64').length;
+        if (!consumeToken(entry.audioFrames) || !consumeToken(entry.audioBytes, audioBytes)) return finalize(entry, 'protocol_error');
+        if (entry.responseActive) return;
+      }
+      if (!sendUpstream(entry, validated)) return finalize(entry, 'support_voice_unavailable');
     });
     socket.on('close', (_code, rawReason) => {
       clearTimeout(authTimer);
-      if (!authenticated) releasePreauth();
+      if (authState !== 'authenticated') releasePreauth();
       const clientReason = parseClientCloseReason(rawReason);
       if (clientReason && CLIENT_ERROR_CLOSE_REASONS.has(clientReason)) {
         logger.warn?.('[support-voice] client_session_closed', { reason: clientReason });
@@ -761,7 +717,7 @@ function createSupportVoiceGateway(options = {}) {
     });
     socket.on('error', () => {
       clearTimeout(authTimer);
-      if (!authenticated) releasePreauth();
+      if (authState !== 'authenticated') releasePreauth();
       if (entry) finalize(entry, 'support_voice_unavailable');
     });
   });
@@ -770,11 +726,7 @@ function createSupportVoiceGateway(options = {}) {
     if (attachedServer === server) return;
     if (attachedServer) throw new Error('SUPPORT_VOICE_ALREADY_ATTACHED');
     attachedServer = server;
-    if (env.NODE_ENV !== 'test') {
-      scalePollTimer = setInterval(() => { void refreshScaleLease(); }, 2000);
-      scalePollTimer.unref?.();
-      void refreshScaleLease();
-    }
+    sessionStore.start();
     server.on('upgrade', (req, socket, head) => {
       let path;
       try { path = new URL(req.url, 'http://localhost').pathname; } catch { return socket.destroy(); }
@@ -788,20 +740,17 @@ function createSupportVoiceGateway(options = {}) {
   return {
     attach,
     finalizeAll: () => {
-      if (scalePollTimer) clearInterval(scalePollTimer);
-      scalePollTimer = null;
       finalizeAll('shutdown');
+      sessionStore.stop();
     },
     health: configuration,
     publicHealth,
-    monitorRouter,
     router,
-    setScaleLeaseHealthyForTest(value) {
-      if (env.NODE_ENV !== 'test') throw new Error('SUPPORT_VOICE_TEST_ONLY');
-      scaleLeaseHealthy = value === true;
-      scaleLeaseUpdatedAt = scaleLeaseHealthy ? Date.now() : 0;
+    setSessionStoreHealthyForTest(value) {
+      if (env.NODE_ENV !== 'test' || typeof sessionStore?._state?.setHealthyForTest !== 'function') throw new Error('SUPPORT_VOICE_TEST_ONLY');
+      sessionStore._state.setHealthyForTest(value);
     },
-    _state: { sessions, userSessions, wss },
+    _state: { durableClosures, sessions, sessionStore, wss },
   };
 }
 
@@ -819,10 +768,7 @@ module.exports = {
   INFLIGHT_MAX_BYTES,
   INFLIGHT_MAX_FRAMES,
   MAX_PREAUTH,
-  MAX_SESSIONS,
-  PENDING_TTL_MS,
   PROTOCOL,
-  QA_ORIGIN,
   RATE_ACTIONS,
   SESSION_PATH,
   consumeToken,
@@ -833,4 +779,5 @@ module.exports = {
   isPublicIp,
   rejectRequestBody,
   safeIp,
+  validAllowedOrigin,
 };

@@ -30,29 +30,34 @@ Conversation audio exists only in bounded process/browser memory while the live 
 - Before that attestation, only the exact bounded xAI `session.created`, `conversation.created`, and `ping` control envelopes are ignored. The pre-update `session.created` snapshot permits only xAI's observed content-free `turn_detection` defaults: `null`, exact `{ "type": null }`, or exact `{ "type": "server_vad" }`; none can grant readiness. A valid content-free `ping` is also ignored during greeting or an attested session; a late session/conversation creation event terminates instead of resetting state. No control can make the browser ready or alter the authoritative session, and malformed, unknown, or capability-bearing messages remain fail-closed.
 - After exact attestation, the gateway queues the one server-owned greeting and marks the transport ready in the same JavaScript turn. Provider response events may therefore arrive before the WebSocket send callback without being mistaken for pre-ready capability drift; a synchronous throw, callback error, or callback timeout still closes the session.
 - Unexpected session finalization records only a bounded reason, state-machine phase, and allowlisted provider event type. It never logs credentials, customer identity, prompt/knowledge text, audio, transcripts, provider payloads, or identifiers.
-- Sessions are limited to one per user, 20 per process, ten minutes maximum, 120 seconds of user inactivity, and a 25-second ping/10-second pong deadline.
+- Sessions are limited to one live session per user, 20 live sessions globally, ten minutes maximum, 120 seconds of user inactivity, and a 25-second ping/10-second pong deadline.
 
-## Single-instance scale lease
+## Durable multi-instance session authority
 
-This QA phase uses an in-memory one-time credential and therefore runs only while Render is manually fixed at one instance with autoscaling disabled. `scripts/monitor-support-voice-scale.js` is the mandatory operator monitor for the entire enabled acceptance window.
+One-time browser credential authority is stored in `private_support.support_voice_sessions`, not in a backend process. The browser receives the plaintext credential once; only its SHA-256 digest is written through a service-role RPC. Any healthy backend instance can atomically consume that digest exactly once before it connects to xAI.
 
-The monitor samples every two seconds and requires all of the following:
+The database owns all security constants and transitions:
 
-- Render `GET /v1/services/{serviceId}` reports a manually configured instance count of one and no enabled autoscaling;
-- Render `GET /v1/services/{serviceId}/instances` returns exactly one instance;
-- Render deploy inventory has no active deploy and contains the exact expected live commit;
-- the backend's authenticated instance probe reports the same service and commit plus a bounded SHA-256 identity for the live backend process. Render's public instance ID and the container hostname are different identifiers, so they are independently validated rather than compared for equality.
+- pending credentials expire after 60 seconds;
+- consumed sessions expire after 600 seconds;
+- one pending/active row is permitted per user fingerprint;
+- no more than 20 pending/active rows are permitted globally;
+- reserve is serialized by one namespaced transaction advisory lock;
+- consume changes one pending row to active under a row lock and removes its credential digest;
+- close and pending-abandon operations are idempotent.
 
-Each matching sample renews a five-second, content-free shared lease in the existing `request_rate_limits` table. One transient request/transport failure receives one immediate bounded retry without renewing the lease from failed evidence. If both attempts fail transiently, the monitor remains alive and continues sampling without renewing or explicitly deleting the last verified lease. The unchanged five-second backend freshness limit therefore remains the fail-closed ceiling while allowing a brief transport interruption to recover. A fixed degraded marker is emitted once when transient failure begins and a fixed recovered marker once after the next verified sample; neither contains endpoint, response, credential, or user data. Scale, deploy, or process-identity safety mismatches are never retried and immediately revoke the lease. Explicit stop or lease expiry also disables new sessions and closes live sessions. Stopping the monitor revokes and deletes the operational lease row. Never enable the frontend or backend voice flag without the running monitor.
+`private_support` grants no schema usage to `PUBLIC`, `anon`, `authenticated`, or `service_role`. Its RLS-enabled table has no policies and no direct application-role grants. PostgreSQL-owned `SECURITY DEFINER` wrappers use an empty `search_path`; only `service_role` may execute the five public support-session RPCs. This is an authorization boundary, not a product-data store. It contains only opaque session IDs, credential digests, user fingerprints, state, timestamps, and bounded close reasons.
 
-Required operator-only environment variables are `RENDER_API_KEY`, `RENDER_SERVICE_ID`, `RENDER_GIT_COMMIT`, `SUPPORT_VOICE_MONITOR_TOKEN`, and `SUPPORT_VOICE_BACKEND_ORIGIN=https://ia-backend-qa.onrender.com`. Do not print or persist their values.
+The backend probes the content-free health RPC every two seconds. Readiness is valid for at most five seconds after a successful probe. Health, reserve, and consume failures fail closed; only a later successful probe restores readiness. Terminal WebSocket cleanup retries the idempotent close RPC with bounded exponential backoff until success or the database-owned session expiry. A process crash cannot keep authority live beyond that expiry.
+
+`SUPPORT_VOICE_ALLOWED_ORIGIN` is mandatory and exact. Production-mode backends accept only an HTTPS origin. Localhost is available only in non-production with the explicit local-development flag. The former external scale monitor, monitor token, internal monitor routes, hard-coded QA origin, and single-instance confirmation flag are not part of this architecture.
 
 ## Release order
 
-1. Deploy the backend with the feature disabled and verify its exact commit and knowledge hash.
-2. Confirm one Render instance, autoscaling off, no active deploy, and start the scale monitor.
-3. Enable the QA backend flag only after the monitor is renewing a healthy lease.
-4. Deploy the matching QA frontend knowledge snapshot, verify hash parity, and enable its QA-only control.
-5. Run hosted acceptance, disable the frontend then backend feature, stop the monitor, and verify the lease row is absent.
+1. Apply the reviewed durable-session migration while the feature remains disabled.
+2. Deploy the exact reviewed backend commit with `SUPPORT_VOICE_ALLOWED_ORIGIN` set to the exact QA frontend origin.
+3. Require `session_store_ok=true`, exact backend identity, and knowledge-hash parity before enabling the backend feature.
+4. Deploy/enable the matching QA frontend only after backend readiness is green.
+5. Run hosted creation, cross-instance-equivalent consume, replay, conflict, timeout, close, privacy, and product-data non-mutation acceptance.
 
-Production flags remain off. A future FAQ change must regenerate the snapshot, update both repositories, and repeat the backend-first parity gate.
+Production remains a separate reconstruction and approval gate. A future FAQ change must regenerate the snapshot, update both repositories, and repeat the backend-first parity gate.

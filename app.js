@@ -163,7 +163,6 @@ const supportVoiceGateway = createSupportVoiceGateway({
   serviceDb: supabaseAdmin,
 })
 app.use('/api/support/voice', supportVoiceGateway.router)
-app.use('/internal/support/voice', supportVoiceGateway.monitorRouter)
 
 // ---------- CORS ----------
 const DEFAULT_ORIGINS = corsDefaultOrigins

@@ -5,6 +5,7 @@ const http = require('node:http');
 const test = require('node:test');
 const WebSocket = require('ws');
 const { createSupportVoiceGateway } = require('../src/lib/supportVoiceGateway');
+const { createBacking, createMemorySupportVoiceStore } = require('./helpers/supportVoiceTestStore');
 
 const ORIGIN = 'https://alphasourceai-com.onrender.com';
 
@@ -98,16 +99,23 @@ async function setup(options = {}) {
   const env = {
     NODE_ENV: 'test',
     SUPPORT_VOICE_ENABLED: 'true',
-    SUPPORT_VOICE_SINGLE_INSTANCE_CONFIRMED: 'true',
+    SUPPORT_VOICE_ALLOWED_ORIGIN: ORIGIN,
     SUPPORT_VOICE_XFF_MODE: 'best_effort',
     XAI_API_KEY: 'xai-test-key-not-a-real-secret',
   };
   const logs = [];
+  const backing = options.backing || createBacking();
+  const sessionStore = options.sessionStore || createMemorySupportVoiceStore({
+    backing,
+    consumeDelayMs: options.consumeDelayMs,
+    consumeFailureAfterCommit: options.consumeFailureAfterCommit,
+    closeFailures: options.closeFailures,
+  });
   const gateway = createSupportVoiceGateway({
     env,
     logger: { warn(event, metadata) { logs.push({ event, metadata }); } },
     serviceDb: membershipDb(),
-    scaleLeaseHealthy: true,
+    sessionStore,
     WebSocketClient: FakeUpstream,
     requireAuth(req, res, next) {
       if (!req.headers.authorization) return res.status(401).end();
@@ -120,6 +128,7 @@ async function setup(options = {}) {
     heartbeatGraceMs: options.heartbeatGraceMs,
     idleMs: options.idleMs,
     maxSessionMs: options.maxSessionMs,
+    closeRetryBaseMs: options.closeRetryBaseMs,
   });
   const app = express();
   app.use('/api/support/voice', gateway.router);
@@ -143,10 +152,12 @@ async function setup(options = {}) {
   });
   return {
     gateway,
+    backing,
     logs,
     messages,
     socket,
     server,
+    sessionStore,
     close: async () => {
       try { socket.close(); } catch {}
       gateway.finalizeAll();
@@ -178,6 +189,17 @@ test('authenticated browser WS receives ready only after exact provider attestat
     assert.equal(upstream.sent[0].session.input_audio_transcription, null);
     assert.equal(Object.hasOwn(upstream.sent[0].session, 'tools'), false);
     assert.equal(upstream.sent[1].item.type, 'force_message');
+  } finally {
+    await h.close();
+  }
+});
+
+test('ambiguous consume failure closes the durable row before any xAI connection', async () => {
+  const h = await setup({ consumeFailureAfterCommit: true });
+  try {
+    await waitFor(() => [...h.backing.sessions.values()].some((row) => row.phase === 'closed'));
+    assert.equal(FakeUpstream.instances.length, 0);
+    assert.equal([...h.backing.sessions.values()][0].reason, 'response_failed');
   } finally {
     await h.close();
   }
@@ -525,6 +547,21 @@ test('any client frame after credential authentication but before provider ready
     h.socket.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
     await waitFor(() => h.messages.some((message) => message.type === 'error'));
     assert.equal(upstream.sent.some((event) => event.type === 'input_audio_buffer.clear'), false);
+  } finally {
+    await h.close();
+  }
+});
+
+test('terminal cleanup retries the idempotent durable close until it succeeds', async () => {
+  const h = await setup({ closeFailures: 2, closeRetryBaseMs: 5 });
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    h.socket.close(1000, 'user_end');
+    await waitFor(() => h.sessionStore.calls.filter((call) => call.operation === 'close').length >= 3);
+    await waitFor(() => h.gateway._state.durableClosures.size === 0);
+    const closeCalls = h.sessionStore.calls.filter((call) => call.operation === 'close');
+    assert.equal(closeCalls.length, 3);
+    assert.ok(closeCalls.every((call) => call.reason === 'ended'));
   } finally {
     await h.close();
   }

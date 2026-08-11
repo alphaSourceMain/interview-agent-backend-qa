@@ -7,6 +7,7 @@ const {
   classifyProviderEvent,
   decodeCanonicalAudio,
   validateBrowserEvent,
+  validatePreAttestationProviderEvent,
   validateSessionUpdated,
 } = require('../src/lib/supportVoiceProtocol');
 
@@ -56,6 +57,41 @@ test('closed session.updated attestation accepts current bounded provider envelo
   event.event_id = '00000000-0000-4000-8000-000000000000';
   event.previous_item_id = null;
   assert.equal(validateSessionUpdated(event, { prompt, voice: 'carina' }), true);
+});
+
+test('only the exact current bounded pre-attestation provider controls are accepted', () => {
+  const controls = [
+    {
+      type: 'session.created',
+      event_id: '00000000-0000-4000-8000-000000000001',
+      session: { id: 'session-1', instructions: '', modalities: ['audio'], model: 'grok-voice-think-fast-2.0', object: 'realtime.session', tools: [], turn_detection: { type: 'server_vad' }, voice: 'xai_ara' },
+    },
+    {
+      type: 'conversation.created',
+      event_id: '00000000-0000-4000-8000-000000000002',
+      previous_item_id: null,
+      conversation: { id: 'conversation-1', object: 'realtime.conversation' },
+    },
+    {
+      type: 'ping',
+      event_id: '00000000-0000-4000-8000-000000000003',
+      previous_item_id: null,
+      timestamp: 1_786_466_400,
+    },
+  ];
+  for (const event of controls) assert.equal(validatePreAttestationProviderEvent(event), true);
+  for (const event of [
+    { ...controls[0], event_id: '' },
+    { ...controls[0], session: { ...controls[0].session, tools: [{}] } },
+    { ...controls[0], session: { ...controls[0].session, instructions: 'provider default instruction' } },
+    { ...controls[0], session: { ...controls[0].session, turn_detection: { type: 'server_vad', threshold: 0.5 } } },
+    { ...controls[1], previous_item_id: {} },
+    { ...controls[1], conversation: { ...controls[1].conversation, metadata: {} } },
+    { ...controls[2], timestamp: Number.MAX_SAFE_INTEGER + 1 },
+    { ...controls[2], provider_metadata: true },
+    { type: 'rate_limits.updated', event_id: controls[0].event_id },
+  ]) assert.equal(validatePreAttestationProviderEvent(event), false);
+  assert.equal(validatePreAttestationProviderEvent({ ...controls[2], previous_item_id: 'item-1' }), true);
 });
 
 for (const mutation of [

@@ -10,6 +10,7 @@ const ORIGIN = 'https://alphasourceai-com.onrender.com';
 
 class FakeUpstream extends EventEmitter {
   static instances = [];
+  static preAttestationEvents = [];
   static sessionUpdatedDelayMs = 0;
   static stallAudioCallbacks = false;
   constructor(url, options) {
@@ -30,30 +31,33 @@ class FakeUpstream extends EventEmitter {
     this.sent.push(event);
     if (event.type === 'session.update') {
       const prompt = event.session.instructions;
-      const acknowledge = () => this.emitProvider({
-        type: 'session.updated',
-        event_id: '00000000-0000-4000-8000-000000000000',
-        previous_item_id: null,
-        session: {
-          audio: {
-            input: { format: { type: 'audio/pcm', rate: 24000 }, transport: 'json' },
-            output: { format: { type: 'audio/pcm', rate: 24000 }, transport: 'json' },
+      const acknowledge = () => {
+        for (const providerEvent of FakeUpstream.preAttestationEvents) this.emitProvider(providerEvent);
+        this.emitProvider({
+          type: 'session.updated',
+          event_id: '00000000-0000-4000-8000-000000000000',
+          previous_item_id: null,
+          session: {
+            audio: {
+              input: { format: { type: 'audio/pcm', rate: 24000 }, transport: 'json' },
+              output: { format: { type: 'audio/pcm', rate: 24000 }, transport: 'json' },
+            },
+            enable_noise_suppression: true,
+            enable_phonetic_spelling: false,
+            input_audio_format: 'not specified',
+            input_audio_transcription: null,
+            instructions: prompt,
+            keep_context: false,
+            max_response_output_tokens: 'inf',
+            modalities: ['audio'],
+            model: 'grok-voice-think-fast-2.0',
+            output_audio_format: 'not specified',
+            temperature: -1,
+            tool_choice: 'auto',
+            turn_detection: { prefix_padding_ms: 300, silence_duration_ms: 800, threshold: 0.85, type: 'server_vad' },
           },
-          enable_noise_suppression: true,
-          enable_phonetic_spelling: false,
-          input_audio_format: 'not specified',
-          input_audio_transcription: null,
-          instructions: prompt,
-          keep_context: false,
-          max_response_output_tokens: 'inf',
-          modalities: ['audio'],
-          model: 'grok-voice-think-fast-2.0',
-          output_audio_format: 'not specified',
-          temperature: -1,
-          tool_choice: 'auto',
-          turn_detection: { prefix_padding_ms: 300, silence_duration_ms: 800, threshold: 0.85, type: 'server_vad' },
-        },
-      });
+        });
+      };
       if (FakeUpstream.sessionUpdatedDelayMs > 0) setTimeout(acknowledge, FakeUpstream.sessionUpdatedDelayMs);
       else queueMicrotask(acknowledge);
     }
@@ -83,6 +87,7 @@ function membershipDb() {
 
 async function setup(options = {}) {
   FakeUpstream.instances = [];
+  FakeUpstream.preAttestationEvents = options.preAttestationEvents || [];
   FakeUpstream.sessionUpdatedDelayMs = options.sessionUpdatedDelayMs || 0;
   FakeUpstream.stallAudioCallbacks = options.stallAudioCallbacks === true;
   const env = {
@@ -165,6 +170,91 @@ test('authenticated browser WS receives ready only after exact provider attestat
     assert.equal(upstream.sent[0].session.input_audio_transcription, null);
     assert.equal(Object.hasOwn(upstream.sent[0].session, 'tools'), false);
     assert.equal(upstream.sent[1].item.type, 'force_message');
+  } finally {
+    await h.close();
+  }
+});
+
+test('current bounded xAI control prelude is ignored until exact session attestation succeeds', async () => {
+  const h = await setup({
+    preAttestationEvents: [
+      {
+        type: 'session.created',
+        event_id: '00000000-0000-4000-8000-000000000001',
+        session: { id: 'session-1', instructions: '', modalities: ['audio'], model: 'grok-voice-think-fast-2.0', object: 'realtime.session', tools: [], turn_detection: { type: 'server_vad' }, voice: 'xai_ara' },
+      },
+      {
+        type: 'conversation.created',
+        event_id: '00000000-0000-4000-8000-000000000002',
+        previous_item_id: null,
+        conversation: { id: 'conversation-1', object: 'realtime.conversation' },
+      },
+      {
+        type: 'ping',
+        event_id: '00000000-0000-4000-8000-000000000003',
+        previous_item_id: null,
+        timestamp: 1_786_466_400,
+      },
+    ],
+  });
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    assert.equal(h.messages.some((message) => message.type === 'error'), false);
+    assert.equal(FakeUpstream.instances[0].sent.filter((event) => event.type === 'conversation.item.create').length, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test('unknown or malformed pre-attestation provider control fails closed before greeting', async () => {
+  const h = await setup({
+    preAttestationEvents: [{
+      type: 'ping',
+      event_id: '00000000-0000-4000-8000-000000000003',
+      previous_item_id: null,
+      timestamp: 1_786_466_400,
+      provider_metadata: true,
+    }],
+  });
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'error'));
+    assert.equal(h.messages.some((message) => message.type === 'ready'), false);
+    assert.equal(FakeUpstream.instances[0].sent.some((event) => event.type === 'conversation.item.create'), false);
+  } finally {
+    await h.close();
+  }
+});
+
+test('bounded provider ping remains content-free and non-terminal after attestation', async () => {
+  const h = await setup();
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    const before = h.messages.length;
+    FakeUpstream.instances[0].emitProvider({
+      type: 'ping',
+      event_id: '00000000-0000-4000-8000-000000000004',
+      previous_item_id: 'item-1',
+      timestamp: 1_786_466_401,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(h.messages.length, before);
+    assert.equal(h.socket.readyState, WebSocket.OPEN);
+  } finally {
+    await h.close();
+  }
+});
+
+test('late session-created control terminates instead of resetting an attested session', async () => {
+  const h = await setup();
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    FakeUpstream.instances[0].emitProvider({
+      type: 'session.created',
+      event_id: '00000000-0000-4000-8000-000000000005',
+      session: { id: 'session-2', instructions: '', modalities: ['audio'], model: 'grok-voice-think-fast-2.0', object: 'realtime.session', tools: [], turn_detection: { type: 'server_vad' }, voice: 'xai_ara' },
+    });
+    await waitFor(() => h.messages.some((message) => message.type === 'error'));
+    assert.equal(FakeUpstream.instances[0].sent.filter((event) => event.type === 'conversation.item.create').length, 1);
   } finally {
     await h.close();
   }

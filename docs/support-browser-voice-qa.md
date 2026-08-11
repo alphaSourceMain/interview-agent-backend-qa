@@ -27,6 +27,7 @@ Conversation audio exists only in bounded process/browser memory while the live 
 - The browser WebSocket accepts only `alphascreen-support-v1`, a one-time body-frame credential, bounded 24 kHz PCM16 audio, and clear-buffer control. It does not accept text, tools, functions, session overrides, or response instructions.
 - The server sends one audio-only xAI session configuration with transcription and resumption disabled. Provider transcripts, text, conversation items, tools, searches, MCP, and function events are never forwarded.
 - The `session.updated` attestation permits only xAI's bounded `event_id` and nullable `previous_item_id` envelope metadata in addition to the exact server-owned session contract. Unknown metadata and any capability, prompt, model, voice, modality, transcription, resumption, tool, or transport drift remain fail-closed.
+- Before that attestation, only the exact bounded xAI `session.created`, `conversation.created`, and `ping` control envelopes are ignored. A valid content-free `ping` is also ignored during greeting or an attested session; a late session/conversation creation event terminates instead of resetting state. No control can make the browser ready or alter the authoritative session, and malformed, unknown, or capability-bearing messages remain fail-closed.
 - Sessions are limited to one per user, 20 per process, ten minutes maximum, 120 seconds of user inactivity, and a 25-second ping/10-second pong deadline.
 
 ## Single-instance scale lease

@@ -51,6 +51,34 @@ function validateAudioEndpoint(value) {
     value.format.type === 'audio/pcm' && value.format.rate === 24000 && value.transport === 'json';
 }
 
+function validatePreAttestationProviderEvent(event) {
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return false;
+  if (event.type === 'session.created') {
+    if (!exactKeys(event, ['type', 'event_id', 'session']) || !boundedProviderIdentifier(event.event_id)) return false;
+    const session = event.session;
+    if (!exactKeys(session, ['id', 'instructions', 'modalities', 'model', 'object', 'tools', 'turn_detection', 'voice'])) return false;
+    if (!boundedProviderIdentifier(session.id) || !boundedProviderIdentifier(session.voice)) return false;
+    if (session.instructions !== '' || session.model !== MODEL || session.object !== 'realtime.session') return false;
+    if (!Array.isArray(session.modalities) || session.modalities.length !== 1 || session.modalities[0] !== 'audio') return false;
+    if (!Array.isArray(session.tools) || session.tools.length !== 0) return false;
+    return exactKeys(session.turn_detection, ['type']) && session.turn_detection.type === 'server_vad';
+  }
+  if (event.type === 'conversation.created') {
+    if (!exactKeys(event, ['type', 'event_id', 'previous_item_id', 'conversation']) ||
+        !boundedProviderIdentifier(event.event_id) ||
+        !boundedProviderIdentifier(event.previous_item_id, { nullable: true })) return false;
+    return exactKeys(event.conversation, ['id', 'object']) &&
+      boundedProviderIdentifier(event.conversation.id) && event.conversation.object === 'realtime.conversation';
+  }
+  if (event.type === 'ping') {
+    return exactKeys(event, ['type', 'event_id', 'previous_item_id', 'timestamp']) &&
+      boundedProviderIdentifier(event.event_id) &&
+      boundedProviderIdentifier(event.previous_item_id, { nullable: true }) &&
+      Number.isSafeInteger(event.timestamp) && event.timestamp >= 0;
+  }
+  return false;
+}
+
 function validateSessionUpdated(event, { prompt, voice = DEFAULT_VOICE }) {
   if (!event || typeof event !== 'object' || Array.isArray(event) || event.type !== 'session.updated' || !own(event, 'session')) return false;
   const eventKeys = Object.keys(event);
@@ -144,5 +172,6 @@ module.exports = {
   exactKeys,
   providerCapabilityEvent,
   validateBrowserEvent,
+  validatePreAttestationProviderEvent,
   validateSessionUpdated,
 };

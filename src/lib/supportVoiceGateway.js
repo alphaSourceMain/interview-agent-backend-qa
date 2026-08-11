@@ -14,6 +14,7 @@ const {
   classifyProviderEvent,
   exactKeys,
   validateBrowserEvent,
+  validatePreAttestationProviderEvent,
   validateSessionUpdated,
 } = require('./supportVoiceProtocol');
 
@@ -569,6 +570,11 @@ function createSupportVoiceGateway(options = {}) {
       if (isBinary || raw.length > UPSTREAM_MAX_PAYLOAD) return finalize(entry, 'support_voice_unavailable');
       const event = parseJsonTextFrame(raw, UPSTREAM_MAX_PAYLOAD);
       if (!event) return finalize(entry, 'support_voice_unavailable');
+      if (validatePreAttestationProviderEvent(event)) {
+        if (entry.phase === 'session_update_sent' ||
+            (event.type === 'ping' && (entry.phase === 'greeting_sent' || entry.phase === 'ready'))) return;
+        return finalize(entry, 'support_voice_unavailable');
+      }
       if (event.type === 'session.updated') {
         if (entry.phase !== 'session_update_sent' || !validateSessionUpdated(event, { prompt: built.prompt, voice: DEFAULT_VOICE })) return finalize(entry, 'support_voice_unavailable');
         clearTimeout(entry.ackTimer);

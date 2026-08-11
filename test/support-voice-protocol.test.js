@@ -94,6 +94,24 @@ test('only the exact current bounded pre-attestation provider controls are accep
   assert.equal(validatePreAttestationProviderEvent({ ...controls[2], previous_item_id: 'item-1' }), true);
 });
 
+test('pre-attestation session.created accepts the current content-free null turn detection default', () => {
+  const event = {
+    type: 'session.created',
+    event_id: '00000000-0000-4000-8000-000000000004',
+    session: {
+      id: 'session-1',
+      instructions: '',
+      modalities: ['audio'],
+      model: 'grok-voice-think-fast-2.0',
+      object: 'realtime.session',
+      tools: [],
+      turn_detection: null,
+      voice: 'xai_ara',
+    },
+  };
+  assert.equal(validatePreAttestationProviderEvent(event), true);
+});
+
 for (const mutation of [
   (event) => { event.event_id = ''; },
   (event) => { event.event_id = `event-${'x'.repeat(195)}`; },

@@ -61,7 +61,8 @@ function validatePreAttestationProviderEvent(event) {
     if (session.instructions !== '' || session.model !== MODEL || session.object !== 'realtime.session') return false;
     if (!Array.isArray(session.modalities) || session.modalities.length !== 1 || session.modalities[0] !== 'audio') return false;
     if (!Array.isArray(session.tools) || session.tools.length !== 0) return false;
-    return exactKeys(session.turn_detection, ['type']) && session.turn_detection.type === 'server_vad';
+    return session.turn_detection === null ||
+      (exactKeys(session.turn_detection, ['type']) && session.turn_detection.type === 'server_vad');
   }
   if (event.type === 'conversation.created') {
     if (!exactKeys(event, ['type', 'event_id', 'previous_item_id', 'conversation']) ||

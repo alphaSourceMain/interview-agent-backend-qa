@@ -657,7 +657,6 @@ function createSupportVoiceGateway(options = {}) {
         entry.suppressedSpeechEvent = false;
         entry.playbackEndsAt = Date.now();
         entry.speaking = true;
-        if (!sendUpstream(entry, { type: 'input_audio_buffer.clear' })) return finalize(entry, 'support_voice_unavailable');
       }
       if (event.type === 'input_audio_buffer.speech_started') {
         if (entry.responseActive) {

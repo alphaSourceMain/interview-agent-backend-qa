@@ -350,8 +350,11 @@ test('browser audio is schema-validated, transcript is dropped, and capability e
     upstream.emitProvider({ type: 'response.output_audio_transcript.delta', delta: 'not-forwarded' });
     await new Promise((resolve) => setTimeout(resolve, 15));
     assert.equal(JSON.stringify(h.messages).includes('not-forwarded'), false);
+    const upstreamEventsBeforeResponse = upstream.sent.length;
     upstream.emitProvider({ type: 'response.created' });
-    await waitFor(() => upstream.sent.some((event) => event.type === 'input_audio_buffer.clear'));
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(upstream.sent.length, upstreamEventsBeforeResponse);
+    assert.equal(upstream.sent.some((event) => event.type === 'input_audio_buffer.clear'), false);
     upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
     upstream.emitProvider({ type: 'response.done' });
     await waitFor(() => h.messages.some((message) => message.type === 'audio_delta'));
@@ -385,8 +388,11 @@ test('provider response epochs drop pre-response audio but incidental speech can
     upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(h.messages.filter((message) => message.type === 'audio_delta').length, 0);
+    const upstreamEventsBeforeResponse = upstream.sent.length;
     upstream.emitProvider({ type: 'response.created' });
-    await waitFor(() => upstream.sent.some((event) => event.type === 'input_audio_buffer.clear'));
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(upstream.sent.length, upstreamEventsBeforeResponse);
+    assert.equal(upstream.sent.some((event) => event.type === 'input_audio_buffer.clear'), false);
     const forwardedInputFrames = upstream.sent.filter((event) => event.type === 'input_audio_buffer.append').length;
     h.socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio }));
     await new Promise((resolve) => setTimeout(resolve, 15));

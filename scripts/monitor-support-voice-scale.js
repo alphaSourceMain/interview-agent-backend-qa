@@ -4,7 +4,6 @@ const crypto = require('node:crypto');
 
 const RENDER_API_ORIGIN = 'https://api.render.com';
 const SAMPLE_INTERVAL_MS = 2000;
-const MAX_SAMPLE_GAP_MS = 2500;
 const REQUEST_TIMEOUT_MS = 1500;
 const ACTIVE_DEPLOY_STATUSES = new Set([
   'created',
@@ -140,6 +139,14 @@ async function sampleWithOneRetry(options) {
   }
 }
 
+async function sampleCycle(options) {
+  try {
+    return { status: 'healthy', observation: await sampleWithOneRetry(options) };
+  } catch (error) {
+    return { status: isHardSafetyFailure(error) ? 'hard_failure' : 'transient_failure', error };
+  }
+}
+
 async function revoke({ config, fetchImpl = fetch }) {
   try {
     await fetchImpl(`${config.backendOrigin}/internal/support/voice/scale-lease`, {
@@ -154,23 +161,28 @@ async function revoke({ config, fetchImpl = fetch }) {
 async function run({ env = process.env, fetchImpl = fetch, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
   const config = validateConfiguration(env);
   let stopped = false;
-  let previousStartedAt = null;
+  let transientFailureActive = false;
   const stop = () => { stopped = true; };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   try {
     while (!stopped) {
       const startedAt = now();
-      if (previousStartedAt !== null && startedAt - previousStartedAt > MAX_SAMPLE_GAP_MS) throw new Error('SUPPORT_VOICE_MONITOR_SAMPLE_GAP');
-      previousStartedAt = startedAt;
-      await sampleWithOneRetry({ config, fetchImpl, now });
+      const cycle = await sampleCycle({ config, fetchImpl, now });
+      if (cycle.status === 'hard_failure') {
+        await revoke({ config, fetchImpl });
+        throw cycle.error;
+      }
+      if (cycle.status === 'transient_failure') {
+        if (!transientFailureActive) process.stderr.write('support_voice_scale_monitor_transient\n');
+        transientFailureActive = true;
+      } else if (transientFailureActive) {
+        process.stderr.write('support_voice_scale_monitor_recovered\n');
+        transientFailureActive = false;
+      }
       const elapsed = now() - startedAt;
-      if (elapsed > MAX_SAMPLE_GAP_MS) throw new Error('SUPPORT_VOICE_MONITOR_SAMPLE_SLOW');
       await sleep(Math.max(0, SAMPLE_INTERVAL_MS - elapsed));
     }
-  } catch (error) {
-    await revoke({ config, fetchImpl });
-    throw error;
   } finally {
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
@@ -187,13 +199,13 @@ if (require.main === module) {
 
 module.exports = {
   ACTIVE_DEPLOY_STATUSES,
-  MAX_SAMPLE_GAP_MS,
   RENDER_API_ORIGIN,
   REQUEST_TIMEOUT_MS,
   SAMPLE_INTERVAL_MS,
   exactHttpsOrigin,
   isHardSafetyFailure,
   run,
+  sampleCycle,
   sampleOnce,
   sampleWithOneRetry,
   unwrapDeploys,

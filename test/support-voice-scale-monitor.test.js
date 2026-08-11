@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
+  sampleCycle,
   sampleOnce,
   sampleWithOneRetry,
   validateConfiguration,
@@ -113,6 +114,34 @@ test('monitor remains fail-closed after two consecutive observation failures', a
   assert.equal(attempts, 8);
 });
 
+test('transient retry exhaustion leaves the lease unrenewed for bounded backend expiry and permits recovery', async () => {
+  let failedRequests = 0;
+  const transient = await sampleCycle({
+    config,
+    fetchImpl: async () => {
+      failedRequests += 1;
+      throw new Error('provider unavailable');
+    },
+  });
+  assert.equal(transient.status, 'transient_failure');
+  assert.equal(failedRequests, 8);
+
+  let leasePosts = 0;
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/internal/support/voice/scale-lease')) leasePosts += 1;
+    const body = url.endsWith('/instances') ? [{ id: instanceId }]
+      : url.includes('/deploys?') ? [{ deploy: { status: 'live', commit: { id: commit } } }]
+        : url.endsWith('/internal/support/voice/instance') ? { service_id: serviceId, commit, instance_sha256: 'b'.repeat(64) }
+          : url.endsWith('/internal/support/voice/scale-lease') ? { ok: true }
+            : { id: serviceId, type: 'web_service', serviceDetails: { numInstances: 1 } };
+    return { ok: true, status: 200, async json() { return body; } };
+  };
+  const recovered = await sampleCycle({ config, fetchImpl });
+  assert.equal(recovered.status, 'healthy');
+  assert.equal(recovered.observation.running_instances, 1);
+  assert.equal(leasePosts, 1);
+});
+
 test('monitor never retries a hard scale, deploy, or process-identity safety failure', async () => {
   let serviceAttempts = 0;
   const fetchImpl = async (url) => {
@@ -125,5 +154,11 @@ test('monitor never retries a hard scale, deploy, or process-identity safety fai
   };
 
   await assert.rejects(sampleWithOneRetry({ config, fetchImpl }), /SUPPORT_VOICE_MONITOR_OBSERVATION_INVALID/);
+  assert.equal(serviceAttempts, 1);
+
+  serviceAttempts = 0;
+  const cycle = await sampleCycle({ config, fetchImpl });
+  assert.equal(cycle.status, 'hard_failure');
+  assert.match(cycle.error.message, /SUPPORT_VOICE_MONITOR_OBSERVATION_INVALID/);
   assert.equal(serviceAttempts, 1);
 });

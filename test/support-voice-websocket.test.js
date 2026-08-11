@@ -1,0 +1,342 @@
+const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
+const express = require('express');
+const http = require('node:http');
+const test = require('node:test');
+const WebSocket = require('ws');
+const { createSupportVoiceGateway } = require('../src/lib/supportVoiceGateway');
+
+const ORIGIN = 'https://alphasourceai-com.onrender.com';
+
+class FakeUpstream extends EventEmitter {
+  static instances = [];
+  static sessionUpdatedDelayMs = 0;
+  static stallAudioCallbacks = false;
+  constructor(url, options) {
+    super();
+    this.url = url;
+    this.options = options;
+    this.readyState = WebSocket.CONNECTING;
+    this.bufferedAmount = 0;
+    this.sent = [];
+    FakeUpstream.instances.push(this);
+    queueMicrotask(() => {
+      this.readyState = WebSocket.OPEN;
+      this.emit('open');
+    });
+  }
+  send(payload, callback) {
+    const event = JSON.parse(payload);
+    this.sent.push(event);
+    if (event.type === 'session.update') {
+      const prompt = event.session.instructions;
+      const acknowledge = () => this.emitProvider({
+        type: 'session.updated',
+        session: {
+          audio: {
+            input: { format: { type: 'audio/pcm', rate: 24000 }, transport: 'json' },
+            output: { format: { type: 'audio/pcm', rate: 24000 }, transport: 'json' },
+          },
+          enable_noise_suppression: true,
+          enable_phonetic_spelling: false,
+          input_audio_format: 'not specified',
+          input_audio_transcription: null,
+          instructions: prompt,
+          keep_context: false,
+          max_response_output_tokens: 'inf',
+          modalities: ['audio'],
+          model: 'grok-voice-think-fast-2.0',
+          output_audio_format: 'not specified',
+          temperature: -1,
+          tool_choice: 'auto',
+          turn_detection: { prefix_padding_ms: 300, silence_duration_ms: 800, threshold: 0.85, type: 'server_vad' },
+        },
+      });
+      if (FakeUpstream.sessionUpdatedDelayMs > 0) setTimeout(acknowledge, FakeUpstream.sessionUpdatedDelayMs);
+      else queueMicrotask(acknowledge);
+    }
+    if (callback && !(FakeUpstream.stallAudioCallbacks && event.type === 'input_audio_buffer.append')) queueMicrotask(() => callback(null));
+  }
+  emitProvider(event) {
+    this.emit('message', Buffer.from(JSON.stringify(event)), false);
+  }
+  close() {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    queueMicrotask(() => this.emit('close'));
+  }
+}
+
+function membershipDb() {
+  return {
+    from() {
+      return {
+        select() {
+          return { eq() { return { is() { return Promise.resolve({ data: null, count: 1, error: null }); } }; } };
+        },
+      };
+    },
+  };
+}
+
+async function setup(options = {}) {
+  FakeUpstream.instances = [];
+  FakeUpstream.sessionUpdatedDelayMs = options.sessionUpdatedDelayMs || 0;
+  FakeUpstream.stallAudioCallbacks = options.stallAudioCallbacks === true;
+  const env = {
+    NODE_ENV: 'test',
+    SUPPORT_VOICE_ENABLED: 'true',
+    SUPPORT_VOICE_SINGLE_INSTANCE_CONFIRMED: 'true',
+    SUPPORT_VOICE_XFF_MODE: 'best_effort',
+    XAI_API_KEY: 'xai-test-key-not-a-real-secret',
+  };
+  const gateway = createSupportVoiceGateway({
+    env,
+    serviceDb: membershipDb(),
+    scaleLeaseHealthy: true,
+    WebSocketClient: FakeUpstream,
+    requireAuth(req, res, next) {
+      if (!req.headers.authorization) return res.status(401).end();
+      req.user = { id: 'voice-user', email: null };
+      req.isGlobalAdmin = false;
+      next();
+    },
+    rateLimit: async () => ({ allowed: true, count: 1, remaining: 1, retryAfterSeconds: 0 }),
+    heartbeatIntervalMs: options.heartbeatIntervalMs,
+    heartbeatGraceMs: options.heartbeatGraceMs,
+    idleMs: options.idleMs,
+    maxSessionMs: options.maxSessionMs,
+  });
+  const app = express();
+  app.use('/api/support/voice', gateway.router);
+  const server = http.createServer(app);
+  gateway.attach(server);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const response = await fetch(`${origin}/api/support/voice/sessions`, { method: 'POST', headers: { Origin: ORIGIN, Authorization: 'Bearer token' } });
+  assert.equal(response.status, 201);
+  const created = await response.json();
+  const socket = new WebSocket(`${origin.replace(/^http:/, 'ws:')}/api/support/voice`, 'alphascreen-support-v1', {
+    headers: { Origin: ORIGIN },
+    perMessageDeflate: false,
+    autoPong: options.autoPong !== false,
+  });
+  const messages = [];
+  socket.on('message', (raw) => messages.push(JSON.parse(raw.toString('utf8'))));
+  await new Promise((resolve, reject) => {
+    socket.once('open', () => { socket.send(JSON.stringify({ type: 'authenticate', credential: created.credential })); resolve(); });
+    socket.once('error', reject);
+  });
+  return {
+    gateway,
+    messages,
+    socket,
+    server,
+    close: async () => {
+      try { socket.close(); } catch {}
+      gateway.finalizeAll();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+async function waitFor(predicate, timeoutMs = 1000) {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > timeoutMs) throw new Error('wait_timeout');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+test('authenticated browser WS receives ready only after exact provider attestation and greeting send', async () => {
+  const h = await setup();
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    assert.equal(FakeUpstream.instances.length, 1);
+    const upstream = FakeUpstream.instances[0];
+    assert.equal(upstream.url, 'wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0');
+    assert.equal(upstream.options.maxPayload, 512 * 1024);
+    assert.equal(upstream.options.perMessageDeflate, false);
+    assert.match(upstream.options.headers.Authorization, /^Bearer /);
+    assert.equal(upstream.sent[0].type, 'session.update');
+    assert.deepEqual(upstream.sent[0].session.modalities, ['audio']);
+    assert.equal(upstream.sent[0].session.input_audio_transcription, null);
+    assert.equal(Object.hasOwn(upstream.sent[0].session, 'tools'), false);
+    assert.equal(upstream.sent[1].item.type, 'force_message');
+  } finally {
+    await h.close();
+  }
+});
+
+test('browser audio is schema-validated, transcript is dropped, and capability events finalize', async () => {
+  const h = await setup();
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    const upstream = FakeUpstream.instances[0];
+    const audio = Buffer.from([0, 0]).toString('base64');
+    h.socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio }));
+    await waitFor(() => upstream.sent.some((event) => event.type === 'input_audio_buffer.append'));
+    upstream.emitProvider({ type: 'response.output_audio_transcript.delta', delta: 'not-forwarded' });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(JSON.stringify(h.messages).includes('not-forwarded'), false);
+    upstream.emitProvider({ type: 'response.created' });
+    upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
+    upstream.emitProvider({ type: 'response.done' });
+    await waitFor(() => h.messages.some((message) => message.type === 'audio_delta'));
+    upstream.emitProvider({ type: 'response.function_call_arguments.done' });
+    await waitFor(() => h.messages.some((message) => message.type === 'error'));
+  } finally {
+    await h.close();
+  }
+});
+
+test('invalid post-auth browser event finalizes without forwarding upstream', async () => {
+  const h = await setup();
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    const upstream = FakeUpstream.instances[0];
+    const before = upstream.sent.length;
+    h.socket.send(JSON.stringify({ type: 'response.create', instructions: 'override' }));
+    await waitFor(() => h.messages.some((message) => message.type === 'error'));
+    assert.equal(upstream.sent.length, before);
+  } finally {
+    await h.close();
+  }
+});
+
+test('provider response epochs drop pre-response and interrupted audio while allowing a fresh later response', async () => {
+  const h = await setup();
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    const upstream = FakeUpstream.instances[0];
+    const audio = Buffer.from([0, 0]).toString('base64');
+    upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(h.messages.filter((message) => message.type === 'audio_delta').length, 0);
+    upstream.emitProvider({ type: 'response.created' });
+    upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
+    await waitFor(() => h.messages.filter((message) => message.type === 'audio_delta').length === 1);
+    upstream.emitProvider({ type: 'input_audio_buffer.speech_started' });
+    upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
+    upstream.emitProvider({ type: 'response.done' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(h.messages.filter((message) => message.type === 'audio_delta').length, 1);
+    upstream.emitProvider({ type: 'response.created' });
+    upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
+    await waitFor(() => h.messages.filter((message) => message.type === 'audio_delta').length === 2);
+  } finally {
+    await h.close();
+  }
+});
+
+test('a duplicate late session.updated is never ignored or applied twice', async () => {
+  const h = await setup();
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    const upstream = FakeUpstream.instances[0];
+    const update = upstream.sent.find((event) => event.type === 'session.update');
+    upstream.emitProvider({
+      type: 'session.updated',
+      session: {
+        audio: {
+          input: { format: { type: 'audio/pcm', rate: 24000 }, transport: 'json' },
+          output: { format: { type: 'audio/pcm', rate: 24000 }, transport: 'json' },
+        },
+        enable_noise_suppression: true,
+        enable_phonetic_spelling: false,
+        input_audio_format: 'not specified',
+        input_audio_transcription: null,
+        instructions: update.session.instructions,
+        keep_context: false,
+        max_response_output_tokens: 'inf',
+        modalities: ['audio'],
+        model: 'grok-voice-think-fast-2.0',
+        output_audio_format: 'not specified',
+        temperature: -1,
+        tool_choice: 'auto',
+        turn_detection: { prefix_padding_ms: 300, silence_duration_ms: 800, threshold: 0.85, type: 'server_vad' },
+      },
+    });
+    await waitFor(() => h.messages.some((message) => message.type === 'error'));
+    assert.equal(upstream.sent.filter((event) => event.type === 'conversation.item.create').length, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test('audio ingress burst and stalled bridge in-flight overflow both finalize safely', async () => {
+  for (const options of [{}, { stallAudioCallbacks: true }]) {
+    const h = await setup(options);
+    try {
+      await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+      const audio = Buffer.from([0, 0]).toString('base64');
+      const count = options.stallAudioCallbacks ? 13 : 60;
+      for (let index = 0; index < count; index += 1) {
+        if (h.socket.readyState === WebSocket.OPEN) h.socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio }));
+      }
+      await waitFor(() => h.messages.some((message) => message.type === 'error'));
+      assert.equal(h.gateway._state.sessions.size, 0);
+    } finally {
+      await h.close();
+    }
+  }
+});
+
+test('heartbeat keeps a responsive browser alive and closes a browser that does not pong', async () => {
+  const responsive = await setup({ heartbeatIntervalMs: 20, heartbeatGraceMs: 20, idleMs: 500 });
+  try {
+    await waitFor(() => responsive.messages.some((message) => message.type === 'ready'));
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    assert.equal(responsive.messages.some((message) => message.type === 'error'), false);
+    assert.equal(responsive.socket.readyState, WebSocket.OPEN);
+  } finally {
+    await responsive.close();
+  }
+  const unresponsive = await setup({ autoPong: false, heartbeatIntervalMs: 20, heartbeatGraceMs: 20, idleMs: 500 });
+  try {
+    await waitFor(() => unresponsive.messages.some((message) => message.type === 'ready'));
+    await waitFor(() => unresponsive.messages.some((message) => message.type === 'error'), 300);
+  } finally {
+    await unresponsive.close();
+  }
+});
+
+test('idle timeout ignores silent PCM and defers only through an active provider answer', async () => {
+  const silent = await setup({ idleMs: 35, heartbeatIntervalMs: 500, maxSessionMs: 500 });
+  try {
+    await waitFor(() => silent.messages.some((message) => message.type === 'ready'));
+    const audio = Buffer.from([0, 0]).toString('base64');
+    for (let index = 0; index < 3; index += 1) {
+      silent.socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await waitFor(() => silent.messages.some((message) => message.type === 'ended' && message.reason === 'idle_timeout'), 300);
+  } finally {
+    await silent.close();
+  }
+  const answering = await setup({ idleMs: 25, heartbeatIntervalMs: 500, maxSessionMs: 500 });
+  try {
+    await waitFor(() => answering.messages.some((message) => message.type === 'ready'));
+    const upstream = FakeUpstream.instances[0];
+    upstream.emitProvider({ type: 'response.created' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(answering.messages.some((message) => message.type === 'ended'), false);
+    upstream.emitProvider({ type: 'response.done' });
+    await waitFor(() => answering.messages.some((message) => message.type === 'ended' && message.reason === 'idle_timeout'));
+  } finally {
+    await answering.close();
+  }
+});
+
+test('any client frame after credential authentication but before provider ready is rejected without buffering', async () => {
+  const h = await setup({ sessionUpdatedDelayMs: 80 });
+  try {
+    await waitFor(() => FakeUpstream.instances.length === 1);
+    const upstream = FakeUpstream.instances[0];
+    h.socket.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
+    await waitFor(() => h.messages.some((message) => message.type === 'error'));
+    assert.equal(upstream.sent.some((event) => event.type === 'input_audio_buffer.clear'), false);
+  } finally {
+    await h.close();
+  }
+});

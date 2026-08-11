@@ -10,6 +10,7 @@ const ORIGIN = 'https://alphasourceai-com.onrender.com';
 
 class FakeUpstream extends EventEmitter {
   static instances = [];
+  static greetingResponseBeforeCallback = false;
   static preAttestationEvents = [];
   static sessionUpdatedDelayMs = 0;
   static stallAudioCallbacks = false;
@@ -61,6 +62,9 @@ class FakeUpstream extends EventEmitter {
       if (FakeUpstream.sessionUpdatedDelayMs > 0) setTimeout(acknowledge, FakeUpstream.sessionUpdatedDelayMs);
       else queueMicrotask(acknowledge);
     }
+    if (event.type === 'conversation.item.create' && FakeUpstream.greetingResponseBeforeCallback) {
+      queueMicrotask(() => this.emitProvider({ type: 'response.created' }));
+    }
     if (callback && !(FakeUpstream.stallAudioCallbacks && event.type === 'input_audio_buffer.append')) queueMicrotask(() => callback(null));
   }
   emitProvider(event) {
@@ -87,6 +91,7 @@ function membershipDb() {
 
 async function setup(options = {}) {
   FakeUpstream.instances = [];
+  FakeUpstream.greetingResponseBeforeCallback = options.greetingResponseBeforeCallback === true;
   FakeUpstream.preAttestationEvents = options.preAttestationEvents || [];
   FakeUpstream.sessionUpdatedDelayMs = options.sessionUpdatedDelayMs || 0;
   FakeUpstream.stallAudioCallbacks = options.stallAudioCallbacks === true;
@@ -199,6 +204,18 @@ test('current bounded xAI control prelude is ignored until exact session attesta
   });
   try {
     await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    assert.equal(h.messages.some((message) => message.type === 'error'), false);
+    assert.equal(FakeUpstream.instances[0].sent.filter((event) => event.type === 'conversation.item.create').length, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test('provider may begin greeting response before the send callback without closing the session', async () => {
+  const h = await setup({ greetingResponseBeforeCallback: true });
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    await waitFor(() => h.messages.some((message) => message.type === 'speaking' && message.active === true));
     assert.equal(h.messages.some((message) => message.type === 'error'), false);
     assert.equal(FakeUpstream.instances[0].sent.filter((event) => event.type === 'conversation.item.create').length, 1);
   } finally {

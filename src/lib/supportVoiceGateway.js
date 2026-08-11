@@ -583,14 +583,21 @@ function createSupportVoiceGateway(options = {}) {
         const greetingTimer = setTimeout(() => finalize(entry, 'support_voice_unavailable'), 2000);
         greetingTimer.unref?.();
         entry.timers.add(greetingTimer);
-        upstream.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'force_message', role: 'assistant', interruptible: true, content: [{ type: 'output_text', text: SUPPORT_GREETING }] } }), (error) => {
+        try {
+          upstream.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'force_message', role: 'assistant', interruptible: true, content: [{ type: 'output_text', text: SUPPORT_GREETING }] } }), (error) => {
+            clearTimeout(greetingTimer);
+            entry.timers.delete(greetingTimer);
+            if (error) finalize(entry, 'support_voice_unavailable');
+          });
+        } catch {
           clearTimeout(greetingTimer);
           entry.timers.delete(greetingTimer);
-          if (error) return finalize(entry, 'support_voice_unavailable');
-          entry.phase = 'ready';
-          if (!sendBrowser(entry, { type: 'ready' })) return finalize(entry, 'support_voice_unavailable');
-          resetIdle(entry);
-        });
+          return finalize(entry, 'support_voice_unavailable');
+        }
+        if (entry.phase === 'terminal') return;
+        entry.phase = 'ready';
+        if (!sendBrowser(entry, { type: 'ready' })) return finalize(entry, 'support_voice_unavailable');
+        resetIdle(entry);
         return;
       }
       if (entry.phase !== 'ready') return finalize(entry, 'support_voice_unavailable');

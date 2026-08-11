@@ -38,6 +38,21 @@ const HEARTBEAT_INTERVAL_MS = 25_000;
 const HEARTBEAT_GRACE_MS = 10_000;
 const UPSTREAM_CLOSE_GRACE_MS = 5_000;
 const RATE_ACTIONS = new Set(['support_voice_session_create:user', 'support_voice_session_create:ip']);
+const DIAGNOSTIC_PROVIDER_EVENTS = new Set([
+  'session.created', 'conversation.created', 'ping', 'session.updated', 'response.created',
+  'response.output_item.added', 'conversation.item.added', 'response.content_part.added',
+  'response.output_audio.delta', 'response.audio.delta', 'response.output_audio_transcript.delta',
+  'response.output_audio_transcript.done', 'response.content_part.done', 'response.output_audio.done',
+  'response.output_item.done', 'response.done', 'input_audio_buffer.speech_started',
+  'input_audio_buffer.speech_stopped', 'error',
+]);
+const FINAL_REASONS = new Set([
+  'ended', 'idle_timeout', 'max_duration', 'shutdown', 'expired', 'response_failed',
+  'protocol_error', 'support_voice_unavailable',
+]);
+const SESSION_PHASES = new Set([
+  'pending', 'consumed', 'upstream_connecting', 'session_update_sent', 'greeting_sent', 'ready', 'terminal',
+]);
 
 function base64url(bytes) {
   return crypto.randomBytes(bytes).toString('base64url');
@@ -151,6 +166,7 @@ function isConfigurationReady(env, knowledge, scaleLeaseHealthy) {
 
 function createSupportVoiceGateway(options = {}) {
   const env = options.env || process.env;
+  const logger = options.logger || console;
   const serviceDb = options.serviceDb || require('./supabaseClient').supabaseAdmin;
   const requireAuth = options.requireAuth;
   if (typeof requireAuth !== 'function') throw new Error('SUPPORT_VOICE_REQUIRE_AUTH_REQUIRED');
@@ -198,7 +214,17 @@ function createSupportVoiceGateway(options = {}) {
 
   function finalize(entry, reason = 'ended') {
     if (!entry || entry.phase === 'terminal') return;
+    const phase = SESSION_PHASES.has(entry.phase) ? entry.phase : 'other';
+    const safeReason = FINAL_REASONS.has(reason) ? reason : 'other';
+    const lastProviderEvent = DIAGNOSTIC_PROVIDER_EVENTS.has(entry.lastProviderEvent) ? entry.lastProviderEvent : null;
     entry.phase = 'terminal';
+    if (safeReason === 'support_voice_unavailable' || safeReason === 'protocol_error') {
+      logger.warn?.('[support-voice] session_finalized', {
+        reason: safeReason,
+        phase,
+        last_provider_event: lastProviderEvent,
+      });
+    }
     for (const timer of entry.timers) clearTimeout(timer);
     entry.timers.clear();
     if (entry.userHash) userSessions.delete(entry.userHash);
@@ -358,6 +384,7 @@ function createSupportVoiceGateway(options = {}) {
       responseEpoch: 0,
       responseActive: false,
       responseInterrupted: false,
+      lastProviderEvent: null,
       browserToUpstream: { frames: 0, bytes: 0 },
       upstreamToBrowser: { frames: 0, bytes: 0 },
     };
@@ -570,6 +597,7 @@ function createSupportVoiceGateway(options = {}) {
       if (isBinary || raw.length > UPSTREAM_MAX_PAYLOAD) return finalize(entry, 'support_voice_unavailable');
       const event = parseJsonTextFrame(raw, UPSTREAM_MAX_PAYLOAD);
       if (!event) return finalize(entry, 'support_voice_unavailable');
+      entry.lastProviderEvent = DIAGNOSTIC_PROVIDER_EVENTS.has(event.type) ? event.type : null;
       if (validatePreAttestationProviderEvent(event)) {
         if (entry.phase === 'session_update_sent' ||
             (event.type === 'ping' && (entry.phase === 'greeting_sent' || entry.phase === 'ready'))) return;

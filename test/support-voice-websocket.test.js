@@ -102,8 +102,10 @@ async function setup(options = {}) {
     SUPPORT_VOICE_XFF_MODE: 'best_effort',
     XAI_API_KEY: 'xai-test-key-not-a-real-secret',
   };
+  const logs = [];
   const gateway = createSupportVoiceGateway({
     env,
+    logger: { warn(event, metadata) { logs.push({ event, metadata }); } },
     serviceDb: membershipDb(),
     scaleLeaseHealthy: true,
     WebSocketClient: FakeUpstream,
@@ -141,6 +143,7 @@ async function setup(options = {}) {
   });
   return {
     gateway,
+    logs,
     messages,
     socket,
     server,
@@ -237,6 +240,11 @@ test('unknown or malformed pre-attestation provider control fails closed before 
     await waitFor(() => h.messages.some((message) => message.type === 'error'));
     assert.equal(h.messages.some((message) => message.type === 'ready'), false);
     assert.equal(FakeUpstream.instances[0].sent.some((event) => event.type === 'conversation.item.create'), false);
+    assert.deepEqual(h.logs.at(-1), {
+      event: '[support-voice] session_finalized',
+      metadata: { reason: 'support_voice_unavailable', phase: 'session_update_sent', last_provider_event: 'ping' },
+    });
+    assert.equal(JSON.stringify(h.logs).includes('provider_metadata'), false);
   } finally {
     await h.close();
   }

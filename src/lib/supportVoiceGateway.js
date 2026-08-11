@@ -50,6 +50,13 @@ const FINAL_REASONS = new Set([
   'ended', 'idle_timeout', 'max_duration', 'shutdown', 'expired', 'response_failed',
   'protocol_error', 'support_voice_unavailable',
 ]);
+const CLIENT_CLOSE_REASONS = new Set([
+  'user_end', 'popover_closed', 'signed_out', 'component_unmounted', 'server_ended', 'client_cancelled',
+  'client_protocol_error', 'client_media_error', 'client_capture_backpressure', 'client_network_error', 'client_setup_error',
+]);
+const CLIENT_ERROR_CLOSE_REASONS = new Set([
+  'client_protocol_error', 'client_media_error', 'client_capture_backpressure', 'client_network_error', 'client_setup_error',
+]);
 const SESSION_PHASES = new Set([
   'pending', 'consumed', 'upstream_connecting', 'session_update_sent', 'greeting_sent', 'ready', 'terminal',
 ]);
@@ -81,6 +88,16 @@ function parseJsonTextFrame(raw, maxBytes) {
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(raw);
     return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function parseClientCloseReason(raw) {
+  if (!(Buffer.isBuffer(raw) || raw instanceof Uint8Array) || raw.length <= 0 || raw.length > 64) return null;
+  try {
+    const value = new TextDecoder('utf-8', { fatal: true }).decode(raw);
+    return CLIENT_CLOSE_REASONS.has(value) ? value : null;
   } catch {
     return null;
   }
@@ -704,9 +721,13 @@ function createSupportVoiceGateway(options = {}) {
         if (!sendUpstream(entry, validated)) return finalize(entry, 'support_voice_unavailable');
       });
     });
-    socket.on('close', () => {
+    socket.on('close', (_code, rawReason) => {
       clearTimeout(authTimer);
       if (!authenticated) releasePreauth();
+      const clientReason = parseClientCloseReason(rawReason);
+      if (clientReason && CLIENT_ERROR_CLOSE_REASONS.has(clientReason)) {
+        logger.warn?.('[support-voice] client_session_closed', { reason: clientReason });
+      }
       if (entry) finalize(entry, 'ended');
     });
     socket.on('error', () => {

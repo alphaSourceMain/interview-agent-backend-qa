@@ -183,6 +183,35 @@ test('authenticated browser WS receives ready only after exact provider attestat
   }
 });
 
+test('client error close telemetry accepts only a bounded content-free reason', async () => {
+  const h = await setup();
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    h.socket.close(4000, 'client_media_error');
+    await waitFor(() => h.logs.some((entry) => entry.event === '[support-voice] client_session_closed'));
+    assert.deepEqual(h.logs.find((entry) => entry.event === '[support-voice] client_session_closed'), {
+      event: '[support-voice] client_session_closed',
+      metadata: { reason: 'client_media_error' },
+    });
+    assert.equal(JSON.stringify(h.logs).includes('audio_delta'), false);
+  } finally {
+    await h.close();
+  }
+});
+
+test('unrecognized client close text is discarded instead of logged', async () => {
+  const h = await setup();
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    h.socket.close(4000, 'untrusted-close-text');
+    await waitFor(() => h.socket.readyState === WebSocket.CLOSED);
+    assert.equal(h.logs.some((entry) => entry.event === '[support-voice] client_session_closed'), false);
+    assert.equal(JSON.stringify(h.logs).includes('untrusted-close-text'), false);
+  } finally {
+    await h.close();
+  }
+});
+
 test('current bounded xAI control prelude is ignored until exact session attestation succeeds', async () => {
   const h = await setup({
     preAttestationEvents: [

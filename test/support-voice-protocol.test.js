@@ -112,6 +112,24 @@ test('pre-attestation session.created accepts the current content-free null turn
   assert.equal(validatePreAttestationProviderEvent(event), true);
 });
 
+test('pre-attestation session.created accepts the current exact one-key null turn detection default', () => {
+  const event = {
+    type: 'session.created',
+    event_id: '00000000-0000-4000-8000-000000000005',
+    session: {
+      id: 'session-1',
+      instructions: '',
+      modalities: ['audio'],
+      model: 'grok-voice-think-fast-2.0',
+      object: 'realtime.session',
+      tools: [],
+      turn_detection: { type: null },
+      voice: 'xai_ara',
+    },
+  };
+  assert.equal(validatePreAttestationProviderEvent(event), true);
+});
+
 for (const mutation of [
   (event) => { event.event_id = ''; },
   (event) => { event.event_id = `event-${'x'.repeat(195)}`; },

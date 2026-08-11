@@ -189,7 +189,7 @@ test('current bounded xAI control prelude is ignored until exact session attesta
       {
         type: 'session.created',
         event_id: '00000000-0000-4000-8000-000000000001',
-        session: { id: 'session-1', instructions: '', modalities: ['audio'], model: 'grok-voice-think-fast-2.0', object: 'realtime.session', tools: [], turn_detection: null, voice: 'xai_ara' },
+        session: { id: 'session-1', instructions: '', modalities: ['audio'], model: 'grok-voice-think-fast-2.0', object: 'realtime.session', tools: [], turn_detection: { type: null }, voice: 'xai_ara' },
       },
       {
         type: 'conversation.created',

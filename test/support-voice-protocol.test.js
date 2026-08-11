@@ -181,7 +181,7 @@ test('browser protocol permits only append and clear schemas', () => {
 
 test('provider protocol forwards selected audio/status fields and drops transcript text', () => {
   const encoded = Buffer.from([0, 0]).toString('base64');
-  assert.deepEqual(classifyProviderEvent({ type: 'response.output_audio.delta', delta: encoded, response_id: 'ignored', transcript: 'also ignored' }), { action: 'forward', message: { type: 'audio_delta', audio: encoded } });
+  assert.deepEqual(classifyProviderEvent({ type: 'response.output_audio.delta', delta: encoded, response_id: 'ignored', transcript: 'also ignored' }), { action: 'forward', message: { type: 'audio_delta', audio: encoded }, audioBytes: 2 });
   assert.equal(classifyProviderEvent({ type: 'response.output_audio_transcript.delta', delta: 'secret' }).action, 'drop');
   assert.equal(classifyProviderEvent({ type: 'response.function_call_arguments.done' }).action, 'finalize');
   assert.equal(classifyProviderEvent({ type: 'mcp.tool_call' }).action, 'finalize');

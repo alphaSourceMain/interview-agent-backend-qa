@@ -24,6 +24,7 @@ const SESSION_PATH = '/api/support/voice';
 const PENDING_TTL_MS = 60_000;
 const MAX_SESSION_MS = 10 * 60_000;
 const IDLE_MS = 120_000;
+const PCM_BYTES_PER_MILLISECOND = 24_000 * 2 / 1000;
 const MAX_SESSIONS = 20;
 const MAX_PREAUTH = 50;
 const ALL_FRAME_RATE = 40;
@@ -397,10 +398,10 @@ function createSupportVoiceGateway(options = {}) {
       upstream: null,
       timers: new Set(),
       speaking: false,
-      idleExpired: false,
       responseEpoch: 0,
       responseActive: false,
-      responseInterrupted: false,
+      suppressedSpeechEvent: false,
+      playbackEndsAt: 0,
       lastProviderEvent: null,
       browserToUpstream: { frames: 0, bytes: 0 },
       upstreamToBrowser: { frames: 0, bytes: 0 },
@@ -542,12 +543,12 @@ function createSupportVoiceGateway(options = {}) {
     entry[key] = null;
   }
 
-  function resetIdle(entry) {
+  function resetIdle(entry, delayMs = idleMs) {
     clearEntryTimer(entry, 'idleTimer');
+    const safeDelayMs = Number.isFinite(delayMs) && delayMs >= idleMs ? Math.ceil(delayMs) : idleMs;
     const timer = setTimeout(() => {
-      if (entry.speaking) entry.idleExpired = true;
-      else finalize(entry, 'idle_timeout');
-    }, idleMs);
+      finalize(entry, 'idle_timeout');
+    }, safeDelayMs);
     timer.unref?.();
     entry.idleTimer = timer;
     entry.timers.add(timer);
@@ -649,30 +650,58 @@ function createSupportVoiceGateway(options = {}) {
       const classified = classifyProviderEvent(event);
       if (classified.action === 'finalize') return finalize(entry, 'support_voice_unavailable');
       if (event.type === 'response.created') {
-        if (entry.responseActive || entry.idleExpired) return finalize(entry, entry.idleExpired ? 'idle_timeout' : 'support_voice_unavailable');
+        if (entry.responseActive) return finalize(entry, 'support_voice_unavailable');
+        clearEntryTimer(entry, 'idleTimer');
         entry.responseEpoch += 1;
         entry.responseActive = true;
-        entry.responseInterrupted = false;
+        entry.suppressedSpeechEvent = false;
+        entry.playbackEndsAt = Date.now();
         entry.speaking = true;
+        if (!sendUpstream(entry, { type: 'input_audio_buffer.clear' })) return finalize(entry, 'support_voice_unavailable');
       }
       if (event.type === 'input_audio_buffer.speech_started') {
-        entry.responseInterrupted = entry.responseActive;
+        if (entry.responseActive) {
+          entry.suppressedSpeechEvent = true;
+          return;
+        }
         entry.speaking = false;
       }
+      if (event.type === 'input_audio_buffer.speech_stopped' && entry.suppressedSpeechEvent) {
+        entry.suppressedSpeechEvent = false;
+        return;
+      }
       if ((event.type === 'response.output_audio.delta' || event.type === 'response.audio.delta') &&
-          (!entry.responseActive || !entry.speaking || entry.responseInterrupted)) return;
+          (!entry.responseActive || !entry.speaking)) return;
+      if ((event.type === 'response.output_audio.delta' || event.type === 'response.audio.delta') &&
+          Number.isSafeInteger(classified.audioBytes) && classified.audioBytes > 0) {
+        entry.playbackEndsAt = Math.max(Date.now(), entry.playbackEndsAt) + classified.audioBytes / PCM_BYTES_PER_MILLISECOND;
+      }
       if (event.type === 'response.done') {
         if (!entry.responseActive) return;
         entry.responseActive = false;
         entry.speaking = false;
-        if (entry.idleExpired) return finalize(entry, 'idle_timeout');
+        entry.suppressedSpeechEvent = false;
+        const audiblePlaybackRemainingMs = Math.max(0, entry.playbackEndsAt - Date.now());
+        resetIdle(entry, audiblePlaybackRemainingMs + idleMs);
       }
       if (event.type === 'input_audio_buffer.speech_started') resetIdle(entry);
       if (classified.action === 'forward' && !sendBrowser(entry, classified.message)) return finalize(entry, 'support_voice_unavailable');
       if (classified.action === 'forward_many' && classified.messages.some((message) => !sendBrowser(entry, message))) return finalize(entry, 'support_voice_unavailable');
     });
     upstream.on('error', () => finalize(entry, 'support_voice_unavailable'));
-    upstream.on('close', () => finalize(entry, 'ended'));
+    upstream.on('close', (code, rawReason) => {
+      if (entry.phase === 'terminal') return;
+      const closeCode = Number.isInteger(code) && code >= 1000 && code <= 4999 ? code : null;
+      const reasonPresent = (Buffer.isBuffer(rawReason) || rawReason instanceof Uint8Array) && rawReason.length > 0;
+      logger.warn?.('[support-voice] provider_session_closed', {
+        close_code: closeCode,
+        reason_present: reasonPresent,
+        phase: SESSION_PHASES.has(entry.phase) ? entry.phase : 'other',
+        during_response: entry.responseActive === true,
+        last_provider_event: DIAGNOSTIC_PROVIDER_EVENTS.has(entry.lastProviderEvent) ? entry.lastProviderEvent : null,
+      });
+      finalize(entry, closeCode === 1000 && !entry.responseActive ? 'ended' : 'support_voice_unavailable');
+    });
   }
 
   wss.on('connection', (socket) => {
@@ -717,6 +746,7 @@ function createSupportVoiceGateway(options = {}) {
         if (validated.type === 'input_audio_buffer.append') {
           const audioBytes = Buffer.from(validated.audio, 'base64').length;
           if (!consumeToken(entry.audioFrames) || !consumeToken(entry.audioBytes, audioBytes)) return finalize(entry, 'protocol_error');
+          if (entry.responseActive) return;
         }
         if (!sendUpstream(entry, validated)) return finalize(entry, 'support_voice_unavailable');
       });

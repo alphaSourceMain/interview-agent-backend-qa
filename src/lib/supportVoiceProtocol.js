@@ -152,8 +152,9 @@ function classifyProviderEvent(event) {
   if (type === 'response.output_audio.delta' || type === 'response.audio.delta') {
     const decoded = decodeCanonicalAudio(event.delta, MAX_OUTBOUND_AUDIO_BYTES);
     if (!decoded) return { action: 'finalize' };
+    const audioBytes = decoded.byteLength;
     decoded.fill(0);
-    return { action: 'forward', message: { type: 'audio_delta', audio: event.delta } };
+    return { action: 'forward', message: { type: 'audio_delta', audio: event.delta }, audioBytes };
   }
   if (/transcript|output_text|input_text|conversation\.item|content_part/i.test(type)) return { action: 'drop' };
   return { action: 'drop' };

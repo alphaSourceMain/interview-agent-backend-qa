@@ -212,6 +212,31 @@ test('unrecognized client close text is discarded instead of logged', async () =
   }
 });
 
+test('provider close telemetry is bounded and never logs the provider reason body', async () => {
+  const h = await setup();
+  try {
+    await waitFor(() => h.messages.some((message) => message.type === 'ready'));
+    const upstream = FakeUpstream.instances[0];
+    upstream.emitProvider({ type: 'response.created' });
+    await waitFor(() => h.messages.some((message) => message.type === 'speaking' && message.active === true));
+    upstream.emit('close', 1006, Buffer.from('untrusted-provider-reason'));
+    await waitFor(() => h.logs.some((entry) => entry.event === '[support-voice] provider_session_closed'));
+    assert.deepEqual(h.logs.find((entry) => entry.event === '[support-voice] provider_session_closed'), {
+      event: '[support-voice] provider_session_closed',
+      metadata: {
+        close_code: 1006,
+        reason_present: true,
+        phase: 'ready',
+        during_response: true,
+        last_provider_event: 'response.created',
+      },
+    });
+    assert.equal(JSON.stringify(h.logs).includes('untrusted-provider-reason'), false);
+  } finally {
+    await h.close();
+  }
+});
+
 test('current bounded xAI control prelude is ignored until exact session attestation succeeds', async () => {
   const h = await setup({
     preAttestationEvents: [
@@ -326,6 +351,7 @@ test('browser audio is schema-validated, transcript is dropped, and capability e
     await new Promise((resolve) => setTimeout(resolve, 15));
     assert.equal(JSON.stringify(h.messages).includes('not-forwarded'), false);
     upstream.emitProvider({ type: 'response.created' });
+    await waitFor(() => upstream.sent.some((event) => event.type === 'input_audio_buffer.clear'));
     upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
     upstream.emitProvider({ type: 'response.done' });
     await waitFor(() => h.messages.some((message) => message.type === 'audio_delta'));
@@ -350,7 +376,7 @@ test('invalid post-auth browser event finalizes without forwarding upstream', as
   }
 });
 
-test('provider response epochs drop pre-response and interrupted audio while allowing a fresh later response', async () => {
+test('provider response epochs drop pre-response audio but incidental speech cannot truncate an active half-duplex answer', async () => {
   const h = await setup();
   try {
     await waitFor(() => h.messages.some((message) => message.type === 'ready'));
@@ -360,16 +386,24 @@ test('provider response epochs drop pre-response and interrupted audio while all
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(h.messages.filter((message) => message.type === 'audio_delta').length, 0);
     upstream.emitProvider({ type: 'response.created' });
+    await waitFor(() => upstream.sent.some((event) => event.type === 'input_audio_buffer.clear'));
+    const forwardedInputFrames = upstream.sent.filter((event) => event.type === 'input_audio_buffer.append').length;
+    h.socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio }));
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(upstream.sent.filter((event) => event.type === 'input_audio_buffer.append').length, forwardedInputFrames);
     upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
     await waitFor(() => h.messages.filter((message) => message.type === 'audio_delta').length === 1);
     upstream.emitProvider({ type: 'input_audio_buffer.speech_started' });
     upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
+    await waitFor(() => h.messages.filter((message) => message.type === 'audio_delta').length === 2);
+    assert.equal(h.messages.some((message) => message.type === 'listening' && message.active === true), false);
+    upstream.emitProvider({ type: 'input_audio_buffer.speech_stopped' });
     upstream.emitProvider({ type: 'response.done' });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(h.messages.filter((message) => message.type === 'audio_delta').length, 1);
+    assert.equal(h.messages.filter((message) => message.type === 'audio_delta').length, 2);
     upstream.emitProvider({ type: 'response.created' });
     upstream.emitProvider({ type: 'response.output_audio.delta', delta: audio });
-    await waitFor(() => h.messages.filter((message) => message.type === 'audio_delta').length === 2);
+    await waitFor(() => h.messages.filter((message) => message.type === 'audio_delta').length === 3);
   } finally {
     await h.close();
   }
@@ -447,7 +481,7 @@ test('heartbeat keeps a responsive browser alive and closes a browser that does 
   }
 });
 
-test('idle timeout ignores silent PCM and defers only through an active provider answer', async () => {
+test('idle timeout ignores silent PCM and begins only after estimated audible answer playback', async () => {
   const silent = await setup({ idleMs: 35, heartbeatIntervalMs: 500, maxSessionMs: 500 });
   try {
     await waitFor(() => silent.messages.some((message) => message.type === 'ready'));
@@ -465,9 +499,12 @@ test('idle timeout ignores silent PCM and defers only through an active provider
     await waitFor(() => answering.messages.some((message) => message.type === 'ready'));
     const upstream = FakeUpstream.instances[0];
     upstream.emitProvider({ type: 'response.created' });
+    upstream.emitProvider({ type: 'response.output_audio.delta', delta: Buffer.alloc(4_800).toString('base64') });
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(answering.messages.some((message) => message.type === 'ended'), false);
     upstream.emitProvider({ type: 'response.done' });
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    assert.equal(answering.messages.some((message) => message.type === 'ended'), false);
     await waitFor(() => answering.messages.some((message) => message.type === 'ended' && message.reason === 'idle_timeout'));
   } finally {
     await answering.close();

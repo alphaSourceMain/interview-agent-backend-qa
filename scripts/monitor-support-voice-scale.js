@@ -80,11 +80,12 @@ function validateRenderObservation({ service, instances, deploys, serviceId, com
   };
 }
 
-function validateBackendInstance(body, { serviceId, commit, instanceHash }) {
+function validateBackendInstance(body, { serviceId, commit }) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).sort().join(',') !== 'commit,instance_sha256,service_id' ||
-      body.service_id !== serviceId || body.commit !== commit || body.instance_sha256 !== instanceHash) {
+      body.service_id !== serviceId || body.commit !== commit || !/^[a-f0-9]{64}$/.test(body.instance_sha256)) {
     throw new Error('SUPPORT_VOICE_MONITOR_INSTANCE_MISMATCH');
   }
+  return { instanceHash: body.instance_sha256 };
 }
 
 async function sampleOnce({ config, fetchImpl = fetch, now = Date.now }) {
@@ -104,7 +105,7 @@ async function sampleOnce({ config, fetchImpl = fetch, now = Date.now }) {
     serviceId: config.serviceId,
     commit: config.commit,
   });
-  validateBackendInstance(backendInstanceResult.body, { ...config, instanceHash: observed.instanceHash });
+  const backendInstance = validateBackendInstance(backendInstanceResult.body, config);
   const observation = {
     service_id: config.serviceId,
     commit: config.commit,
@@ -112,7 +113,7 @@ async function sampleOnce({ config, fetchImpl = fetch, now = Date.now }) {
     autoscaling: observed.autoscaling,
     active_deploy: observed.activeDeploy,
     observed_at: new Date(now()).toISOString(),
-    instance_ids: [observed.instanceHash],
+    instance_ids: [backendInstance.instanceHash],
   };
   await fetchJson(fetchImpl, `${config.backendOrigin}/internal/support/voice/scale-lease`, {
     method: 'POST',

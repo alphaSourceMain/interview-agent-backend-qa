@@ -37,7 +37,7 @@ The monitor samples every two seconds and requires all of the following:
 - Render `GET /v1/services/{serviceId}` reports a manually configured instance count of one and no enabled autoscaling;
 - Render `GET /v1/services/{serviceId}/instances` returns exactly one instance;
 - Render deploy inventory has no active deploy and contains the exact expected live commit;
-- the backend's authenticated instance probe reports the same service, commit, and SHA-256 instance identity.
+- the backend's authenticated instance probe reports the same service and commit plus a bounded SHA-256 identity for the live backend process. Render's public instance ID and the container hostname are different identifiers, so they are independently validated rather than compared for equality.
 
 Each matching sample renews a five-second, content-free shared lease in the existing `request_rate_limits` table. A mismatch, monitor error, sample gap over 2.5 seconds, explicit stop, or lease expiry disables new sessions and closes live sessions. Stopping the monitor revokes and deletes the operational lease row. Never enable the frontend or backend voice flag without the running monitor.
 

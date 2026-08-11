@@ -123,6 +123,23 @@ async function sampleOnce({ config, fetchImpl = fetch, now = Date.now }) {
   return observation;
 }
 
+function isHardSafetyFailure(error) {
+  return new Set([
+    'SUPPORT_VOICE_MONITOR_OBSERVATION_INVALID',
+    'SUPPORT_VOICE_MONITOR_DEPLOY_INVALID',
+    'SUPPORT_VOICE_MONITOR_INSTANCE_MISMATCH',
+  ]).has(error?.message);
+}
+
+async function sampleWithOneRetry(options) {
+  try {
+    return await sampleOnce(options);
+  } catch (error) {
+    if (isHardSafetyFailure(error)) throw error;
+    return sampleOnce(options);
+  }
+}
+
 async function revoke({ config, fetchImpl = fetch }) {
   try {
     await fetchImpl(`${config.backendOrigin}/internal/support/voice/scale-lease`, {
@@ -146,7 +163,7 @@ async function run({ env = process.env, fetchImpl = fetch, now = Date.now, sleep
       const startedAt = now();
       if (previousStartedAt !== null && startedAt - previousStartedAt > MAX_SAMPLE_GAP_MS) throw new Error('SUPPORT_VOICE_MONITOR_SAMPLE_GAP');
       previousStartedAt = startedAt;
-      await sampleOnce({ config, fetchImpl, now });
+      await sampleWithOneRetry({ config, fetchImpl, now });
       const elapsed = now() - startedAt;
       if (elapsed > MAX_SAMPLE_GAP_MS) throw new Error('SUPPORT_VOICE_MONITOR_SAMPLE_SLOW');
       await sleep(Math.max(0, SAMPLE_INTERVAL_MS - elapsed));
@@ -175,8 +192,10 @@ module.exports = {
   REQUEST_TIMEOUT_MS,
   SAMPLE_INTERVAL_MS,
   exactHttpsOrigin,
+  isHardSafetyFailure,
   run,
   sampleOnce,
+  sampleWithOneRetry,
   unwrapDeploys,
   validateBackendInstance,
   validateConfiguration,

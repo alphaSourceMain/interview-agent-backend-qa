@@ -39,7 +39,7 @@ The monitor samples every two seconds and requires all of the following:
 - Render deploy inventory has no active deploy and contains the exact expected live commit;
 - the backend's authenticated instance probe reports the same service and commit plus a bounded SHA-256 identity for the live backend process. Render's public instance ID and the container hostname are different identifiers, so they are independently validated rather than compared for equality.
 
-Each matching sample renews a five-second, content-free shared lease in the existing `request_rate_limits` table. A mismatch, monitor error, sample gap over 2.5 seconds, explicit stop, or lease expiry disables new sessions and closes live sessions. Stopping the monitor revokes and deletes the operational lease row. Never enable the frontend or backend voice flag without the running monitor.
+Each matching sample renews a five-second, content-free shared lease in the existing `request_rate_limits` table. One transient request/transport failure receives one immediate bounded retry without renewing the lease from failed evidence. A second consecutive failure exits and revokes the lease; scale, deploy, or process-identity safety mismatches are never retried. A hard mismatch, sample gap over 2.5 seconds, explicit stop, or lease expiry disables new sessions and closes live sessions. Stopping the monitor revokes and deletes the operational lease row. Never enable the frontend or backend voice flag without the running monitor.
 
 Required operator-only environment variables are `RENDER_API_KEY`, `RENDER_SERVICE_ID`, `RENDER_GIT_COMMIT`, `SUPPORT_VOICE_MONITOR_TOKEN`, and `SUPPORT_VOICE_BACKEND_ORIGIN=https://ia-backend-qa.onrender.com`. Do not print or persist their values.
 

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
   sampleOnce,
+  sampleWithOneRetry,
   validateConfiguration,
   validateRenderObservation,
 } = require('../scripts/monitor-support-voice-scale');
@@ -76,4 +77,53 @@ test('backend process identity is independently bounded because Render does not 
     return { ok: true, status: 200, async json() { return body; } };
   };
   await assert.rejects(sampleOnce({ config, fetchImpl }), /SUPPORT_VOICE_MONITOR_INSTANCE_MISMATCH/);
+});
+
+test('monitor tolerates one transient observation failure without renewing the lease from failed evidence', async () => {
+  let serviceAttempts = 0;
+  let leasePosts = 0;
+  const backendInstanceHash = 'b'.repeat(64);
+  const fetchImpl = async (url) => {
+    if (url === `https://api.render.com/v1/services/${serviceId}` && ++serviceAttempts === 1) {
+      throw new Error('transient network failure');
+    }
+    if (url.endsWith('/internal/support/voice/scale-lease')) leasePosts += 1;
+    const body = url.endsWith('/instances') ? [{ id: instanceId }]
+      : url.includes('/deploys?') ? [{ deploy: { status: 'live', commit: { id: commit } } }]
+        : url.endsWith('/internal/support/voice/instance') ? { service_id: serviceId, commit, instance_sha256: backendInstanceHash }
+          : url.endsWith('/internal/support/voice/scale-lease') ? { ok: true }
+            : { id: serviceId, type: 'web_service', serviceDetails: { numInstances: 1 } };
+    return { ok: true, status: 200, async json() { return body; } };
+  };
+
+  const observation = await sampleWithOneRetry({ config, fetchImpl });
+  assert.equal(observation.running_instances, 1);
+  assert.equal(serviceAttempts, 2);
+  assert.equal(leasePosts, 1);
+});
+
+test('monitor remains fail-closed after two consecutive observation failures', async () => {
+  let attempts = 0;
+  const fetchImpl = async () => {
+    attempts += 1;
+    throw new Error('provider unavailable');
+  };
+
+  await assert.rejects(sampleWithOneRetry({ config, fetchImpl }), /provider unavailable/);
+  assert.equal(attempts, 8);
+});
+
+test('monitor never retries a hard scale, deploy, or process-identity safety failure', async () => {
+  let serviceAttempts = 0;
+  const fetchImpl = async (url) => {
+    if (url === `https://api.render.com/v1/services/${serviceId}`) serviceAttempts += 1;
+    const body = url.endsWith('/instances') ? [{ id: instanceId }, { id: 'unexpected-second-instance' }]
+      : url.includes('/deploys?') ? [{ deploy: { status: 'live', commit: { id: commit } } }]
+        : url.endsWith('/internal/support/voice/instance') ? { service_id: serviceId, commit, instance_sha256: 'b'.repeat(64) }
+          : { id: serviceId, type: 'web_service', serviceDetails: { numInstances: 1 } };
+    return { ok: true, status: 200, async json() { return body; } };
+  };
+
+  await assert.rejects(sampleWithOneRetry({ config, fetchImpl }), /SUPPORT_VOICE_MONITOR_OBSERVATION_INVALID/);
+  assert.equal(serviceAttempts, 1);
 });

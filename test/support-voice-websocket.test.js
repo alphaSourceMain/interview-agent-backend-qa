@@ -32,6 +32,8 @@ class FakeUpstream extends EventEmitter {
       const prompt = event.session.instructions;
       const acknowledge = () => this.emitProvider({
         type: 'session.updated',
+        event_id: '00000000-0000-4000-8000-000000000000',
+        previous_item_id: null,
         session: {
           audio: {
             input: { format: { type: 'audio/pcm', rate: 24000 }, transport: 'json' },

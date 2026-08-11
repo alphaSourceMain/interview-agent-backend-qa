@@ -51,6 +51,30 @@ test('closed session.updated attestation accepts the sanitized live provider sha
   assert.equal(validateSessionUpdated(acceptedSession(), { prompt, voice: 'carina' }), true);
 });
 
+test('closed session.updated attestation accepts current bounded provider envelope metadata', () => {
+  const event = acceptedSession();
+  event.event_id = '00000000-0000-4000-8000-000000000000';
+  event.previous_item_id = null;
+  assert.equal(validateSessionUpdated(event, { prompt, voice: 'carina' }), true);
+});
+
+for (const mutation of [
+  (event) => { event.event_id = ''; },
+  (event) => { event.event_id = `event-${'x'.repeat(195)}`; },
+  (event) => { event.event_id = 'event\ncontrol'; },
+  (event) => { event.previous_item_id = {}; },
+  (event) => { event.previous_item_id = 'item\u0000control'; },
+  (event) => { event.provider_metadata = true; },
+]) {
+  test('closed session.updated attestation rejects unsafe provider envelope metadata', () => {
+    const event = acceptedSession();
+    event.event_id = '00000000-0000-4000-8000-000000000000';
+    event.previous_item_id = null;
+    mutation(event);
+    assert.equal(validateSessionUpdated(event, { prompt, voice: 'carina' }), false);
+  });
+}
+
 for (const mutation of [
   (event) => { event.session.tools = []; },
   (event) => { event.session.modalities = ['audio', 'text']; },

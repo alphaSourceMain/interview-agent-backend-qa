@@ -15,6 +15,12 @@ function exactKeys(value, expected) {
     Object.keys(value).sort().join('\u001f') === [...expected].sort().join('\u001f');
 }
 
+function boundedProviderIdentifier(value, { nullable = false } = {}) {
+  if (value === null) return nullable;
+  return typeof value === 'string' && value.length > 0 && value.length <= 200 && value === value.trim() &&
+    !/[\u0000-\u001f\u007f]/.test(value);
+}
+
 function buildAuthoritativeSessionUpdate({ prompt, voice = DEFAULT_VOICE }) {
   return {
     type: 'session.update',
@@ -46,7 +52,11 @@ function validateAudioEndpoint(value) {
 }
 
 function validateSessionUpdated(event, { prompt, voice = DEFAULT_VOICE }) {
-  if (!exactKeys(event, ['type', 'session']) || event.type !== 'session.updated') return false;
+  if (!event || typeof event !== 'object' || Array.isArray(event) || event.type !== 'session.updated' || !own(event, 'session')) return false;
+  const eventKeys = Object.keys(event);
+  if (eventKeys.some((key) => !['type', 'session', 'event_id', 'previous_item_id'].includes(key))) return false;
+  if (own(event, 'event_id') && !boundedProviderIdentifier(event.event_id)) return false;
+  if (own(event, 'previous_item_id') && !boundedProviderIdentifier(event.previous_item_id, { nullable: true })) return false;
   const session = event.session;
   const required = [
     'audio', 'enable_noise_suppression', 'enable_phonetic_spelling', 'input_audio_format',
@@ -128,6 +138,7 @@ module.exports = {
   UPSTREAM_MAX_PAYLOAD,
   UPSTREAM_URL,
   buildAuthoritativeSessionUpdate,
+  boundedProviderIdentifier,
   classifyProviderEvent,
   decodeCanonicalAudio,
   exactKeys,

@@ -13,6 +13,7 @@ const DATABASE = `alphascreen_pronunciation_${process.pid}`;
 const ROOT = path.resolve(__dirname, '..');
 const BOOTSTRAP = path.join(__dirname, 'fixtures', 'durable-otp-bootstrap.sql');
 const MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260812174626_pronunciation_registry_foundation.sql');
+const CORRECTION = path.join(ROOT, 'supabase', 'migrations', '20260812185500_pronunciation_ipa_correction.sql');
 
 function command(name, args) {
   return spawnSync(name, args, { encoding: 'utf8' });
@@ -40,6 +41,7 @@ before(() => {
   assert.equal(created.status, 0, created.stderr);
   apply(BOOTSTRAP);
   apply(MIGRATION);
+  apply(CORRECTION);
 });
 
 after(() => {
@@ -49,7 +51,10 @@ after(() => {
 
 test('migration replays idempotently and seeds only the reviewed verified subset', { skip: !ENABLED }, () => {
   apply(MIGRATION);
+  apply(CORRECTION);
   assert.equal(sql("select count(*)||'|'||count(*) filter(where verification_status='verified') from public.pronunciation_terms;").stdout, '36|9');
+  assert.equal(sql("select count(*)||'|'||count(*) filter(where pronunciation_method='ipa') from public.pronunciation_terms where verification_status='verified';").stdout, '9|8');
+  assert.equal(sql("select count(*) from public.pronunciation_terms where verification_status='verified' and version=2;").stdout, '9');
 });
 
 test('registry and sync binding are private, RLS-enabled, and service-only', { skip: !ENABLED }, () => {

@@ -1,8 +1,5 @@
 'use strict';
 
-const NCI = 'https://www.cancer.gov/publications/dictionaries/cancer-terms/def/';
-const MW = 'https://www.merriam-webster.com/dictionary/';
-
 function dentalTerm(canonical_term, category, pronunciation_value, options = {}) {
   return Object.freeze({
     canonical_term,
@@ -15,7 +12,7 @@ function dentalTerm(canonical_term, category, pronunciation_value, options = {})
     source: 'industry_seed',
     verification_status: options.verified ? 'verified' : 'suggested',
     is_active: true,
-    version: 1,
+    version: options.version || 1,
     category,
     evidence_url: options.evidenceUrl || null,
     confidence: options.confidence || (options.verified ? 'high' : 'unverified'),
@@ -26,27 +23,27 @@ function dentalTerm(canonical_term, category, pronunciation_value, options = {})
 }
 
 const DENTAL_PRONUNCIATION_SEED = Object.freeze([
-  dentalTerm('endodontics', 'specialties', 'en-doh-DON-tiks', { verified: true, evidenceUrl: `${MW}endodontics` }),
-  dentalTerm('periodontics', 'specialties', 'pair-ee-oh-DON-tiks', { verified: true, evidenceUrl: `${MW}periodontics` }),
-  dentalTerm('prosthodontics', 'specialties', 'pros-thoh-DON-tiks', { verified: true, evidenceUrl: `${MW}prosthodontics` }),
-  dentalTerm('orthodontics', 'specialties', 'or-thoh-DON-tiks', { verified: true, evidenceUrl: `${MW}orthodontics` }),
+  dentalTerm('endodontics', 'specialties', 'ˌɛndoʊˈdɑntɪks', { method: 'ipa', version: 2, verified: true, evidenceUrl: 'https://www.collinsdictionary.com/us/dictionary/english/endodontics' }),
+  dentalTerm('periodontics', 'specialties', 'ˌper.i.oʊˈdɑːn.t̬ɪks', { method: 'ipa', version: 2, verified: true, evidenceUrl: 'https://dictionary.cambridge.org/us/pronunciation/english/periodontics' }),
+  dentalTerm('prosthodontics', 'specialties', 'ˌprɑːs.θoʊˈdɑːn.t̬ɪks', { method: 'ipa', version: 2, verified: true, evidenceUrl: 'https://dictionary.cambridge.org/us/dictionary/english/prosthodontics' }),
+  dentalTerm('orthodontics', 'specialties', 'ˌɔːr.θoʊˈdɑːn.t̬ɪks', { method: 'ipa', version: 2, verified: true, evidenceUrl: 'https://dictionary.cambridge.org/us/pronunciation/english/orthodontics' }),
   dentalTerm('oral and maxillofacial surgery', 'specialties', 'oral and maxillofacial surgery'),
   dentalTerm('pediatric dentistry', 'specialties', 'pediatric dentistry'),
-  dentalTerm('xerostomia', 'clinical_anatomy', 'ZEER-oh-STOH-mee-uh', { verified: true, evidenceUrl: `${NCI}xerostomia` }),
+  dentalTerm('xerostomia', 'clinical_anatomy', 'ˌzɪərəˈstoʊmiə', { method: 'ipa', version: 2, verified: true, evidenceUrl: 'https://www.dictionary.com/browse/xerostomia' }),
   dentalTerm('occlusion', 'clinical_anatomy', 'occlusion'),
   dentalTerm('malocclusion', 'clinical_anatomy', 'malocclusion'),
-  dentalTerm('gingiva', 'clinical_anatomy', 'JIN-jih-vuh', { verified: true, evidenceUrl: `${NCI}gingiva` }),
-  dentalTerm('periodontal', 'clinical_anatomy', 'pair-ee-oh-DON-tul', { verified: true, evidenceUrl: `${MW}periodontal` }),
+  dentalTerm('gingiva', 'clinical_anatomy', 'ˈdʒɪn.dʒɪ.və', { method: 'ipa', version: 2, verified: true, evidenceUrl: 'https://dictionary.cambridge.org/us/pronunciation/english/gingiva' }),
+  dentalTerm('periodontal', 'clinical_anatomy', 'ˌper.i.oʊˈdɑːn.t̬əl', { method: 'ipa', version: 2, verified: true, evidenceUrl: 'https://dictionary.cambridge.org/us/pronunciation/english/periodontal' }),
   dentalTerm('periapical', 'clinical_anatomy', 'periapical'),
   dentalTerm('interproximal', 'clinical_anatomy', 'interproximal'),
   dentalTerm('edentulous', 'clinical_anatomy', 'edentulous'),
-  dentalTerm('CBCT', 'imaging_technology', 'C B C T', { verified: true, confidence: 'curated', evidenceUrl: 'https://www.ada.org/resources/research/science-and-research-institute/oral-health-topics/cone-beam-computed-tomography', caseSensitive: true }),
+  dentalTerm('CBCT', 'imaging_technology', 'see bee see tee', { version: 2, verified: true, confidence: 'qa_correction_pending_retest', evidenceUrl: 'https://www.ada.org/resources/research/science-and-research-institute/oral-health-topics/cone-beam-computed-tomography', caseSensitive: true }),
   dentalTerm('cephalometric', 'imaging_technology', 'cephalometric'),
   dentalTerm('CAD/CAM', 'imaging_technology', 'cad cam', { caseSensitive: true }),
   dentalTerm('intraoral scanner', 'imaging_technology', 'intraoral scanner'),
   dentalTerm('panoramic', 'imaging_technology', 'panoramic'),
   dentalTerm('bitewing', 'imaging_technology', 'bitewing'),
-  dentalTerm('prophylaxis', 'procedures_materials', 'PROH-fih-LAK-sis', { verified: true, evidenceUrl: `${NCI}prophylaxis` }),
+  dentalTerm('prophylaxis', 'procedures_materials', 'ˌproʊ.fɪˈlæk.sɪs', { method: 'ipa', version: 2, verified: true, evidenceUrl: 'https://dictionary.cambridge.org/us/pronunciation/english/prophylaxis' }),
   dentalTerm('scaling and root planing', 'procedures_materials', 'scaling and root planing'),
   dentalTerm('pulpotomy', 'procedures_materials', 'pulpotomy'),
   dentalTerm('pulpectomy', 'procedures_materials', 'pulpectomy'),

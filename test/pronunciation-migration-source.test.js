@@ -6,6 +6,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 
 const migration = fs.readFileSync(path.resolve(__dirname, '../supabase/migrations/20260812174626_pronunciation_registry_foundation.sql'), 'utf8');
+const correction = fs.readFileSync(path.resolve(__dirname, '../supabase/migrations/20260812185500_pronunciation_ipa_correction.sql'), 'utf8');
 
 test('migration creates provider-neutral registry and sync binding', () => {
   assert.match(migration, /create table if not exists public\.pronunciation_terms/i);
@@ -33,4 +34,12 @@ test('registry is RLS protected and browser roles have no grants', () => {
 test('only verified seed rows carry verified timestamps', () => {
   assert.match(migration, /'prophylaxis'.*'verified'.*now\(\)/i);
   assert.match(migration, /'CAD\/CAM'.*'suggested'.*null/i);
+});
+
+test('human-listening correction replaces segmented aliases with bounded v2 rules', () => {
+  assert.match(correction, /version = 2/);
+  assert.match(correction, /'endodontics', 'ipa', 'ˌɛndoʊˈdɑntɪks'/);
+  assert.match(correction, /'prophylaxis', 'ipa', 'ˌproʊ\.fɪˈlæk\.sɪs'/);
+  assert.match(correction, /'CBCT', 'alias', 'see bee see tee'/);
+  assert.match(correction, /pronunciation_ipa_correction_count_mismatch/);
 });

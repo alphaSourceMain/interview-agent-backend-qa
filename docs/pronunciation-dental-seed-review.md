@@ -17,27 +17,27 @@ so no brand was promoted merely because it appeared in the requested inventory.
 
 | Canonical term | Category | Method | Proposed pronunciation | Source | Confidence | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| endodontics | specialties | alias | en-doh-DON-tiks | Merriam-Webster | high | verified |
-| periodontics | specialties | alias | pair-ee-oh-DON-tiks | Merriam-Webster | high | verified |
-| prosthodontics | specialties | alias | pros-thoh-DON-tiks | Merriam-Webster | high | verified |
-| orthodontics | specialties | alias | or-thoh-DON-tiks | Merriam-Webster | high | verified |
+| endodontics | specialties | IPA | ˌɛndoʊˈdɑntɪks | Collins American English | high | verified, v2 retest required |
+| periodontics | specialties | IPA | ˌper.i.oʊˈdɑːn.t̬ɪks | Cambridge US | high | verified, v2 retest required |
+| prosthodontics | specialties | IPA | ˌprɑːs.θoʊˈdɑːn.t̬ɪks | Cambridge US | high | verified, v2 retest required |
+| orthodontics | specialties | IPA | ˌɔːr.θoʊˈdɑːn.t̬ɪks | Cambridge US | high | verified, v2 retest required |
 | oral and maxillofacial surgery | specialties | alias | unchanged | none established | unverified | suggested |
 | pediatric dentistry | specialties | alias | unchanged | none established | unverified | suggested |
-| xerostomia | clinical/anatomy | alias | ZEER-oh-STOH-mee-uh | NCI Dictionary of Cancer Terms | high | verified |
+| xerostomia | clinical/anatomy | IPA | ˌzɪərəˈstoʊmiə | Dictionary.com American IPA; consistent with NCI | high | verified, v2 retest required |
 | occlusion | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | malocclusion | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
-| gingiva | clinical/anatomy | alias | JIN-jih-vuh | NCI Dictionary of Cancer Terms | high | verified |
-| periodontal | clinical/anatomy | alias | pair-ee-oh-DON-tul | Merriam-Webster | high | verified |
+| gingiva | clinical/anatomy | IPA | ˈdʒɪn.dʒɪ.və | Cambridge US | high | verified, v2 retest required |
+| periodontal | clinical/anatomy | IPA | ˌper.i.oʊˈdɑːn.t̬əl | Cambridge US | high | verified, v2 retest required |
 | periapical | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | interproximal | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | edentulous | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
-| CBCT | imaging/technology | alias | C B C T | ADA terminology plus explicit curated initialism reading | curated | verified |
+| CBCT | imaging/technology | alias | see bee see tee | ADA terminology plus explicit curated initialism reading | QA correction | verified, v2 retest required |
 | cephalometric | imaging/technology | alias | unchanged | none established | unverified | suggested |
 | CAD/CAM | imaging/technology | alias | cad cam | none established | unverified | suggested |
 | intraoral scanner | imaging/technology | alias | unchanged | none established | unverified | suggested |
 | panoramic | imaging/technology | alias | unchanged | none established | unverified | suggested |
 | bitewing | imaging/technology | alias | unchanged | none established | unverified | suggested |
-| prophylaxis | procedures/materials | alias | PROH-fih-LAK-sis | NCI Dictionary of Cancer Terms | high | verified |
+| prophylaxis | procedures/materials | IPA | ˌproʊ.fɪˈlæk.sɪs | Cambridge US | high | verified, v2 retest required |
 | scaling and root planing | procedures/materials | alias | unchanged | none established | unverified | suggested |
 | pulpotomy | procedures/materials | alias | unchanged | none established | unverified | suggested |
 | pulpectomy | procedures/materials | alias | unchanged | none established | unverified | suggested |
@@ -83,3 +83,12 @@ For each verified term, listen to the canonical sentence in
 `test/fixtures/dental-pronunciation-corpus.json` and record `PASS`, `FAIL`, or
 `UNCERTAIN`. Any failure requires an alias/IPA correction, version increment,
 resynchronization, and a targeted replay. `UNCERTAIN` is not a pass.
+
+### QA listening correction history
+
+The owner judged all nine v1 alias renderings `FAIL`: the capitalized,
+hyphenated respellings were segmented unnaturally, stressed incorrectly, or
+spelled as letters. The v2 correction changes eight lexical terms to continuous
+US IPA and changes CBCT to the literal lowercase spoken phrase `see bee see tee`.
+No v2 rule is accepted until the affected corpus is replayed and the owner gives
+an explicit listening judgment.

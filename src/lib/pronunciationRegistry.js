@@ -97,6 +97,7 @@ function compileTavusPronunciationRules(terms) {
       text: term.canonical_term,
       pronunciation: term.pronunciation_value,
       type: term.pronunciation_method,
+      ...(term.pronunciation_method === 'ipa' ? { alphabet: 'ipa' } : {}),
       case_sensitive: Boolean(term.case_sensitive),
       word_boundaries: term.word_boundaries !== false,
     }))

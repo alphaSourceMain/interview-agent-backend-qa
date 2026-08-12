@@ -67,6 +67,8 @@ test('alias and IPA serialize explicitly without changing canonical text', () =>
     term({ id: 'ipa', canonical_term: 'bayou', normalized_term: 'bayou', pronunciation_method: 'ipa', pronunciation_value: 'ˈbɑju' }),
   ]);
   assert.deepEqual(rules.map((rule) => [rule.text, rule.type]), [['bayou', 'ipa'], ['prosthodontics', 'alias']]);
+  assert.equal(rules[0].alphabet, 'ipa');
+  assert.equal(Object.hasOwn(rules[1], 'alphabet'), false);
   assert.equal(rules[1].text, 'prosthodontics');
 });
 

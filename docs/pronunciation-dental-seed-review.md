@@ -26,7 +26,7 @@ so no brand was promoted merely because it appeared in the requested inventory.
 | xerostomia | clinical/anatomy | IPA | ˌzɪərəˈstoʊmiə | Dictionary.com American IPA; consistent with NCI | high | verified, v2 listening PASS |
 | occlusion | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | malocclusion | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
-| gingiva | clinical/anatomy | IPA | dʒ\|ˈ\|ɪ\|n\|dʒ\|ɪ\|v\|ə | Cambridge US; Cartesia stress-position guidance | high | verified, v4 retest required |
+| gingiva | clinical/anatomy | alias | jinjivuh | Cambridge US target; owner voice reference retained locally only | owner reference | verified, v5 retest required |
 | periodontal | clinical/anatomy | IPA | ˌper.i.oʊˈdɑːn.t̬əl | Cambridge US | high | verified, v2 listening PASS |
 | periapical | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | interproximal | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
@@ -100,4 +100,9 @@ boundary explicit. The owner then judged the v3 orthodontics and prophylaxis
 renderings `PASS`, but gingiva still rendered its second short-i as “ee.” The
 v4 gingiva-only correction moves the primary stress marker directly before its
 first vowel, matching Cartesia's documented placement requirement while leaving
-both short-i phones as `ɪ`. It remains pending a one-term human replay.
+both short-i phones as `ɪ`. The owner judged v4 close but still incorrect: the
+second vowel remained “ee.” A short owner reference was captured locally and
+was not uploaded or committed. Because repeated IPA variants produced the same
+provider error, v5 uses the single continuous lowercase alias `jinjivuh` to
+encode both short-i sounds without the segmented capitalized respelling that
+failed in v1. It remains pending a one-term human replay.

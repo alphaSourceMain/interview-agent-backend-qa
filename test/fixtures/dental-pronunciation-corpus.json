@@ -4,7 +4,7 @@
   {"term":"prosthodontics","sentence":"Describe your work in a prosthodontics setting.","expected":"ˌprɑːs.θoʊˈdɑːn.t̬ɪks","scope":"industry:dental","method":"ipa","version":2,"category":"specialties"},
   {"term":"orthodontics","sentence":"What interests you about an orthodontics role?","expected":"ˌ|ɔː|r|θ|oʊ|ˈ|d|ɑː|n|t̬|ɪ|k|s","scope":"industry:dental","method":"ipa","version":3,"category":"specialties"},
   {"term":"xerostomia","sentence":"How would you document a patient reporting xerostomia?","expected":"ˌzɪərəˈstoʊmiə","scope":"industry:dental","method":"ipa","version":2,"category":"clinical_anatomy"},
-  {"term":"gingiva","sentence":"What signs do you assess when examining the gingiva?","expected":"dʒ|ˈ|ɪ|n|dʒ|ɪ|v|ə","scope":"industry:dental","method":"ipa","version":4,"category":"clinical_anatomy"},
+  {"term":"gingiva","sentence":"What signs do you assess when examining the gingiva?","expected":"jinjivuh","scope":"industry:dental","method":"alias","version":5,"category":"clinical_anatomy"},
   {"term":"periodontal","sentence":"Explain how you support a periodontal maintenance visit.","expected":"ˌper.i.oʊˈdɑːn.t̬əl","scope":"industry:dental","method":"ipa","version":2,"category":"clinical_anatomy"},
   {"term":"CBCT","sentence":"When would the team review a CBCT scan?","expected":"see bee see tee","scope":"industry:dental","method":"alias","version":2,"category":"imaging_technology"},
   {"term":"prophylaxis","sentence":"Walk me through preparing for a prophylaxis appointment.","expected":"ˌ|p|r|oʊ|f|ɪ|ˈ|l|æ|k|s|ɪ|s","scope":"industry:dental","method":"ipa","version":3,"category":"procedures_materials"},

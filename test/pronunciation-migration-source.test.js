@@ -8,11 +8,18 @@ const { test } = require('node:test');
 const migration = fs.readFileSync(path.resolve(__dirname, '../supabase/migrations/20260812174626_pronunciation_registry_foundation.sql'), 'utf8');
 const correction = fs.readFileSync(path.resolve(__dirname, '../supabase/migrations/20260812185500_pronunciation_ipa_correction.sql'), 'utf8');
 const targetedCorrection = fs.readFileSync(path.resolve(__dirname, '../supabase/migrations/20260812193000_pronunciation_targeted_phoneme_correction.sql'), 'utf8');
+const gingivaStressCorrection = fs.readFileSync(path.resolve(__dirname, '../supabase/migrations/20260812194600_pronunciation_gingiva_stress_correction.sql'), 'utf8');
 
 test('migration creates provider-neutral registry and sync binding', () => {
   assert.match(migration, /create table if not exists public\.pronunciation_terms/i);
   assert.match(migration, /create table if not exists public\.pronunciation_dictionary_syncs/i);
   assert.doesNotMatch(migration, /tavus_dictionary_id|elevenlabs_dictionary_id|cartesia_dictionary_id/i);
+});
+
+test('gingiva correction places primary stress immediately before the first short-i vowel', () => {
+  assert.match(gingivaStressCorrection, /version = 4/);
+  assert.match(gingivaStressCorrection, /pronunciation_value = 'dʒ\|ˈ\|ɪ\|n\|dʒ\|ɪ\|v\|ə'/);
+  assert.match(gingivaStressCorrection, /pronunciation_gingiva_stress_correction_mismatch/);
 });
 
 test('migration bounds scope, method, provenance, and verification state', () => {

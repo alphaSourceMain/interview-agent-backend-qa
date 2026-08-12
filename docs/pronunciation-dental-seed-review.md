@@ -26,7 +26,7 @@ so no brand was promoted merely because it appeared in the requested inventory.
 | xerostomia | clinical/anatomy | IPA | ˌzɪərəˈstoʊmiə | Dictionary.com American IPA; consistent with NCI | high | verified, v2 listening PASS |
 | occlusion | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | malocclusion | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
-| gingiva | clinical/anatomy | IPA | ˈ\|dʒ\|ɪ\|n\|dʒ\|ɪ\|v\|ə | Cambridge US; Tavus pipe-delimited format | high | verified, v3 retest required |
+| gingiva | clinical/anatomy | IPA | dʒ\|ˈ\|ɪ\|n\|dʒ\|ɪ\|v\|ə | Cambridge US; Cartesia stress-position guidance | high | verified, v4 retest required |
 | periodontal | clinical/anatomy | IPA | ˌper.i.oʊˈdɑːn.t̬əl | Cambridge US | high | verified, v2 listening PASS |
 | periapical | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | interproximal | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
@@ -96,4 +96,8 @@ prosthodontics, xerostomia, periodontal, and CBCT. Orthodontics and prophylaxis
 rendered the long-o phoneme as “oo”; gingiva rendered its second short-i phoneme
 as “ee.” The targeted v3 correction preserves the lexical IPA evidence while
 using Tavus's documented pipe-delimited IPA form to make each intended phoneme
-boundary explicit. The three v3 rules remain pending targeted human replay.
+boundary explicit. The owner then judged the v3 orthodontics and prophylaxis
+renderings `PASS`, but gingiva still rendered its second short-i as “ee.” The
+v4 gingiva-only correction moves the primary stress marker directly before its
+first vowel, matching Cartesia's documented placement requirement while leaving
+both short-i phones as `ɪ`. It remains pending a one-term human replay.

@@ -15,6 +15,7 @@ const BOOTSTRAP = path.join(__dirname, 'fixtures', 'durable-otp-bootstrap.sql');
 const MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260812174626_pronunciation_registry_foundation.sql');
 const CORRECTION = path.join(ROOT, 'supabase', 'migrations', '20260812185500_pronunciation_ipa_correction.sql');
 const TARGETED_CORRECTION = path.join(ROOT, 'supabase', 'migrations', '20260812193000_pronunciation_targeted_phoneme_correction.sql');
+const GINGIVA_STRESS_CORRECTION = path.join(ROOT, 'supabase', 'migrations', '20260812194600_pronunciation_gingiva_stress_correction.sql');
 
 function command(name, args) {
   return spawnSync(name, args, { encoding: 'utf8' });
@@ -44,6 +45,7 @@ before(() => {
   apply(MIGRATION);
   apply(CORRECTION);
   apply(TARGETED_CORRECTION);
+  apply(GINGIVA_STRESS_CORRECTION);
 });
 
 after(() => {
@@ -55,10 +57,12 @@ test('migration replays idempotently and seeds only the reviewed verified subset
   apply(MIGRATION);
   apply(CORRECTION);
   apply(TARGETED_CORRECTION);
+  apply(GINGIVA_STRESS_CORRECTION);
   assert.equal(sql("select count(*)||'|'||count(*) filter(where verification_status='verified') from public.pronunciation_terms;").stdout, '36|9');
   assert.equal(sql("select count(*)||'|'||count(*) filter(where pronunciation_method='ipa') from public.pronunciation_terms where verification_status='verified';").stdout, '9|8');
   assert.equal(sql("select count(*) from public.pronunciation_terms where verification_status='verified' and version=2;").stdout, '6');
-  assert.equal(sql("select string_agg(canonical_term,',' order by canonical_term) from public.pronunciation_terms where verification_status='verified' and version=3;").stdout, 'gingiva,orthodontics,prophylaxis');
+  assert.equal(sql("select string_agg(canonical_term,',' order by canonical_term) from public.pronunciation_terms where verification_status='verified' and version=3;").stdout, 'orthodontics,prophylaxis');
+  assert.equal(sql("select string_agg(canonical_term,',' order by canonical_term) from public.pronunciation_terms where verification_status='verified' and version=4;").stdout, 'gingiva');
 });
 
 test('registry and sync binding are private, RLS-enabled, and service-only', { skip: !ENABLED }, () => {

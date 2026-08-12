@@ -32,7 +32,7 @@ const DENTAL_PRONUNCIATION_SEED = Object.freeze([
   dentalTerm('xerostomia', 'clinical_anatomy', 'ˌzɪərəˈstoʊmiə', { method: 'ipa', version: 2, verified: true, evidenceUrl: 'https://www.dictionary.com/browse/xerostomia' }),
   dentalTerm('occlusion', 'clinical_anatomy', 'occlusion'),
   dentalTerm('malocclusion', 'clinical_anatomy', 'malocclusion'),
-  dentalTerm('gingiva', 'clinical_anatomy', 'ˈ|dʒ|ɪ|n|dʒ|ɪ|v|ə', { method: 'ipa', version: 3, verified: true, evidenceUrl: 'https://dictionary.cambridge.org/us/pronunciation/english/gingiva' }),
+  dentalTerm('gingiva', 'clinical_anatomy', 'dʒ|ˈ|ɪ|n|dʒ|ɪ|v|ə', { method: 'ipa', version: 4, verified: true, evidenceUrl: 'https://dictionary.cambridge.org/us/pronunciation/english/gingiva' }),
   dentalTerm('periodontal', 'clinical_anatomy', 'ˌper.i.oʊˈdɑːn.t̬əl', { method: 'ipa', version: 2, verified: true, evidenceUrl: 'https://dictionary.cambridge.org/us/pronunciation/english/periodontal' }),
   dentalTerm('periapical', 'clinical_anatomy', 'periapical'),
   dentalTerm('interproximal', 'clinical_anatomy', 'interproximal'),

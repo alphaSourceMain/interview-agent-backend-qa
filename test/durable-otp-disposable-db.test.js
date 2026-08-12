@@ -16,6 +16,7 @@ const MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260810144400_dura
 const SINGLE_ACTIVE_MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260810155800_durable_otp_single_active_resource.sql');
 const SMS_B_MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260812013847_sms_b_e164_cross_channel_foundation.sql');
 const SMS_C0_RPC_MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260812141337_sms_c0_provider_delivery_recording_rpc.sql');
+const SMS_C1_CALLBACK_MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260812160357_sms_c1_provider_delivery_callback_rpc.sql');
 let preFixCrossChannelActiveCount = null;
 
 const FIXTURE = {
@@ -94,6 +95,7 @@ before(() => {
       and consumed_at is null and superseded_at is null;`).stdout);
   apply(SMS_B_MIGRATION);
   apply(SMS_C0_RPC_MIGRATION);
+  apply(SMS_C1_CALLBACK_MIGRATION);
 });
 
 after(() => {
@@ -283,6 +285,57 @@ test('new metadata functions retain exact owner, search path, and service-only e
   assert.notEqual(sql("set role service_role; update private_auth.otp_challenges set provider='bypass';", { allowFailure: true }).status, 0);
 });
 
+test('delivery callback boundary is service-only, private, and provider-neutral', { skip: !ENABLED }, () => {
+  const signature = 'public.service_record_otp_sms_delivery_event(text,text,text,timestamptz,text)';
+  assert.equal(sql(`select has_function_privilege('anon','${signature}','EXECUTE'),has_function_privilege('authenticated','${signature}','EXECUTE'),has_function_privilege('service_role','${signature}','EXECUTE');`).stdout, 'f|f|t');
+  assert.equal(sql("select has_function_privilege('service_role','private_auth.record_otp_sms_delivery_event(text,text,text,timestamptz,text)','EXECUTE');").stdout, 'f');
+  assert.equal(sql("select bool_and(pg_get_userbyid(p.proowner)='postgres' and p.prosecdef and p.proconfig @> array['search_path=\"\"']) from pg_proc p where p.oid in ('private_auth.record_otp_sms_delivery_event(text,text,text,timestamptz,text)'::regprocedure,'public.service_record_otp_sms_delivery_event(text,text,text,timestamptz,text)'::regprocedure);").stdout, 't');
+  assert.match(sql("select pg_get_indexdef('private_auth.otp_challenges_provider_event_uidx'::regclass);").stdout, /\(provider, last_provider_event_id\).*last_provider_event_id IS NOT NULL/i);
+});
+
+test('delivery callbacks bind by provider/message and advance monotonically with replay safety', { skip: !ENABLED }, () => {
+  const id = '82000000-0000-4000-8000-000000000105';
+  sql(issueSms(id, 'e', 'e'));
+  sql(`set role service_role; select * from public.service_record_otp_sms_delivery_metadata('${id}','send_requested','provider_g',null,null,null);`);
+  sql(`set role service_role; select * from public.service_record_otp_sms_delivery_metadata('${id}','provider_accepted','provider_g','callback-message','queued',null);`);
+  assert.equal(
+    sql("set role service_role; select provider_delivery_status||'|'||applied||'|'||replayed from public.service_record_otp_sms_delivery_event('provider_g','callback-message','callback-event-1','2026-08-12T12:00:01Z','sent');").stdout,
+    'sent|true|false',
+  );
+  assert.equal(
+    sql("set role service_role; select provider_delivery_status||'|'||applied||'|'||replayed from public.service_record_otp_sms_delivery_event('provider_g','callback-message','callback-event-1','2026-08-12T12:00:01Z','sent');").stdout,
+    'sent|false|true',
+  );
+  assert.equal(
+    sql("set role service_role; select provider_delivery_status||'|'||applied from public.service_record_otp_sms_delivery_event('provider_g','callback-message','callback-event-old','2026-08-12T12:00:00Z','queued');").stdout,
+    'sent|false',
+  );
+  assert.equal(
+    sql("set role service_role; select provider_delivery_status||'|'||applied from public.service_record_otp_sms_delivery_event('provider_g','callback-message','callback-event-2','2026-08-12T12:00:02Z','delivered');").stdout,
+    'delivered|true',
+  );
+  assert.equal(
+    sql("set role service_role; select provider_delivery_status||'|'||applied from public.service_record_otp_sms_delivery_event('provider_g','callback-message','callback-event-3','2026-08-12T12:00:03Z','failed');").stdout,
+    'delivered|false',
+  );
+  assert.equal(sql("set role service_role; select count(*) from public.service_record_otp_sms_delivery_event('provider_g','unknown-message','unknown-event','2026-08-12T12:00:04Z','sent');").stdout, '0');
+});
+
+test('callback event identity is globally unique per provider and late telemetry preserves authority', { skip: !ENABLED }, () => {
+  const first = '82000000-0000-4000-8000-000000000106';
+  const second = '82000000-0000-4000-8000-000000000107';
+  sql(issueSms(first, 'f', 'f'));
+  sql(`set role service_role; select * from public.service_record_otp_sms_delivery_metadata('${first}','send_requested','provider_h',null,null,null);`);
+  sql(`set role service_role; select * from public.service_record_otp_sms_delivery_metadata('${first}','provider_accepted','provider_h','callback-message-a','queued',null);`);
+  sql(issueSms(second, '7', '7'));
+  sql(`set role service_role; select * from public.service_record_otp_sms_delivery_metadata('${second}','send_requested','provider_h',null,null,null);`);
+  sql(`set role service_role; select * from public.service_record_otp_sms_delivery_metadata('${second}','provider_accepted','provider_h','callback-message-b','queued',null);`);
+  sql("set role service_role; select * from public.service_record_otp_sms_delivery_event('provider_h','callback-message-a','shared-event','2026-08-12T12:01:00Z','delivered');");
+  assert.notEqual(sql("set role service_role; select * from public.service_record_otp_sms_delivery_event('provider_h','callback-message-b','shared-event','2026-08-12T12:01:01Z','sent');", { allowFailure: true }).status, 0);
+  assert.equal(sql(`select (superseded_at is not null)||'|'||provider_delivery_status from private_auth.otp_challenges where challenge_id='${first}';`).stdout, 'true|delivered');
+  assert.equal(sql(`select consumed_at is null and attempt_count=0 from private_auth.otp_challenges where challenge_id='${first}';`).stdout, 't');
+});
+
 test('SMS consent is explicit while email consent fields remain null', { skip: !ENABLED }, () => {
   assert.equal(sql("select (sms_selection_at is not null)||'|'||consent_copy_version from private_auth.otp_challenges where challenge_id='82000000-0000-4000-8000-000000000090';").stdout, 'true|sms-qa-v1');
   assert.equal(sql("select bool_and(sms_selection_at is null and consent_copy_version is null) from private_auth.otp_challenges where channel='email';").stdout, 't');
@@ -370,6 +423,7 @@ test('migration replay is catalog-safe and does not duplicate policies or indexe
   apply(SINGLE_ACTIVE_MIGRATION);
   apply(SMS_B_MIGRATION);
   apply(SMS_C0_RPC_MIGRATION);
-  assert.equal(sql("select count(*) from pg_indexes where schemaname='private_auth' and tablename='otp_challenges';").stdout, '5');
+  apply(SMS_C1_CALLBACK_MIGRATION);
+  assert.equal(sql("select count(*) from pg_indexes where schemaname='private_auth' and tablename='otp_challenges';").stdout, '6');
   assert.equal(sql("select count(*) from pg_policies where schemaname='private_auth' and tablename='otp_challenges';").stdout, '0');
 });

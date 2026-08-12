@@ -366,6 +366,46 @@ async function recordOtpSmsDeliveryMetadata(db, {
   });
 }
 
+async function recordOtpSmsDeliveryEvent(db, {
+  provider,
+  providerMessageId,
+  providerEventId,
+  providerEventAt,
+  deliveryStatus,
+}) {
+  const normalizedProvider = assertBoundedProvider(provider);
+  assertBoundedProviderMessageId(providerMessageId);
+  assertBoundedProviderMessageId(providerEventId);
+  const normalizedEventAt = new Date(providerEventAt);
+  if (!Number.isFinite(normalizedEventAt.getTime())) throw new OtpChallengeError('INVALID_SMS_DELIVERY_METADATA');
+  if (!['queued', 'sent', 'delivered', 'failed', 'undelivered', 'rejected'].includes(String(deliveryStatus || ''))) {
+    throw new OtpChallengeError('INVALID_SMS_DELIVERY_METADATA');
+  }
+  if (!db || typeof db.rpc !== 'function') throw new OtpChallengeError('OTP_SMS_DELIVERY_EVENT_FAILED');
+  const { data, error } = await db.rpc('service_record_otp_sms_delivery_event', {
+    p_provider: normalizedProvider,
+    p_provider_message_id: providerMessageId,
+    p_provider_event_id: providerEventId,
+    p_provider_event_at: normalizedEventAt.toISOString(),
+    p_delivery_status: deliveryStatus,
+  });
+  if (error) {
+    if (String(error.code || '') === '23505') throw new OtpChallengeError('OTP_SMS_DELIVERY_EVENT_CONFLICT');
+    throw new OtpChallengeError('OTP_SMS_DELIVERY_EVENT_FAILED');
+  }
+  const recorded = rpcRow(data);
+  if (!recorded) return Object.freeze({ found: false, applied: false, replayed: false });
+  return Object.freeze({
+    found: true,
+    challengeId: recorded.challenge_id,
+    deliveryStatus: recorded.provider_delivery_status,
+    providerEventId: recorded.last_provider_event_id,
+    providerEventAt: recorded.last_provider_event_at,
+    applied: recorded.applied === true,
+    replayed: recorded.replayed === true,
+  });
+}
+
 async function supersedeOtpChallenges(db, { candidateId, roleId, reason }) {
   const { data, error } = await db.rpc('service_supersede_otp_challenges', {
     p_candidate_id: candidateId,
@@ -395,6 +435,7 @@ module.exports = {
   getOtpSecret,
   issueOtpChallenge,
   markOtpChallengeDelivery,
+  recordOtpSmsDeliveryEvent,
   recordOtpSmsDeliveryMetadata,
   normalizeEmail,
   supersedeOtpChallenges,

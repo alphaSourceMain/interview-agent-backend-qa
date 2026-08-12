@@ -63,7 +63,7 @@ test('provider-neutral contract accepts bounded inputs and safe results', () => 
     challengeId: '81000000-0000-4000-8000-000000000001',
     expiresAt: '2026-08-12T00:10:00.000Z', environment: 'qa',
   }), true);
-  assert.equal(assertSmsProviderResult({ provider: 'provider_a', messageId: 'message-1', status: 'queued' }), true);
+  assert.equal(assertSmsProviderResult({ provider: 'provider_a', messageId: 'message-1', status: 'queued', outcome: 'accepted' }), true);
   assert.deepEqual(SMS_PROVIDER_SAFE_ERRORS, [
     'invalid_destination', 'blocked_destination', 'provider_rejected',
     'transient_preacceptance', 'ambiguous_outcome', 'misconfigured',

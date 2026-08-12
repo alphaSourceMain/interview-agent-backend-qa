@@ -266,6 +266,106 @@ async function markOtpChallengeDelivery(db, challengeId, state) {
   if (error) throw new OtpChallengeError('OTP_DELIVERY_STATE_FAILED', error.message);
 }
 
+const SMS_DELIVERY_METADATA_EVENTS = Object.freeze([
+  'send_requested',
+  'provider_accepted',
+  'send_outcome',
+]);
+const SMS_DELIVERY_FAILURE_CATEGORIES = Object.freeze([
+  'invalid_destination',
+  'blocked_destination',
+  'provider_rejected',
+  'transient_preacceptance',
+  'ambiguous_outcome',
+  'misconfigured',
+]);
+
+function assertBoundedProvider(provider) {
+  const value = String(provider || '');
+  if (!/^[a-z0-9_-]{1,40}$/.test(value)) {
+    throw new OtpChallengeError('INVALID_SMS_PROVIDER');
+  }
+  return value;
+}
+
+function assertBoundedProviderMessageId(messageId) {
+  const value = String(messageId || '');
+  if (!value.trim() || value.length > 255 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new OtpChallengeError('INVALID_SMS_PROVIDER_MESSAGE_ID');
+  }
+  return value;
+}
+
+function validateSmsDeliveryMetadataInput({ event, provider, providerMessageId, deliveryStatus, failureCategory }) {
+  const normalizedEvent = String(event || '');
+  const normalizedProvider = assertBoundedProvider(provider);
+  if (!SMS_DELIVERY_METADATA_EVENTS.includes(normalizedEvent)) {
+    throw new OtpChallengeError('INVALID_SMS_DELIVERY_EVENT');
+  }
+  if (normalizedEvent === 'send_requested') {
+    if (providerMessageId != null || deliveryStatus != null || failureCategory != null) {
+      throw new OtpChallengeError('INVALID_SMS_DELIVERY_METADATA');
+    }
+  } else if (normalizedEvent === 'provider_accepted') {
+    assertBoundedProviderMessageId(providerMessageId);
+    if (!['queued', 'sent'].includes(String(deliveryStatus || '')) || failureCategory != null) {
+      throw new OtpChallengeError('INVALID_SMS_DELIVERY_METADATA');
+    }
+  } else {
+    if (providerMessageId != null || !SMS_DELIVERY_FAILURE_CATEGORIES.includes(String(failureCategory || ''))) {
+      throw new OtpChallengeError('INVALID_SMS_DELIVERY_METADATA');
+    }
+    const expectedStatus = ['invalid_destination', 'blocked_destination', 'provider_rejected'].includes(failureCategory)
+      ? 'rejected'
+      : failureCategory === 'ambiguous_outcome' ? null : 'failed';
+    if (deliveryStatus !== expectedStatus) throw new OtpChallengeError('INVALID_SMS_DELIVERY_METADATA');
+  }
+  return { event: normalizedEvent, provider: normalizedProvider };
+}
+
+async function recordOtpSmsDeliveryMetadata(db, {
+  challengeId,
+  event,
+  provider,
+  providerMessageId = null,
+  deliveryStatus = null,
+  failureCategory = null,
+}) {
+  const normalizedChallengeId = String(challengeId || '').trim().toLowerCase();
+  if (!UUID_RE.test(normalizedChallengeId)) throw new OtpChallengeError('INVALID_CHALLENGE_ID');
+  const normalized = validateSmsDeliveryMetadataInput({
+    event, provider, providerMessageId, deliveryStatus, failureCategory,
+  });
+  if (!db || typeof db.rpc !== 'function') throw new OtpChallengeError('OTP_SMS_DELIVERY_METADATA_FAILED');
+  const { data, error } = await db.rpc('service_record_otp_sms_delivery_metadata', {
+    p_challenge_id: normalizedChallengeId,
+    p_event: normalized.event,
+    p_provider: normalized.provider,
+    p_provider_message_id: providerMessageId,
+    p_delivery_status: deliveryStatus,
+    p_failure_category: failureCategory,
+  });
+  if (error) {
+    const code = String(error.code || '');
+    if (['23505', '23514'].includes(code)) throw new OtpChallengeError('OTP_SMS_DELIVERY_METADATA_CONFLICT');
+    throw new OtpChallengeError('OTP_SMS_DELIVERY_METADATA_FAILED');
+  }
+  const recorded = rpcRow(data);
+  if (!recorded || String(recorded.challenge_id) !== normalizedChallengeId) {
+    throw new OtpChallengeError('OTP_SMS_DELIVERY_METADATA_FAILED');
+  }
+  return Object.freeze({
+    challengeId: recorded.challenge_id,
+    provider: recorded.provider,
+    providerMessageId: recorded.provider_message_id,
+    deliveryStatus: recorded.provider_delivery_status,
+    sendRequestedAt: recorded.send_requested_at,
+    providerAcceptedAt: recorded.provider_accepted_at,
+    failedAt: recorded.failed_at,
+    failureCategory: recorded.failure_category,
+  });
+}
+
 async function supersedeOtpChallenges(db, { candidateId, roleId, reason }) {
   const { data, error } = await db.rpc('service_supersede_otp_challenges', {
     p_candidate_id: candidateId,
@@ -295,6 +395,7 @@ module.exports = {
   getOtpSecret,
   issueOtpChallenge,
   markOtpChallengeDelivery,
+  recordOtpSmsDeliveryMetadata,
   normalizeEmail,
   supersedeOtpChallenges,
   timingSafeHexEqual,

@@ -20,13 +20,13 @@ so no brand was promoted merely because it appeared in the requested inventory.
 | endodontics | specialties | IPA | ˌɛndoʊˈdɑntɪks | Collins American English | high | verified, v2 listening PASS |
 | periodontics | specialties | IPA | ˌper.i.oʊˈdɑːn.t̬ɪks | Cambridge US | high | verified, v2 listening PASS |
 | prosthodontics | specialties | IPA | ˌprɑːs.θoʊˈdɑːn.t̬ɪks | Cambridge US | high | verified, v2 listening PASS |
-| orthodontics | specialties | IPA | ˌ\|ɔː\|r\|θ\|oʊ\|ˈ\|d\|ɑː\|n\|t̬\|ɪ\|k\|s | Cambridge US; Tavus pipe-delimited format | high | verified, v3 retest required |
+| orthodontics | specialties | IPA | ˌ\|ɔː\|r\|θ\|oʊ\|ˈ\|d\|ɑː\|n\|t̬\|ɪ\|k\|s | Cambridge US; Tavus pipe-delimited format | high | verified, v3 listening PASS |
 | oral and maxillofacial surgery | specialties | alias | unchanged | none established | unverified | suggested |
 | pediatric dentistry | specialties | alias | unchanged | none established | unverified | suggested |
 | xerostomia | clinical/anatomy | IPA | ˌzɪərəˈstoʊmiə | Dictionary.com American IPA; consistent with NCI | high | verified, v2 listening PASS |
 | occlusion | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | malocclusion | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
-| gingiva | clinical/anatomy | alias | jinjivuh | Cambridge US target; owner voice reference retained locally only | owner reference | verified, v5 retest required |
+| gingiva | clinical/anatomy | alias | jinjivuh | Cambridge US target; owner voice reference retained locally only | owner reference | verified, v5 listening PASS |
 | periodontal | clinical/anatomy | IPA | ˌper.i.oʊˈdɑːn.t̬əl | Cambridge US | high | verified, v2 listening PASS |
 | periapical | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | interproximal | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
@@ -37,7 +37,7 @@ so no brand was promoted merely because it appeared in the requested inventory.
 | intraoral scanner | imaging/technology | alias | unchanged | none established | unverified | suggested |
 | panoramic | imaging/technology | alias | unchanged | none established | unverified | suggested |
 | bitewing | imaging/technology | alias | unchanged | none established | unverified | suggested |
-| prophylaxis | procedures/materials | IPA | ˌ\|p\|r\|oʊ\|f\|ɪ\|ˈ\|l\|æ\|k\|s\|ɪ\|s | Cambridge US; Tavus pipe-delimited format | high | verified, v3 retest required |
+| prophylaxis | procedures/materials | IPA | ˌ\|p\|r\|oʊ\|f\|ɪ\|ˈ\|l\|æ\|k\|s\|ɪ\|s | Cambridge US; Tavus pipe-delimited format | high | verified, v3 listening PASS |
 | scaling and root planing | procedures/materials | alias | unchanged | none established | unverified | suggested |
 | pulpotomy | procedures/materials | alias | unchanged | none established | unverified | suggested |
 | pulpectomy | procedures/materials | alias | unchanged | none established | unverified | suggested |
@@ -105,4 +105,5 @@ second vowel remained “ee.” A short owner reference was captured locally and
 was not uploaded or committed. Because repeated IPA variants produced the same
 provider error, v5 uses the single continuous lowercase alias `jinjivuh` to
 encode both short-i sounds without the segmented capitalized respelling that
-failed in v1. It remains pending a one-term human replay.
+failed in v1. The owner judged the v5 one-term replay `PASS`. Final critical
+corpus acceptance is 9/9 PASS, 0 FAIL, and 0 UNCERTAIN.

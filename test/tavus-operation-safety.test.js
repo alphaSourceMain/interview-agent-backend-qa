@@ -27,6 +27,7 @@ const ACTIVE_CALLERS = [
   'lib/tavusClient.js',
   'scripts/patchTavusQaP1Persona.js',
   'scripts/syncTavusPersona.js',
+  'scripts/syncTavusPronunciationDictionary.js',
 ];
 
 function read(relativePath) {
@@ -56,9 +57,16 @@ test('all active Tavus API callers use the canonical shared client', () => {
     'lib/tavusClient.js',
     'scripts/patchTavusQaP1Persona.js',
     'scripts/syncTavusPersona.js',
+    'scripts/syncTavusPronunciationDictionary.js',
   ]) {
     assert.match(read(relativePath), /tavusHttpClient|createTavusHttpClient/, relativePath);
   }
+});
+
+test('pronunciation sync requires an explicit QA PAL allowlist distinct from provider identity input', () => {
+  const source = read('scripts/syncTavusPronunciationDictionary.js');
+  assert.match(source, /required\('PRONUNCIATION_QA_PAL_ID', EXPECTED_QA_PAL_ID\)/);
+  assert.doesNotMatch(source, /PRONUNCIATION_QA_PAL_ID \|\| PAL_ID/);
 });
 
 test('only documented inactive legacy modules retain obsolete Tavus direct URLs', () => {
@@ -83,6 +91,10 @@ test('operation map assigns every mutation one attempt and no retry safety', () 
     'create_document',
     'create_persona',
     'patch_persona',
+    'patch_pal',
+    'publish_pal',
+    'create_pronunciation_dictionary',
+    'update_pronunciation_dictionary',
     'end_conversation',
   ]) {
     assert.equal(OPERATION_CONFIG[operation].retrySafety, RETRY_SAFETY.NOT_SAFE_TO_RETRY, operation);
@@ -91,7 +103,14 @@ test('operation map assigns every mutation one attempt and no retry safety', () 
 });
 
 test('operation map assigns bounded retries only to GET/read operations', () => {
-  for (const operation of ['get_conversation', 'list_conversations', 'get_persona']) {
+  for (const operation of [
+    'get_conversation',
+    'list_conversations',
+    'get_persona',
+    'get_pal',
+    'list_pronunciation_dictionaries',
+    'get_pronunciation_dictionary',
+  ]) {
     assert.equal(OPERATION_CONFIG[operation].method, 'GET', operation);
     assert.equal(OPERATION_CONFIG[operation].retrySafety, RETRY_SAFETY.SAFE_TO_RETRY, operation);
     assert.equal(OPERATION_CONFIG[operation].maxAttempts, 3, operation);

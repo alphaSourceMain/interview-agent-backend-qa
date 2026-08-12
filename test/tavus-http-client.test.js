@@ -155,12 +155,16 @@ test('400, 401, 403, 404, 409, and 500 never retry', async () => {
   }
 });
 
-test('unsafe create/document/persona/end mutations never retry transient failures', async () => {
+test('unsafe create/document/persona/PAL/dictionary/end mutations never retry transient failures', async () => {
   for (const invoke of [
     (client) => client.createConversation({ conversation_name: 'synthetic' }),
     (client) => client.createDocument({ document_name: 'synthetic', document_url: 'https://example.invalid/kb' }),
     (client) => client.createPersona({ name: 'synthetic' }),
     (client) => client.patchPersona('synthetic', [{ op: 'replace', path: '/name', value: 'synthetic' }]),
+    (client) => client.patchPal('synthetic', [{ op: 'replace', path: '/name', value: 'synthetic' }]),
+    (client) => client.publishPal('synthetic'),
+    (client) => client.createPronunciationDictionary({ name: 'synthetic', rules: [] }),
+    (client) => client.updatePronunciationDictionary('synthetic', [{ op: 'replace', path: '/rules', value: [] }]),
     (client) => client.endConversation('synthetic'),
   ]) {
     const reset = Object.assign(new Error('reset'), { code: 'ECONNRESET' });

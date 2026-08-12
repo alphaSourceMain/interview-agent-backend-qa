@@ -58,6 +58,10 @@ more request operations, but are not active application paths.
 | Create document | `NOT_SAFE_TO_RETRY` | Explicit timeout, one attempt. |
 | Create persona | `NOT_SAFE_TO_RETRY` | Explicit timeout, one attempt. |
 | Patch persona | `NOT_SAFE_TO_RETRY` | Explicit timeout, one attempt. |
+| Get PAL | `SAFE_TO_RETRY` | Up to three total attempts under the bounded read policy. |
+| Patch/publish PAL | `NOT_SAFE_TO_RETRY` | One attempt. Pronunciation sync reads back exact attachment state before deciding any reconciliation. |
+| Get/list pronunciation dictionaries | `SAFE_TO_RETRY` | Up to three total attempts under the bounded read policy. |
+| Create/update pronunciation dictionary | `NOT_SAFE_TO_RETRY` | One attempt. Persistent provider identity and explicit ambiguous states prevent blind duplicate creation/update. |
 | End conversation | `NOT_SAFE_TO_RETRY` | Explicit timeout, one attempt; retain caller single-flight/application guards. |
 | Get/list conversations | `SAFE_TO_RETRY` | Up to three total attempts on transient network errors, timeouts, 408, 429, 502, 503, and 504. |
 | Get persona | `SAFE_TO_RETRY` | Same bounded read policy. |

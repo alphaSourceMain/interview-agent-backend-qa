@@ -10,7 +10,7 @@ const { getRequestSubjectKey, checkAndIncrementRateLimit } = require('../src/lib
 const { isRoleInactive, buildRoleInactivePayload, logInactiveRoleBlocked } = require('../src/lib/roleLifecycle');
 const {
   normalizeCandidatePhoneCountry,
-  normalizeCandidatePhone,
+  normalizeCandidatePhoneIdentity,
   getCandidatePhoneValidationMessage
 } = require('../src/lib/candidatePhone');
 const { buildCandidateError, sendCandidateError, getInterviewConflictCode } = require('../src/lib/candidateErrors');
@@ -167,7 +167,8 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
     const fullName = rawName || [first_name, last_name].filter(Boolean).join(' ').trim();
 
     const email = normEmail(emailRaw);
-    const phone = normalizeCandidatePhone(phoneRaw, phoneCountry);
+    const phoneIdentity = normalizeCandidatePhoneIdentity(phoneRaw, phoneCountry);
+    const phone = phoneIdentity?.phone || null;
 
     if (!email || !fullName || (!role_token && !role_id_in)) {
       return res.status(400).json({
@@ -339,7 +340,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
     {
       const { data, error } = await supabase
         .from('candidates')
-        .select('id, name, email, phone, verified, status, resume_url')
+        .select('id, name, email, phone, phone_e164, phone_country_code, verified, status, resume_url')
         .eq('role_id', roleId)
         .eq('email', email)
         .limit(1)
@@ -349,7 +350,20 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
     if (existingByEmail) {
       // Enrich phone if missing
       if (phone && !existingByEmail.phone) {
-        await supabase.from('candidates').update({ phone }).eq('id', existingByEmail.id);
+        await supabase.from('candidates').update({
+          phone,
+          phone_e164: phoneIdentity.phone_e164,
+          phone_country_code: phoneIdentity.phone_country_code,
+        }).eq('id', existingByEmail.id);
+      } else if (
+        phone
+        && existingByEmail.phone === phone
+        && (!existingByEmail.phone_e164 || !existingByEmail.phone_country_code)
+      ) {
+        await supabase.from('candidates').update({
+          phone_e164: phoneIdentity.phone_e164,
+          phone_country_code: phoneIdentity.phone_country_code,
+        }).eq('id', existingByEmail.id);
       }
       const { data: existingInterview, error: existingInterviewError } = await supabase
         .from('interviews')
@@ -552,6 +566,8 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
         last_name,
         email,
         phone, // US: 10 digits; Philippines: 63 + mobile number.
+        phone_e164: phoneIdentity.phone_e164,
+        phone_country_code: phoneIdentity.phone_country_code,
         status: 'Resume Uploaded',
         resume_url: resume_url || null,
         ...resumeMetadata(resumeInspection)

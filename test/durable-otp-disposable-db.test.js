@@ -14,6 +14,8 @@ const ROOT = path.resolve(__dirname, '..');
 const BOOTSTRAP = path.join(__dirname, 'fixtures', 'durable-otp-bootstrap.sql');
 const MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260810144400_durable_otp_challenge_architecture.sql');
 const SINGLE_ACTIVE_MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260810155800_durable_otp_single_active_resource.sql');
+const SMS_B_MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20260812013847_sms_b_e164_cross_channel_foundation.sql');
+let preFixCrossChannelActiveCount = null;
 
 const FIXTURE = {
   candidate: '82000000-0000-4000-8000-000000000021',
@@ -61,6 +63,21 @@ function issue(challengeId, bindingFingerprint, verifier = 'a', submissionId = F
     '${FIXTURE.interview}','${FIXTURE.recovery}',repeat('c',64),600,5,'pending');`;
 }
 
+function issuePreFix(challengeId, channel, bindingFingerprint, verifier = 'a') {
+  return `set role service_role; select challenge_id from public.service_issue_otp_challenge(
+    '${challengeId}','interview_access','${channel}',1::smallint,repeat('${verifier}',64),repeat('${bindingFingerprint}',64),
+    '${FIXTURE.candidate}','${FIXTURE.client}','${FIXTURE.role}','${FIXTURE.submission}',
+    '${FIXTURE.interview}','${FIXTURE.recovery}',repeat('c',64),600,5,'pending');`;
+}
+
+function issueSms(challengeId, bindingFingerprint, verifier = 'a') {
+  return `set role service_role; select challenge_id from public.service_issue_sms_otp_challenge(
+    '${challengeId}','interview_access',1::smallint,repeat('${verifier}',64),repeat('${bindingFingerprint}',64),
+    '${FIXTURE.candidate}','${FIXTURE.client}','${FIXTURE.role}','${FIXTURE.submission}',
+    '${FIXTURE.interview}','${FIXTURE.recovery}',repeat('d',64),600,5,'pending',
+    statement_timestamp(),'sms-qa-v1');`;
+}
+
 before(() => {
   if (!ENABLED) return;
   command('dropdb', ['-h', SOCKET, '-p', PORT, '-U', USER, '--if-exists', DATABASE]);
@@ -69,6 +86,12 @@ before(() => {
   apply(BOOTSTRAP);
   apply(MIGRATION);
   apply(SINGLE_ACTIVE_MIGRATION);
+  sql(issuePreFix('82000000-0000-4000-8000-000000000071', 'email', '1', '1'));
+  sql(issuePreFix('82000000-0000-4000-8000-000000000072', 'sms', '2', '2'));
+  preFixCrossChannelActiveCount = Number(sql(`select count(*) from private_auth.otp_challenges
+    where challenge_id in ('82000000-0000-4000-8000-000000000071','82000000-0000-4000-8000-000000000072')
+      and consumed_at is null and superseded_at is null;`).stdout);
+  apply(SMS_B_MIGRATION);
 });
 
 after(() => {
@@ -80,15 +103,92 @@ test('migration redacts every retained legacy plaintext OTP without changing its
   assert.equal(sql("select count(*)||'|'||min(code)||'|'||bool_and(used and invalidated_at is not null) from public.otp_tokens;").stdout, '1|[removed]|true');
 });
 
+test('pre-fix catalog permits one active email and one active SMS challenge for one resource', { skip: !ENABLED }, () => {
+  assert.equal(preFixCrossChannelActiveCount, 2);
+});
+
+test('SMS-B upgrade deterministically collapses a pre-existing cross-channel dual-active resource', { skip: !ENABLED }, () => {
+  assert.equal(
+    sql(`select count(*) filter(where consumed_at is null and superseded_at is null)||'|'||
+                count(*) filter(where superseded_at is not null and superseded_reason='cross_channel_replaced')
+         from private_auth.otp_challenges
+         where challenge_id in ('82000000-0000-4000-8000-000000000071','82000000-0000-4000-8000-000000000072');`).stdout,
+    '1|1',
+  );
+});
+
 test('private schema and table are inaccessible to client roles', { skip: !ENABLED }, () => {
   assert.equal(sql("select has_schema_privilege('anon','private_auth','USAGE'),has_schema_privilege('authenticated','private_auth','USAGE'),has_schema_privilege('service_role','private_auth','USAGE');").stdout, 'f|f|f');
   for (const role of ['anon', 'authenticated', 'service_role']) {
     assert.notEqual(sql(`set role ${role}; select count(*) from private_auth.otp_challenges;`, { allowFailure: true }).status, 0);
+    assert.notEqual(sql(`set role ${role}; select count(*) from private_auth.sms_destination_suppressions;`, { allowFailure: true }).status, 0);
   }
 });
 
 test('service wrappers are executable only by service_role among application roles', { skip: !ENABLED }, () => {
   assert.equal(sql("select has_function_privilege('anon','public.service_consume_otp_challenge(uuid,boolean)','EXECUTE'),has_function_privilege('authenticated','public.service_consume_otp_challenge(uuid,boolean)','EXECUTE'),has_function_privilege('service_role','public.service_consume_otp_challenge(uuid,boolean)','EXECUTE');").stdout, 'f|f|t');
+  assert.equal(sql("select has_function_privilege('anon','public.service_is_sms_destination_suppressed(text,text)','EXECUTE'),has_function_privilege('authenticated','public.service_is_sms_destination_suppressed(text,text)','EXECUTE'),has_function_privilege('service_role','public.service_is_sms_destination_suppressed(text,text)','EXECUTE');").stdout, 'f|f|t');
+});
+
+test('final active-resource index excludes channel and preserves the accepted active predicate', { skip: !ENABLED }, () => {
+  assert.equal(sql("select pg_get_indexdef(indexrelid) from pg_index where indexrelid='private_auth.otp_challenges_one_active_resource_uidx'::regclass;").stdout,
+    'CREATE UNIQUE INDEX otp_challenges_one_active_resource_uidx ON private_auth.otp_challenges USING btree (purpose, candidate_id, client_id, role_id) WHERE ((consumed_at IS NULL) AND (superseded_at IS NULL))');
+});
+
+test('legacy issuance boundary cannot issue SMS without consent evidence', { skip: !ENABLED }, () => {
+  assert.notEqual(sql(issuePreFix('82000000-0000-4000-8000-000000000073', 'sms', '3', '3'), { allowFailure: true }).status, 0);
+  assert.equal(sql("select count(*) from private_auth.otp_challenges where challenge_id='82000000-0000-4000-8000-000000000073';").stdout, '0');
+});
+
+test('email to SMS and SMS to email each supersede the prior channel immediately', { skip: !ENABLED }, () => {
+  sql(issue('82000000-0000-4000-8000-000000000074', '4', '4'));
+  sql(issueSms('82000000-0000-4000-8000-000000000075', '5', '5'));
+  assert.equal(sql("select channel||'|'||(superseded_at is not null) from private_auth.otp_challenges where challenge_id='82000000-0000-4000-8000-000000000074';").stdout, 'email|true');
+  assert.equal(sql("select channel||'|'||(superseded_at is null) from private_auth.otp_challenges where challenge_id='82000000-0000-4000-8000-000000000075';").stdout, 'sms|true');
+  sql(issue('82000000-0000-4000-8000-000000000076', '6', '6'));
+  assert.equal(sql("select channel||'|'||(superseded_at is not null) from private_auth.otp_challenges where challenge_id='82000000-0000-4000-8000-000000000075';").stdout, 'sms|true');
+  assert.equal(sql("select count(*) from private_auth.otp_challenges where candidate_id='82000000-0000-4000-8000-000000000021' and consumed_at is null and superseded_at is null;").stdout, '1');
+});
+
+test('all concurrent email/SMS permutations leave exactly one active resource challenge', { skip: !ENABLED }, async () => {
+  const cases = [
+    [issue('82000000-0000-4000-8000-000000000081', 'a', 'a'), issueSms('82000000-0000-4000-8000-000000000082', 'b', 'b')],
+    [issueSms('82000000-0000-4000-8000-000000000083', 'c', 'c'), issue('82000000-0000-4000-8000-000000000084', 'd', 'd')],
+    [issue('82000000-0000-4000-8000-000000000085', 'e', 'e'), issue('82000000-0000-4000-8000-000000000086', 'f', 'f')],
+    [issueSms('82000000-0000-4000-8000-000000000087', '1', '1'), issueSms('82000000-0000-4000-8000-000000000088', '2', '2')],
+  ];
+  for (const pair of cases) {
+    const results = await Promise.all(pair.map(sqlAsync));
+    assert.deepEqual(results.map((result) => result.status), [0, 0], results.map((result) => result.stderr).join('\n'));
+    assert.equal(sql("select count(*) from private_auth.otp_challenges where candidate_id='82000000-0000-4000-8000-000000000021' and consumed_at is null and superseded_at is null;").stdout, '1');
+  }
+});
+
+test('old cross-channel challenges remain invalid and late delivery telemetry cannot unsupersede them', { skip: !ENABLED }, () => {
+  sql(issue('82000000-0000-4000-8000-000000000089', '3', '3'));
+  sql(issueSms('82000000-0000-4000-8000-000000000090', '4', '4'));
+  assert.equal(sql("set role service_role; select status from public.service_consume_otp_challenge('82000000-0000-4000-8000-000000000089',true);").stdout, 'superseded');
+  sql("update private_auth.otp_challenges set provider='provider_a',provider_message_id='late-message',provider_delivery_status='delivered',delivered_at=statement_timestamp() where challenge_id='82000000-0000-4000-8000-000000000089';");
+  assert.equal(sql("select (superseded_at is not null)||'|'||provider_delivery_status from private_auth.otp_challenges where challenge_id='82000000-0000-4000-8000-000000000089';").stdout, 'true|delivered');
+});
+
+test('provider message binding is generic, unique when present, and nullable before send', { skip: !ENABLED }, () => {
+  assert.equal(sql("select count(*) from private_auth.otp_challenges where provider_message_id is null;").stdout > '0', true);
+  sql("update private_auth.otp_challenges set provider='provider_b',provider_message_id='external-1' where challenge_id='82000000-0000-4000-8000-000000000090';");
+  assert.notEqual(sql("update private_auth.otp_challenges set provider='provider_b',provider_message_id='external-1' where challenge_id='82000000-0000-4000-8000-000000000089';", { allowFailure: true }).status, 0);
+});
+
+test('SMS consent is explicit while email consent fields remain null', { skip: !ENABLED }, () => {
+  assert.equal(sql("select (sms_selection_at is not null)||'|'||consent_copy_version from private_auth.otp_challenges where challenge_id='82000000-0000-4000-8000-000000000090';").stdout, 'true|sms-qa-v1');
+  assert.equal(sql("select bool_and(sms_selection_at is null and consent_copy_version is null) from private_auth.otp_challenges where channel='email';").stdout, 't');
+});
+
+test('suppression ledger is fingerprint-only and release has bounded semantics', { skip: !ENABLED }, () => {
+  sql("insert into private_auth.sms_destination_suppressions(destination_fingerprint,status,reason,source) values(repeat('a',64),'opted_out','synthetic','qa_test');");
+  assert.equal(sql("set role service_role; select public.service_is_sms_destination_suppressed(repeat('a',64),'authentication');").stdout, 't');
+  sql("update private_auth.sms_destination_suppressions set released_at=statement_timestamp(),updated_at=statement_timestamp() where destination_fingerprint=repeat('a',64);");
+  assert.equal(sql("set role service_role; select public.service_is_sms_destination_suppressed(repeat('a',64),'authentication');").stdout, 'f');
+  assert.equal(sql("select count(*) from information_schema.columns where table_schema='private_auth' and table_name='sms_destination_suppressions' and column_name in ('phone','phone_e164','to_e164');").stdout, '0');
 });
 
 test('OTP table and boundary functions have explicit postgres ownership, SECURITY DEFINER, and an empty safe search_path', { skip: !ENABLED }, () => {
@@ -101,11 +201,11 @@ test('concurrent resend issuance leaves exactly one active challenge', { skip: !
   const second = issue('82000000-0000-4000-8000-000000000062', 'b', 'd');
   const results = await Promise.all([sqlAsync(first), sqlAsync(second)]);
   assert.deepEqual(results.map((result) => result.status), [0, 0], results.map((result) => result.stderr).join('\n'));
-  assert.equal(sql("select count(*) filter(where consumed_at is null and superseded_at is null)||'|'||count(*) filter(where superseded_at is not null) from private_auth.otp_challenges where binding_fingerprint=repeat('b',64);").stdout, '1|1');
+  assert.equal(sql("select count(*) filter(where consumed_at is null and superseded_at is null)||'|'||count(*) filter(where superseded_at is not null) from private_auth.otp_challenges where challenge_id in ('82000000-0000-4000-8000-000000000061','82000000-0000-4000-8000-000000000062');").stdout, '1|1');
 });
 
 test('superseded OTP challenge cannot be consumed', { skip: !ENABLED }, () => {
-  const oldId = sql("select challenge_id from private_auth.otp_challenges where binding_fingerprint=repeat('b',64) and superseded_at is not null;").stdout;
+  const oldId = sql("select challenge_id from private_auth.otp_challenges where challenge_id in ('82000000-0000-4000-8000-000000000061','82000000-0000-4000-8000-000000000062') and superseded_at is not null;").stdout;
   assert.match(sql(`set role service_role; select status from public.service_consume_otp_challenge('${oldId}',true);`).stdout, /^superseded$/);
 });
 
@@ -163,6 +263,7 @@ test('cross-client candidate/role binding is rejected before insertion', { skip:
 test('migration replay is catalog-safe and does not duplicate policies or indexes', { skip: !ENABLED }, () => {
   apply(MIGRATION);
   apply(SINGLE_ACTIVE_MIGRATION);
-  assert.equal(sql("select count(*) from pg_indexes where schemaname='private_auth' and tablename='otp_challenges';").stdout, '4');
+  apply(SMS_B_MIGRATION);
+  assert.equal(sql("select count(*) from pg_indexes where schemaname='private_auth' and tablename='otp_challenges';").stdout, '5');
   assert.equal(sql("select count(*) from pg_policies where schemaname='private_auth' and tablename='otp_challenges';").stdout, '0');
 });

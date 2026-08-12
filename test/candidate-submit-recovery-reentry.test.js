@@ -13,6 +13,8 @@ process.env.SENDGRID_API_KEY = 'test-sendgrid-key';
 process.env.SENDGRID_FROM = 'qa@example.test';
 process.env.INTERVIEW_RECOVERY_CORE_ENABLED = 'true';
 process.env.INTERVIEW_RECOVERY_CORE_EMAIL_ENABLED = 'false';
+process.env.OTP_HMAC_SECRET_VERSION = '1';
+process.env.OTP_HMAC_SECRET_V1 = '11'.repeat(32);
 
 const ID = {
   candidate: '76000000-0000-4000-8000-000000000001',
@@ -519,7 +521,11 @@ test('ordinary first-time application still creates one candidate and one OTP', 
   }));
   const response = await submit(context);
   assert.equal(response.status, 200);
-  assert.equal(context.tracker.inserts.filter((entry) => entry.table === 'candidates').length, 1);
+  const candidateInserts = context.tracker.inserts.filter((entry) => entry.table === 'candidates');
+  assert.equal(candidateInserts.length, 1);
+  assert.equal(candidateInserts[0].value.phone, '3039008821');
+  assert.equal(candidateInserts[0].value.phone_e164, '+13039008821');
+  assert.equal(candidateInserts[0].value.phone_country_code, 'US');
   assert.equal(context.tracker.challenges.length, 1);
   assert.equal(context.tracker.ledger.length, 1);
   assert.equal(context.tracker.emails, 1);

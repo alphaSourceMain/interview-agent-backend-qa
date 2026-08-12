@@ -84,7 +84,11 @@ test('provider serialization independently excludes non-runtime records', () => 
 test('dental seed keeps unverified inventory out of runtime', () => {
   const runtime = resolvePronunciationTerms(DENTAL_PRONUNCIATION_SEED, { industryKey: 'dental' });
   assert.equal(runtime.length, 9);
-  assert.ok(runtime.every((row) => row.version === 2));
+  assert.equal(runtime.filter((row) => row.version === 2).length, 6);
+  assert.deepEqual(
+    runtime.filter((row) => row.version === 3).map((row) => row.canonical_term).sort(),
+    ['gingiva', 'orthodontics', 'prophylaxis'],
+  );
   assert.equal(runtime.filter((row) => row.pronunciation_method === 'ipa').length, 8);
   assert.ok(runtime.some((row) => row.canonical_term === 'CBCT'));
   assert.equal(runtime.find((row) => row.canonical_term === 'CBCT').pronunciation_value, 'see bee see tee');

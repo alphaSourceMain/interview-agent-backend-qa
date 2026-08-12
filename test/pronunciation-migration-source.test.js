@@ -7,6 +7,7 @@ const { test } = require('node:test');
 
 const migration = fs.readFileSync(path.resolve(__dirname, '../supabase/migrations/20260812174626_pronunciation_registry_foundation.sql'), 'utf8');
 const correction = fs.readFileSync(path.resolve(__dirname, '../supabase/migrations/20260812185500_pronunciation_ipa_correction.sql'), 'utf8');
+const targetedCorrection = fs.readFileSync(path.resolve(__dirname, '../supabase/migrations/20260812193000_pronunciation_targeted_phoneme_correction.sql'), 'utf8');
 
 test('migration creates provider-neutral registry and sync binding', () => {
   assert.match(migration, /create table if not exists public\.pronunciation_terms/i);
@@ -42,4 +43,12 @@ test('human-listening correction replaces segmented aliases with bounded v2 rule
   assert.match(correction, /'prophylaxis', 'ipa', 'ˌproʊ\.fɪˈlæk\.sɪs'/);
   assert.match(correction, /'CBCT', 'alias', 'see bee see tee'/);
   assert.match(correction, /pronunciation_ipa_correction_count_mismatch/);
+});
+
+test('targeted listening correction uses bounded pipe-delimited v3 IPA rules', () => {
+  assert.match(targetedCorrection, /version = 3/);
+  assert.match(targetedCorrection, /'orthodontics', 'ˌ\|ɔː\|r\|θ\|oʊ\|ˈ\|d\|ɑː\|n\|t̬\|ɪ\|k\|s'/);
+  assert.match(targetedCorrection, /'gingiva', 'ˈ\|dʒ\|ɪ\|n\|dʒ\|ɪ\|v\|ə'/);
+  assert.match(targetedCorrection, /'prophylaxis', 'ˌ\|p\|r\|oʊ\|f\|ɪ\|ˈ\|l\|æ\|k\|s\|ɪ\|s'/);
+  assert.match(targetedCorrection, /pronunciation_targeted_phoneme_correction_count_mismatch/);
 });

@@ -17,27 +17,27 @@ so no brand was promoted merely because it appeared in the requested inventory.
 
 | Canonical term | Category | Method | Proposed pronunciation | Source | Confidence | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| endodontics | specialties | IPA | ˌɛndoʊˈdɑntɪks | Collins American English | high | verified, v2 retest required |
-| periodontics | specialties | IPA | ˌper.i.oʊˈdɑːn.t̬ɪks | Cambridge US | high | verified, v2 retest required |
-| prosthodontics | specialties | IPA | ˌprɑːs.θoʊˈdɑːn.t̬ɪks | Cambridge US | high | verified, v2 retest required |
-| orthodontics | specialties | IPA | ˌɔːr.θoʊˈdɑːn.t̬ɪks | Cambridge US | high | verified, v2 retest required |
+| endodontics | specialties | IPA | ˌɛndoʊˈdɑntɪks | Collins American English | high | verified, v2 listening PASS |
+| periodontics | specialties | IPA | ˌper.i.oʊˈdɑːn.t̬ɪks | Cambridge US | high | verified, v2 listening PASS |
+| prosthodontics | specialties | IPA | ˌprɑːs.θoʊˈdɑːn.t̬ɪks | Cambridge US | high | verified, v2 listening PASS |
+| orthodontics | specialties | IPA | ˌ\|ɔː\|r\|θ\|oʊ\|ˈ\|d\|ɑː\|n\|t̬\|ɪ\|k\|s | Cambridge US; Tavus pipe-delimited format | high | verified, v3 retest required |
 | oral and maxillofacial surgery | specialties | alias | unchanged | none established | unverified | suggested |
 | pediatric dentistry | specialties | alias | unchanged | none established | unverified | suggested |
-| xerostomia | clinical/anatomy | IPA | ˌzɪərəˈstoʊmiə | Dictionary.com American IPA; consistent with NCI | high | verified, v2 retest required |
+| xerostomia | clinical/anatomy | IPA | ˌzɪərəˈstoʊmiə | Dictionary.com American IPA; consistent with NCI | high | verified, v2 listening PASS |
 | occlusion | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | malocclusion | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
-| gingiva | clinical/anatomy | IPA | ˈdʒɪn.dʒɪ.və | Cambridge US | high | verified, v2 retest required |
-| periodontal | clinical/anatomy | IPA | ˌper.i.oʊˈdɑːn.t̬əl | Cambridge US | high | verified, v2 retest required |
+| gingiva | clinical/anatomy | IPA | ˈ\|dʒ\|ɪ\|n\|dʒ\|ɪ\|v\|ə | Cambridge US; Tavus pipe-delimited format | high | verified, v3 retest required |
+| periodontal | clinical/anatomy | IPA | ˌper.i.oʊˈdɑːn.t̬əl | Cambridge US | high | verified, v2 listening PASS |
 | periapical | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | interproximal | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
 | edentulous | clinical/anatomy | alias | unchanged | none established | unverified | suggested |
-| CBCT | imaging/technology | alias | see bee see tee | ADA terminology plus explicit curated initialism reading | QA correction | verified, v2 retest required |
+| CBCT | imaging/technology | alias | see bee see tee | ADA terminology plus explicit curated initialism reading | QA correction | verified, v2 listening PASS |
 | cephalometric | imaging/technology | alias | unchanged | none established | unverified | suggested |
 | CAD/CAM | imaging/technology | alias | cad cam | none established | unverified | suggested |
 | intraoral scanner | imaging/technology | alias | unchanged | none established | unverified | suggested |
 | panoramic | imaging/technology | alias | unchanged | none established | unverified | suggested |
 | bitewing | imaging/technology | alias | unchanged | none established | unverified | suggested |
-| prophylaxis | procedures/materials | IPA | ˌproʊ.fɪˈlæk.sɪs | Cambridge US | high | verified, v2 retest required |
+| prophylaxis | procedures/materials | IPA | ˌ\|p\|r\|oʊ\|f\|ɪ\|ˈ\|l\|æ\|k\|s\|ɪ\|s | Cambridge US; Tavus pipe-delimited format | high | verified, v3 retest required |
 | scaling and root planing | procedures/materials | alias | unchanged | none established | unverified | suggested |
 | pulpotomy | procedures/materials | alias | unchanged | none established | unverified | suggested |
 | pulpectomy | procedures/materials | alias | unchanged | none established | unverified | suggested |
@@ -88,7 +88,12 @@ resynchronization, and a targeted replay. `UNCERTAIN` is not a pass.
 
 The owner judged all nine v1 alias renderings `FAIL`: the capitalized,
 hyphenated respellings were segmented unnaturally, stressed incorrectly, or
-spelled as letters. The v2 correction changes eight lexical terms to continuous
-US IPA and changes CBCT to the literal lowercase spoken phrase `see bee see tee`.
-No v2 rule is accepted until the affected corpus is replayed and the owner gives
-an explicit listening judgment.
+spelled as letters. The v2 correction changed eight lexical terms to continuous
+US IPA and CBCT to the literal lowercase spoken phrase `see bee see tee`.
+
+The owner judged six v2 renderings `PASS`: endodontics, periodontics,
+prosthodontics, xerostomia, periodontal, and CBCT. Orthodontics and prophylaxis
+rendered the long-o phoneme as “oo”; gingiva rendered its second short-i phoneme
+as “ee.” The targeted v3 correction preserves the lexical IPA evidence while
+using Tavus's documented pipe-delimited IPA form to make each intended phoneme
+boundary explicit. The three v3 rules remain pending targeted human replay.

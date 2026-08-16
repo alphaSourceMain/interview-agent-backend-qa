@@ -27,6 +27,11 @@ const {
 } = require('../src/lib/interviewAttemptService');
 const { issueOtpChallenge } = require('../src/lib/otpChallenge');
 const { createEmailOtpDelivery } = require('../src/lib/otpDelivery');
+const {
+  deliverCandidateSmsOtp,
+  normalizeConsentCopyVersion,
+  readCandidateSmsConfiguration,
+} = require('../src/lib/candidateSmsDelivery');
 const analyzeResume = require('../analyzeResume'); // resume analyzer
 
 // uploads: keep in memory; 10MB limit
@@ -149,6 +154,13 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
       await failCandidateSubmission(supabaseAdmin, submissionReservation, { code, candidateId });
       return sendCandidateError(res, code, { ...overrides, request_id });
     };
+    const respondSmsPreChallengeFailure = async (payload, candidateId = null) => {
+      await failCandidateSubmission(supabaseAdmin, submissionReservation, {
+        code: 'SMS_PRECHALLENGE_DELIVERY_UNAVAILABLE',
+        candidateId,
+      });
+      return res.status(200).json(payload);
+    };
     // --- normalize inputs ---
     const role_token   = (req.body.role_token || '').trim();
     const role_id_in   = (req.body.role_id || '').trim();
@@ -158,6 +170,10 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
     const emailRaw     = (req.body.email || '').trim();
     const phoneRaw     = (req.body.phone || '').trim();
     const phoneCountry = normalizeCandidatePhoneCountry(req.body.phone_country || req.body.phoneCountry || '');
+    const requestedOtpChannel = String(req.body.otp_channel || req.body.otpChannel || 'email').trim().toLowerCase();
+    const consentCopyVersion = normalizeConsentCopyVersion(
+      req.body.consent_copy_version || req.body.consentCopyVersion || ''
+    );
     const submissionKey = req.body.submission_key || req.body.submissionKey || '';
     const resume_url_in = req.body.resume_url || null;
     const resumeFile = (req.files || []).find(file =>
@@ -180,6 +196,16 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
         detail: getCandidatePhoneValidationMessage(phoneCountry),
         request_id
       });
+    }
+    if (!['email', 'sms'].includes(requestedOtpChannel)) {
+      return sendCandidateError(res, 'SMS_CHANNEL_UNAVAILABLE', { request_id });
+    }
+    if (requestedOtpChannel === 'sms' && (
+      !readCandidateSmsConfiguration(process.env).valid
+      || !consentCopyVersion
+      || phoneIdentity.phone_country_code !== 'US'
+    )) {
+      return sendCandidateError(res, 'SMS_CHANNEL_UNAVAILABLE', { request_id });
     }
 
     let resumeInspection = null;
@@ -350,20 +376,37 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
     if (existingByEmail) {
       // Enrich phone if missing
       if (phone && !existingByEmail.phone) {
-        await supabase.from('candidates').update({
+        const { error: phoneUpdateError } = await supabase.from('candidates').update({
           phone,
           phone_e164: phoneIdentity.phone_e164,
           phone_country_code: phoneIdentity.phone_country_code,
         }).eq('id', existingByEmail.id);
+        if (phoneUpdateError) {
+          return respondRetryableError('TEMPORARY_SERVICE_ERROR', {}, existingByEmail.id);
+        }
+        existingByEmail.phone = phone;
+        existingByEmail.phone_e164 = phoneIdentity.phone_e164;
+        existingByEmail.phone_country_code = phoneIdentity.phone_country_code;
       } else if (
         phone
         && existingByEmail.phone === phone
-        && (!existingByEmail.phone_e164 || !existingByEmail.phone_country_code)
+        && (
+          existingByEmail.phone_e164 !== phoneIdentity.phone_e164
+          || existingByEmail.phone_country_code !== phoneIdentity.phone_country_code
+        )
       ) {
-        await supabase.from('candidates').update({
+        const { error: phoneUpdateError } = await supabase.from('candidates').update({
           phone_e164: phoneIdentity.phone_e164,
           phone_country_code: phoneIdentity.phone_country_code,
         }).eq('id', existingByEmail.id);
+        if (phoneUpdateError) {
+          return respondRetryableError('TEMPORARY_SERVICE_ERROR', {}, existingByEmail.id);
+        }
+        existingByEmail.phone_e164 = phoneIdentity.phone_e164;
+        existingByEmail.phone_country_code = phoneIdentity.phone_country_code;
+      }
+      if (requestedOtpChannel === 'sms' && existingByEmail.phone !== phone) {
+        return respondCandidateError('CANDIDATE_ALREADY_EXISTS', {}, existingByEmail.id);
       }
       const { data: existingInterview, error: existingInterviewError } = await supabase
         .from('interviews')
@@ -444,16 +487,34 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
         }
 
         let otpChallenge;
+        let smsDelivery = null;
         try {
-          otpChallenge = await issueOtpChallenge(supabaseAdmin, {
-            email,
-            candidateId: candidate_id,
-            clientId: role.client_id,
-            roleId,
-            submissionId: submissionReservation?.row?.id || null,
-            interviewAttemptId: existingInterview?.id || null,
-            recoveryAuthorizationId: authorizedRecoveryReentry?.id || null,
-          });
+          if (requestedOtpChannel === 'sms') {
+            smsDelivery = await deliverCandidateSmsOtp({
+              db: supabaseAdmin,
+              candidate: {
+                id: candidate_id,
+                phone_e164: phoneIdentity.phone_e164,
+                phone_country_code: phoneIdentity.phone_country_code,
+              },
+              clientId: role.client_id,
+              roleId,
+              submissionId: submissionReservation?.row?.id || null,
+              interviewAttemptId: existingInterview?.id || null,
+              recoveryAuthorizationId: authorizedRecoveryReentry?.id || null,
+              consentCopyVersion,
+            });
+          } else {
+            otpChallenge = await issueOtpChallenge(supabaseAdmin, {
+              email,
+              candidateId: candidate_id,
+              clientId: role.client_id,
+              roleId,
+              submissionId: submissionReservation?.row?.id || null,
+              interviewAttemptId: existingInterview?.id || null,
+              recoveryAuthorizationId: authorizedRecoveryReentry?.id || null,
+            });
+          }
         } catch (error) {
           console.error('[candidate-submit] durable_challenge_create_failed', {
             request_id,
@@ -475,19 +536,30 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
           message: 'If your information is accepted, a verification code will be sent shortly.',
           candidate_id,
           role_id: roleId,
-          challenge_id: otpChallenge.challengeId,
+          challenge_id: requestedOtpChannel === 'sms' ? smsDelivery?.challengeId : otpChallenge.challengeId,
+          delivery_channel: requestedOtpChannel,
+          delivery_outcome: requestedOtpChannel === 'sms' ? smsDelivery?.outcome : 'accepted',
+          email_fallback_available: requestedOtpChannel === 'sms' && smsDelivery?.emailFallbackAvailable === true,
           resume_url: existingByEmail.resume_url || null,
           resume_parse_status: resumeInspection?.parse_status || null
         };
+        if (requestedOtpChannel === 'sms' && (
+          smsDelivery?.challengeCreated !== true
+          || !smsDelivery?.challengeId
+        )) {
+          return respondSmsPreChallengeFailure(responseBody, candidate_id);
+        }
         await respondFinal(200, responseBody, candidate_id);
-        queueOtpEmail({
-          challengeId: otpChallenge.challengeId,
-          code: otpChallenge.code,
-          email,
-          candidateId: candidate_id,
-          roleId,
-          requestId: request_id,
-        });
+        if (requestedOtpChannel === 'email') {
+          queueOtpEmail({
+            challengeId: otpChallenge.challengeId,
+            code: otpChallenge.code,
+            email,
+            candidateId: candidate_id,
+            roleId,
+            requestId: request_id,
+          });
+        }
         return;
       }
     }
@@ -597,14 +669,30 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
     });
 
     let otpChallenge;
+    let smsDelivery = null;
     try {
-      otpChallenge = await issueOtpChallenge(supabaseAdmin, {
-        email,
-        candidateId: candidate_id,
-        clientId: role.client_id,
-        roleId,
-        submissionId: submissionReservation?.row?.id || null,
-      });
+      if (requestedOtpChannel === 'sms') {
+        smsDelivery = await deliverCandidateSmsOtp({
+          db: supabaseAdmin,
+          candidate: {
+            id: candidate_id,
+            phone_e164: phoneIdentity.phone_e164,
+            phone_country_code: phoneIdentity.phone_country_code,
+          },
+          clientId: role.client_id,
+          roleId,
+          submissionId: submissionReservation?.row?.id || null,
+          consentCopyVersion,
+        });
+      } else {
+        otpChallenge = await issueOtpChallenge(supabaseAdmin, {
+          email,
+          candidateId: candidate_id,
+          clientId: role.client_id,
+          roleId,
+          submissionId: submissionReservation?.row?.id || null,
+        });
+      }
     } catch (error) {
       console.error('[candidate-submit] durable_challenge_create_failed', {
         request_id,
@@ -616,22 +704,36 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
     }
 
     // success
-    await respondFinal(200, {
+    const responseBody = {
       message: 'If your information is accepted, a verification code will be sent shortly.',
       candidate_id,
       role_id: roleId,
-      challenge_id: otpChallenge.challengeId,
+      challenge_id: requestedOtpChannel === 'sms' ? smsDelivery?.challengeId : otpChallenge.challengeId,
+      delivery_channel: requestedOtpChannel,
+      delivery_outcome: requestedOtpChannel === 'sms' ? smsDelivery?.outcome : 'accepted',
+      email_fallback_available: requestedOtpChannel === 'sms' && smsDelivery?.emailFallbackAvailable === true,
       resume_url: resume_url || null,
       resume_parse_status: resumeInspection?.parse_status || null
-    }, candidate_id);
-    queueOtpEmail({
-      challengeId: otpChallenge.challengeId,
-      code: otpChallenge.code,
-      email,
-      candidateId: candidate_id,
-      roleId,
-      requestId: request_id,
-    });
+    };
+    const smsFailedBeforeChallenge = requestedOtpChannel === 'sms' && (
+      smsDelivery?.challengeCreated !== true
+      || !smsDelivery?.challengeId
+    );
+    if (smsFailedBeforeChallenge) {
+      await respondSmsPreChallengeFailure(responseBody, candidate_id);
+    } else {
+      await respondFinal(200, responseBody, candidate_id);
+    }
+    if (!smsFailedBeforeChallenge && requestedOtpChannel === 'email') {
+      queueOtpEmail({
+        challengeId: otpChallenge.challengeId,
+        code: otpChallenge.code,
+        email,
+        candidateId: candidate_id,
+        roleId,
+        requestId: request_id,
+      });
+    }
 
     if (fileBuf && resumeInspection?.parse_status === 'parsed') {
       setImmediate(async () => {

@@ -29,6 +29,6 @@ Automated tests use `SMS_ENVIRONMENT=local`, `SMS_PROVIDER=fake`, and `NODE_ENV=
 - Non-accepted and ambiguous outcomes never trigger an automatic retry or silent email send. The candidate must explicitly choose Email, which issues a new cross-channel challenge and supersedes the prior active challenge.
 - Responses expose only bounded channel/outcome/fallback metadata. They do not expose canonical phone, OTP, destination fingerprint, provider message ID, or provider response bodies.
 
-## Owner gate
+## QA acceptance state
 
-Do not change either candidate UI flag or send a live QA SMS without separate owner approval. Production remains out of scope.
+QA candidate SMS is enabled for normal public-facing acceptance testing through the candidate workflow. Eligible QA sends do not require per-message owner approval. Production remains disabled and out of scope until a separate promotion decision.

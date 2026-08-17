@@ -177,7 +177,6 @@ test('C1 uses C0 ordering: commit and send_requested precede exactly one Telnyx 
     db: {}, environment: 'qa', allowNetwork: true,
     candidate: { id: 'synthetic', phone_e164: '+15555550100', phone_country_code: 'US' },
     destinationFingerprint: DESTINATION_FINGERPRINT,
-    qaDestinationAllowlist: [DESTINATION_FINGERPRINT],
     authorizeAndBind: async () => ({ valid: true }),
     checkSuppressed: async () => false,
     rateLimitGates: [async () => ({ allowed: true })],
@@ -192,14 +191,13 @@ test('C1 uses C0 ordering: commit and send_requested precede exactly one Telnyx 
   assert.deepEqual(order, ['commit', 'send_requested', 'telnyx', 'provider_accepted']);
 });
 
-test('non-allowlisted network destination is denied before challenge creation and Telnyx call', async () => {
+test('malformed network destination fingerprint is denied before challenge creation and Telnyx call', async () => {
   let committed = false;
   const base = providerFor({ statusCode: 200, body: '{}' }).provider;
   const result = await orchestrateOtpSmsDelivery({
     db: {}, environment: 'qa', allowNetwork: true,
     candidate: { id: 'synthetic', phone_e164: '+15555550100', phone_country_code: 'US' },
-    destinationFingerprint: DESTINATION_FINGERPRINT,
-    qaDestinationAllowlist: [],
+    destinationFingerprint: 'not-a-fingerprint',
     authorizeAndBind: async () => ({ valid: true }), checkSuppressed: async () => false,
     issueChallenge: async () => { committed = true; }, adapter: base,
   });

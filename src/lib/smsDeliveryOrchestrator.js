@@ -7,18 +7,10 @@ const {
   safeSmsTelemetry,
 } = require('./smsProviderContract');
 
-function parseQaDestinationAllowlist(value) {
-  if (value == null || value === '') return Object.freeze([]);
-  const entries = Array.isArray(value) ? value : String(value).split(',');
-  const normalized = entries.map((entry) => String(entry).trim().toLowerCase()).filter(Boolean);
-  if (normalized.some((entry) => !/^[0-9a-f]{64}$/.test(entry))) throw new TypeError('QA destination allowlist must contain fingerprints only');
-  return Object.freeze([...new Set(normalized)]);
-}
-
-function qaDestinationAllowed({ environment, destinationFingerprint, allowlist, adapterNetwork }) {
+function qaDestinationAllowed({ environment, destinationFingerprint, adapterNetwork }) {
   if (adapterNetwork === 'none') return true;
-  if (environment !== 'qa' || !/^[0-9a-f]{64}$/.test(String(destinationFingerprint || ''))) return false;
-  return parseQaDestinationAllowlist(allowlist).includes(destinationFingerprint);
+  return environment === 'qa'
+    && /^[0-9a-f]{64}$/.test(String(destinationFingerprint || ''));
 }
 
 function validateCommittedChallenge(challenge) {
@@ -42,7 +34,6 @@ async function orchestrateOtpSmsDelivery({
   issueChallenge,
   adapter,
   allowNetwork = false,
-  qaDestinationAllowlist = [],
   recordMetadata = recordOtpSmsDeliveryMetadata,
   logger = null,
 } = {}) {
@@ -64,7 +55,6 @@ async function orchestrateOtpSmsDelivery({
   if (!qaDestinationAllowed({
     environment,
     destinationFingerprint,
-    allowlist: qaDestinationAllowlist,
     adapterNetwork: adapter.network,
   })) return Object.freeze({ outcome: 'blocked_destination', challengeCreated: false, adapterCalled: false });
 
@@ -146,7 +136,6 @@ async function orchestrateOtpSmsDelivery({
 
 module.exports = {
   orchestrateOtpSmsDelivery,
-  parseQaDestinationAllowlist,
   qaDestinationAllowed,
   validateCommittedChallenge,
 };

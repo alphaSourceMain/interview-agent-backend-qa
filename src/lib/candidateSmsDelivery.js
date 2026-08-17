@@ -140,7 +140,6 @@ async function deliverCandidateSmsOtp({
     },
     adapter: configuredAdapter,
     allowNetwork: configuredAdapter.network === 'https' && config.environment === 'qa',
-    qaDestinationAllowlist: env.SMS_QA_DESTINATION_FINGERPRINT_ALLOWLIST || '',
     ...(recordMetadata ? { recordMetadata } : {}),
     logger: {
       info(event, safe) {

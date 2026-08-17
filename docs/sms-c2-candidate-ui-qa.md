@@ -11,7 +11,6 @@ Candidate SMS is disabled unless every backend gate is explicitly satisfied:
 - `SMS_ENVIRONMENT=qa`
 - `SMS_PROVIDER=telnyx`
 - `SMS_CONSENT_COPY_VERSION=sms-consent-v1`
-- the destination fingerprint is present in `SMS_QA_DESTINATION_FINGERPRINT_ALLOWLIST`
 - the existing Telnyx adapter configuration is valid
 
 The frontend independently requires `VITE_SMS_OTP_UI_ENABLED=true`. With that variable absent or false, the existing email-only candidate UI remains visible and email remains the default channel.
@@ -21,6 +20,8 @@ Automated tests use `SMS_ENVIRONMENT=local`, `SMS_PROVIDER=fake`, and `NODE_ENV=
 ## Candidate contract
 
 - SMS is offered only for a valid US phone selection.
+- Any otherwise eligible US destination may be used in QA; there is no number-specific destination allowlist.
+- Existing suppression, candidate-submit rate limiting, role/resource binding, and duplicate-candidate rules still apply.
 - Email is selected by default.
 - Selecting Text Message submits `otp_channel=sms` and `consent_copy_version=sms-consent-v1`; the backend records the selection timestamp.
 - The durable challenge is committed before the provider adapter is invoked.
@@ -30,4 +31,4 @@ Automated tests use `SMS_ENVIRONMENT=local`, `SMS_PROVIDER=fake`, and `NODE_ENV=
 
 ## Owner gate
 
-Do not enable either candidate UI flag and do not send a live QA SMS without separate owner approval. Production remains out of scope.
+Do not change either candidate UI flag or send a live QA SMS without separate owner approval. Production remains out of scope.

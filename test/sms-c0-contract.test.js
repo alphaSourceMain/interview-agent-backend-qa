@@ -18,7 +18,6 @@ const {
 } = require('../src/lib/smsDeliveryCallbackContract');
 const {
   orchestrateOtpSmsDelivery,
-  parseQaDestinationAllowlist,
   qaDestinationAllowed,
   validateCommittedChallenge,
 } = require('../src/lib/smsDeliveryOrchestrator');
@@ -176,12 +175,11 @@ test('SMS-C0 rejects production and all network adapters by default', async () =
   await assert.rejects(() => orchestrateOtpSmsDelivery(harness.options), /network SMS adapters are disabled/);
 });
 
-test('QA live-destination design accepts fingerprints only and fake transport needs no populated allowlist', () => {
-  assert.deepEqual(parseQaDestinationAllowlist(`${'a'.repeat(64)},${'b'.repeat(64)}`), ['a'.repeat(64), 'b'.repeat(64)]);
-  assert.throws(() => parseQaDestinationAllowlist('+15555550100'));
-  assert.equal(qaDestinationAllowed({ environment: 'qa', destinationFingerprint: FINGERPRINT, allowlist: [], adapterNetwork: 'none' }), true);
-  assert.equal(qaDestinationAllowed({ environment: 'qa', destinationFingerprint: FINGERPRINT, allowlist: [], adapterNetwork: 'https' }), false);
-  assert.equal(qaDestinationAllowed({ environment: 'qa', destinationFingerprint: FINGERPRINT, allowlist: [FINGERPRINT], adapterNetwork: 'https' }), true);
+test('QA live transport accepts every eligible fingerprint without a destination allowlist', () => {
+  assert.equal(qaDestinationAllowed({ environment: 'qa', destinationFingerprint: FINGERPRINT, adapterNetwork: 'none' }), true);
+  assert.equal(qaDestinationAllowed({ environment: 'qa', destinationFingerprint: FINGERPRINT, adapterNetwork: 'https' }), true);
+  assert.equal(qaDestinationAllowed({ environment: 'qa', destinationFingerprint: 'not-a-fingerprint', adapterNetwork: 'https' }), false);
+  assert.equal(qaDestinationAllowed({ environment: 'production', destinationFingerprint: FINGERPRINT, adapterNetwork: 'https' }), false);
 });
 
 test('idempotency identity is stable, challenge-specific, and independent of phone/code fields', () => {

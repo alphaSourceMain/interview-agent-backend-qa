@@ -19,8 +19,8 @@ test('candidate routes keep SMS owner-gated, consent-bound, and explicitly fallb
     "environment === 'qa'",
     "provider === 'telnyx'",
     'SMS_CONSENT_COPY_VERSION',
-    'SMS_QA_DESTINATION_FINGERPRINT_ALLOWLIST',
   ]) assert.match(delivery, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(delivery, /SMS_QA_DESTINATION_FINGERPRINT_ALLOWLIST/);
   assert.match(submit, /requestedOtpChannel === 'sms'/);
   assert.match(submit, /email_fallback_available/);
   assert.match(resend, /requestedChannel === 'sms'/);

@@ -202,7 +202,12 @@ app.use(cors({
 
 app.use('/webhook/stripe', express.raw({ type: 'application/json' }), require('./routes/webhookStripe'))
 app.use('/webhook/telnyx/sms', express.raw({ type: 'application/json', limit: '256kb' }), require('./routes/webhookTelnyxSms'))
-app.use('/webhook/sendgrid', express.json({ limit: '2mb' }), require('./routes/webhookSendgrid'))
+app.use('/webhook/sendgrid', express.json({
+  limit: '2mb',
+  verify: (req, _res, buffer) => {
+    req.raw_body = Buffer.from(buffer);
+  }
+}), require('./routes/webhookSendgrid'))
 app.use('/webhook', require('./routes/webhook'))
 
 app.use(express.json({ limit: '10mb' }))

@@ -33,12 +33,19 @@ const {
   readCandidateSmsConfiguration,
 } = require('../src/lib/candidateSmsDelivery');
 const analyzeResume = require('../analyzeResume'); // resume analyzer
+const {
+  createCandidateSubmitLifecycle,
+  createCandidateUploadMiddleware,
+  markCandidateSubmitStage,
+} = require('../src/lib/candidateSubmitLifecycle');
 
 // uploads: keep in memory; 10MB limit
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
 });
+const candidateSubmitLifecycle = createCandidateSubmitLifecycle();
+const candidateUpload = createCandidateUploadMiddleware(upload.any());
 
 const BILLING_MODE = String(process.env.BILLING_MODE || 'off').toLowerCase();
 const BILLING_ENFORCED = BILLING_MODE === 'enforce';
@@ -55,8 +62,10 @@ async function candidateSubmitRateLimit(req, res, next) {
       maxCount: SUBMIT_RATE_MAX
     });
     if (!result.allowed) {
+      markCandidateSubmitStage(req, 'rate_limit_denied');
       return sendCandidateError(res, 'RATE_LIMITED', { request_id: req.request_id || null });
     }
+    markCandidateSubmitStage(req, 'rate_limit_allowed');
   } catch (error) {
     console.error('[rate-limit] candidate submit check failed', {
       request_id: req.request_id || null,
@@ -128,7 +137,7 @@ function queueOtpEmail({ challengeId, code, email, candidateId, roleId, requestI
  * Accepts multipart form (resume) or JSON (resume_url).
  * Required: email + (name OR first/last) + (role_id OR role_token)
  */
-router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
+router.post('/', candidateSubmitLifecycle, candidateSubmitRateLimit, candidateUpload, async (req, res) => {
   const request_id = req.request_id || null;
   let sentryCandidateId = null;
   let sentryRoleId = null;
@@ -144,6 +153,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
         body: payload,
         candidateId
       });
+      markCandidateSubmitStage(req, 'response_committed');
       return res.status(status).json(payload);
     };
     const respondCandidateError = async (code, overrides = {}, candidateId = null) => {
@@ -159,6 +169,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
         code: 'SMS_PRECHALLENGE_DELIVERY_UNAVAILABLE',
         candidateId,
       });
+      markCandidateSubmitStage(req, 'response_committed');
       return res.status(200).json(payload);
     };
     // --- normalize inputs ---
@@ -207,6 +218,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
     )) {
       return sendCandidateError(res, 'SMS_CHANNEL_UNAVAILABLE', { request_id });
     }
+    markCandidateSubmitStage(req, 'input_validated', { channel: requestedOtpChannel });
 
     let resumeInspection = null;
     if (resumeFile) {
@@ -219,6 +231,10 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
         throw error;
       }
     }
+    markCandidateSubmitStage(req, 'resume_inspected', {
+      resume_present: Boolean(resumeFile),
+      resume_parse_status: resumeInspection?.parse_status || null,
+    });
 
     // --- role lookup (need client_id + description) ---
     let role = null, rErr = null;
@@ -243,6 +259,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
       return sendCandidateError(res, 'INTERVIEW_LINK_EXPIRED', { request_id });
     }
     const roleId = role.id;
+    markCandidateSubmitStage(req, 'role_loaded');
     sentryRoleId = roleId || null;
     sentryClientId = role.client_id || null;
     if (isRoleInactive(role)) {
@@ -302,6 +319,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
       roleId,
       clientId: role.client_id || null
     });
+    markCandidateSubmitStage(req, 'availability_checked');
     await syncRoleInterviewLimitNotification({
       db: supabaseAdmin,
       roleId,
@@ -343,17 +361,20 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
       return sendCandidateError(res, 'TEMPORARY_SERVICE_ERROR', { request_id });
     }
     if (submissionReservation.state === 'replay') {
+      markCandidateSubmitStage(req, 'reservation_replay');
       return res
         .status(Number(submissionReservation.row.response_status) || 200)
         .json(submissionReservation.row.response_body);
     }
     if (submissionReservation.state === 'processing') {
+      markCandidateSubmitStage(req, 'reservation_processing');
       return sendCandidateError(res, 'TEMPORARY_SERVICE_ERROR', {
         status: 409,
         detail: 'This submission is still processing. Please wait a moment and try again.',
         request_id
       });
     }
+    markCandidateSubmitStage(req, 'reservation_acquired');
 
     // --- duplicate & enrichment policy ---
     // RULES:
@@ -474,6 +495,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
               .eq('id', candidate_id);
             if (resumeUpdateError) throw resumeUpdateError;
             existingByEmail.resume_url = resumeUrl;
+            markCandidateSubmitStage(req, 'storage_uploaded');
           } catch (error) {
             await supabase.storage.from(bucket).remove([objectPath]).catch(() => {});
             console.error('[candidate-submit] recovery_resume_upload_failed', {
@@ -532,6 +554,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
           role_id: roleId,
           recovery: true
         });
+        markCandidateSubmitStage(req, 'challenge_created', { channel: requestedOtpChannel });
         const responseBody = {
           message: 'If your information is accepted, a verification code will be sent shortly.',
           candidate_id,
@@ -616,6 +639,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
           inspection: resumeInspection
         });
         uploadedObject = { bucket, objectPath };
+        markCandidateSubmitStage(req, 'storage_uploaded');
       } catch (error) {
         console.error('[candidate-submit] resume_upload_failed', {
           request_id,
@@ -660,6 +684,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
       return respondRetryableError('TEMPORARY_SERVICE_ERROR');
     }
     sentryCandidateId = candidate_id;
+    markCandidateSubmitStage(req, 'candidate_persisted');
     Sentry.setTag('candidate_id', String(candidate_id));
     Sentry.addBreadcrumb({
       category: 'candidate_submit',
@@ -702,6 +727,7 @@ router.post('/', candidateSubmitRateLimit, upload.any(), async (req, res) => {
       });
       return respondRetryableError('TEMPORARY_SERVICE_ERROR', {}, candidate_id);
     }
+    markCandidateSubmitStage(req, 'challenge_created', { channel: requestedOtpChannel });
 
     // success
     const responseBody = {

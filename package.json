@@ -19,6 +19,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1040.0",
     "@aws-sdk/s3-request-presigner": "^3.1040.0",
+    "@sendgrid/eventwebhook": "8.0.0",
     "@sendgrid/mail": "^8.1.5",
     "@sentry/node": "^10.20.0",
     "@sentry/profiling-node": "^10.20.0",

@@ -525,6 +525,7 @@ router.post('/', candidateSubmitLifecycle, candidateSubmitRateLimit, candidateUp
               interviewAttemptId: existingInterview?.id || null,
               recoveryAuthorizationId: authorizedRecoveryReentry?.id || null,
               consentCopyVersion,
+              requestIp: getRequestSubjectKey(req),
             });
           } else {
             otpChallenge = await issueOtpChallenge(supabaseAdmin, {
@@ -708,6 +709,7 @@ router.post('/', candidateSubmitLifecycle, candidateSubmitRateLimit, candidateUp
           roleId,
           submissionId: submissionReservation?.row?.id || null,
           consentCopyVersion,
+          requestIp: getRequestSubjectKey(req),
         });
       } else {
         otpChallenge = await issueOtpChallenge(supabaseAdmin, {

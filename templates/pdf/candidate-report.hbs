@@ -23,10 +23,26 @@
       margin-bottom: 36px;
     }
 
-    .header img {
-      max-height: 72px;
+    .brand-lockup {
+      display: flex;
+      align-items: center;
+      gap: 10px;
       margin-bottom: 24px;
+      color: #0a1547;
+    }
+
+    .brand-lockup img {
+      width: 44px;
+      height: 44px;
       display: block;
+    }
+
+    .brand-wordmark {
+      font-size: 25px;
+      font-weight: 500;
+      line-height: 1;
+      letter-spacing: -0.04em;
+      white-space: nowrap;
     }
 
     .header h2 {
@@ -135,7 +151,10 @@
   <div class="container">
 
     <div class="header">
-      {{#if logo_src}}<img src="{{logo_src}}" alt="AlphaSource Logo" />{{/if}}
+      <div class="brand-lockup" aria-label="alphaScreen">
+        {{#if logo_src}}<img src="{{logo_src}}" alt="" />{{/if}}
+        <div class="brand-wordmark">alphaScreen</div>
+      </div>
       <h2>Candidate Report</h2>
       <p class="patent-notice">alphaScreen technology — Patent Pending</p>
       <p><strong>Name:</strong> {{name}}</p>

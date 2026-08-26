@@ -6,7 +6,7 @@ const templatePath = path.join(__dirname, '..', 'templates', 'pdf', 'candidate-r
 const templateSrc = fs.readFileSync(templatePath, 'utf8');
 const template = Handlebars.compile(templateSrc);
 
-const LOGO_FILENAME = 'No bg - color logo - dark text.png';
+const LOGO_FILENAME = 'alphascreen-mark-08-navy.svg';
 
 let cachedLogoSrc = null;
 let triedLogoLoad = false;
@@ -110,15 +110,13 @@ function readLogoAsDataUri() {
 
   const candidates = [
     path.join(__dirname, '..', 'templates', 'pdf', 'assets', LOGO_FILENAME),
-    path.join(__dirname, '..', 'templates', 'pdf', 'assets', 'logo.png'),
-    path.join(__dirname, '..', 'public', LOGO_FILENAME),
   ];
 
   for (const logoPath of candidates) {
     try {
       if (fs.existsSync(logoPath)) {
         const base64 = fs.readFileSync(logoPath).toString('base64');
-        cachedLogoSrc = `data:image/png;base64,${base64}`;
+        cachedLogoSrc = `data:image/svg+xml;base64,${base64}`;
         return cachedLogoSrc;
       }
     } catch (_) {}

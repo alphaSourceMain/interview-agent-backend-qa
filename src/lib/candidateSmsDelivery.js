@@ -69,6 +69,7 @@ function normalizeConsentCopyVersion(value) {
 
 async function deliverCandidateSmsOtp({
   db,
+  challengeId = null,
   candidate,
   clientId,
   roleId,
@@ -149,6 +150,7 @@ async function deliverCandidateSmsOtp({
     ...(productionControls || {}),
     issueChallenge: async () => {
       issued = await issueChallenge(db, {
+        challengeId,
         phoneE164: candidate.phone_e164,
         channel: 'sms',
         candidateId: candidate.id,

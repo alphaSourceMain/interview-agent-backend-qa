@@ -38,3 +38,10 @@ test('sales migration prevents preview reuse and concurrent active buyer duplica
   assert.match(sql, /create unique index if not exists public_purchase_intents_sales_preview_uidx/i)
   assert.match(sql, /create unique index if not exists public_purchase_intents_active_sales_buyer_uidx[\s\S]*lower\(buyer_email\)[\s\S]*channel = 'sales_assisted'/i)
 })
+
+test('agreement checkout webhooks do not fall through to generic client activation', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhookStripe.js'), 'utf8')
+  assert.match(source, /if \(!isPaidAgreementCheckout\) \{[\s\S]*buildClientSubscriptionUpdatesFromStripe/i)
+  assert.match(source, /const isAgreementCheckoutInvoice =[\s\S]*metadataSource === 'agreement_checkout'/i)
+  assert.match(source, /customerId && !isManagedSubscriptionInvoice && !isAgreementCheckoutInvoice/i)
+})

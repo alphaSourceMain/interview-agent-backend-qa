@@ -359,7 +359,7 @@ async function loadPublicPurchaseIntent(db, agreement) {
   if (snapshotIntentId) {
     const { data, error } = await db
       .from('public_purchase_intents')
-      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,expires_at,created_at,updated_at')
+      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,canceled_at,expires_at,created_at,updated_at')
       .eq('id', snapshotIntentId)
       .maybeSingle();
     if (error) throw new Error(error.message || 'Public purchase intent lookup failed');
@@ -369,7 +369,7 @@ async function loadPublicPurchaseIntent(db, agreement) {
   if (!agreementId) return null;
   const { data, error } = await db
     .from('public_purchase_intents')
-    .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,expires_at,created_at,updated_at')
+    .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,canceled_at,expires_at,created_at,updated_at')
     .eq('agreement_id', agreementId)
     .maybeSingle();
   if (error) throw new Error(error.message || 'Public purchase intent lookup failed');
@@ -750,6 +750,14 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
   if (!agreement) return { ok: false, status: 'agreement_not_found' };
 
   const intent = await loadPublicPurchaseIntent(db, agreement);
+  if (cleanText(intent?.status).toLowerCase() === 'canceled' || cleanText(intent?.canceled_at)) {
+    logger.warn?.('[public-purchase-activation] canceled_intent_payment_requires_review', {
+      agreement_id: agreementId,
+      purchase_intent_id: intent?.id || null,
+      checkout_session_id: checkoutSessionId || null
+    });
+    return { ok: false, status: 'purchase_canceled', purchase_intent_id: intent?.id || null };
+  }
   const packageSnapshot = getPackageSnapshot({ agreement, intent });
   const { planKey, billingInterval } = resolvePlanSelection({
     agreement,

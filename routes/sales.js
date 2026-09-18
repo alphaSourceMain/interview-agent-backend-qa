@@ -11,6 +11,7 @@ const {
   sendSubscriptionCheckoutEmail
 } = require('../utils/mailer')
 const { buildMembershipAgreementSignUrl } = require('../config/urlConfig')
+const { checkAndIncrementRateLimit, hashRateLimitSubject } = require('../src/lib/rateLimit')
 const {
   agreementInputFromDraft,
   calculatePricing,
@@ -27,6 +28,12 @@ const AGREEMENTS_BUCKET = process.env.SUPABASE_AGREEMENTS_BUCKET || 'agreements'
 const PREVIEW_TTL_MS = 15 * 60 * 1000
 const SIGNING_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9_.:-]{8,255}$/
+const SALES_RATE_WINDOW_MS = 10 * 60 * 1000
+const SALES_RATE_LIMITS = Object.freeze({
+  create: 10,
+  resend_agreement: 10,
+  send_payment_reminder: 10
+})
 const INTENT_COLUMNS = [
   'id', 'status', 'selected_plan_key', 'selected_billing_cadence', 'package_snapshot',
   'company_legal_name', 'company_dba', 'buyer_first_name', 'buyer_last_name',
@@ -36,7 +43,8 @@ const INTENT_COLUMNS = [
   'sales_note', 'candidate_assistance_name', 'candidate_assistance_email',
   'promotion_code_id', 'promotion_code', 'promotion_label', 'promotion_amount_off_cents',
   'promotion_percent_off', 'promotion_discount_cents', 'platform_fee_cents',
-  'initial_payment_cents', 'term_start_basis', 'activated_at', 'canceled_at'
+  'initial_payment_cents', 'term_start_basis', 'activated_at', 'canceled_at',
+  'sales_preview_id'
 ].join(',')
 const AGREEMENT_COLUMNS = [
   'id', 'status', 'is_current', 'checkout_status', 'checkout_session_id',
@@ -100,6 +108,23 @@ function promotionFromStripe(code, promotionCode) {
   })
 }
 
+function promotionEligibilityError(promotionCode, pricing) {
+  const restrictions = promotionCode?.restrictions || {}
+  const coupon = promotionCode?.coupon || promotionCode?.promotion?.coupon || {}
+  const minimumAmount = Number(restrictions.minimum_amount)
+  const minimumCurrency = String(restrictions.minimum_amount_currency || '').trim().toLowerCase()
+  const subtotal = Number(pricing?.platform_fee_cents || 0) + Number(pricing?.first_role_prepay_cents || 0)
+  if (restrictions.first_time_transaction === true) return 'This code requires customer history that cannot be verified before account creation.'
+  if (Number.isFinite(minimumAmount) && minimumAmount > 0) {
+    if (minimumCurrency && minimumCurrency !== 'usd') return 'This code is not available for USD alphaScreen purchases.'
+    if (subtotal < minimumAmount) return 'This purchase does not meet the code minimum.'
+  }
+  if (Array.isArray(coupon?.applies_to?.products) && coupon.applies_to.products.length > 0) {
+    return 'This product-restricted code is not available in the sales workspace.'
+  }
+  return ''
+}
+
 function createSalesRouter(options = {}) {
   const router = express.Router()
   const db = options.db || supabaseAdmin
@@ -109,6 +134,44 @@ function createSalesRouter(options = {}) {
   const sendCheckoutEmail = options.sendCheckoutEmail || sendSubscriptionCheckoutEmail
   const buildSignUrl = options.buildSignUrl || buildMembershipAgreementSignUrl
   const getStripe = options.getStripe || stripeClient
+  const rateLimit = options.rateLimit || checkAndIncrementRateLimit
+
+  async function enforceSalesRateLimit(req, res, action) {
+    const maxCount = SALES_RATE_LIMITS[action]
+    if (!maxCount) return true
+    try {
+      const result = await rateLimit({
+        routeName: `sales:${action}`,
+        subjectKey: `v1:${hashRateLimitSubject('sales', action, req.salesRep.user_id)}`,
+        windowMs: SALES_RATE_WINDOW_MS,
+        maxCount
+      })
+      if (result.allowed) return true
+      const retryAfter = Math.max(0, Math.ceil(Number(result.retryAfterSeconds || 0)))
+      if (retryAfter > 0) res.set('Retry-After', String(retryAfter))
+      res.status(429).json({
+        error: 'rate_limited',
+        code: 'sales_rate_limited',
+        detail: 'Please wait before trying that sales action again.',
+        retry_after_seconds: retryAfter,
+        request_id: requestId(req)
+      })
+      return false
+    } catch (error) {
+      console.error('[sales/rate-limit] check_failed', {
+        action,
+        request_id: requestId(req),
+        code: error?.code || null
+      })
+      res.status(503).json({
+        error: 'rate_limit_unavailable',
+        code: 'rate_limit_unavailable',
+        detail: 'The sales action could not be safely started. Please try again.',
+        request_id: requestId(req)
+      })
+      return false
+    }
+  }
 
   async function validatePromotion(code, draft) {
     const normalizedCode = String(code || '').trim().toUpperCase()
@@ -130,6 +193,11 @@ function createSalesRouter(options = {}) {
     })
     if (!promotionCode) {
       throw makeSalesError(422, 'promotion_code_invalid', 'That code is inactive, expired, or not eligible for this membership.')
+    }
+    const basePricing = calculatePricing(draft, null).pricing
+    const eligibilityError = promotionEligibilityError(promotionCode, basePricing)
+    if (eligibilityError) {
+      throw makeSalesError(422, 'promotion_code_ineligible', eligibilityError)
     }
     const promotion = promotionFromStripe(normalizedCode, promotionCode)
     calculatePricing(draft, promotion)
@@ -212,6 +280,20 @@ function createSalesRouter(options = {}) {
     if (error) console.error('[sales/idempotency] response_persist_failed', { route_key: routeKey, code: error.code || null })
   }
 
+  async function releaseIdempotency(repUserId, routeKey, key) {
+    try {
+      const { error } = await db
+        .from('sales_idempotency_keys')
+        .delete()
+        .eq('actor_user_id', repUserId)
+        .eq('route_key', routeKey)
+        .eq('idempotency_key', key)
+      if (error) console.error('[sales/idempotency] release_failed', { route_key: routeKey, code: error.code || null })
+    } catch (error) {
+      console.error('[sales/idempotency] release_failed', { route_key: routeKey, code: error?.code || null })
+    }
+  }
+
   router.get('/me', (req, res) => res.json(req.salesRep))
 
   router.get('/packages', (_req, res) => {
@@ -282,6 +364,10 @@ function createSalesRouter(options = {}) {
     const routeKey = 'POST:/sales/deals'
     let key = ''
     let reserved = false
+    let createdIntentId = ''
+    let createdAgreementId = ''
+    let createdAgreementPdfPath = ''
+    let dealReadyForRecovery = false
     try {
       key = normalizeIdempotencyKey(req)
       const draft = validateSalesDraft(normalizeSalesDraft(req.body))
@@ -289,6 +375,7 @@ function createSalesRouter(options = {}) {
       if (!previewId) throw makeSalesError(409, 'preview_required', 'Preview the agreement before sending it.')
       const idem = await idempotentResult(req.salesRep.user_id, routeKey, key, { ...draft, preview_id: previewId })
       if (idem.replay) return res.status(idem.replay.status).json(idem.replay.body)
+      if (!await enforceSalesRateLimit(req, res, 'create')) return
       await reserveIdempotency(req.salesRep.user_id, routeKey, key, idem.requestFingerprint)
       reserved = true
 
@@ -366,6 +453,7 @@ function createSalesRouter(options = {}) {
         platform_fee_cents: Number(preview.pricing_snapshot?.platform_fee_cents || 0),
         initial_payment_cents: Number(preview.pricing_snapshot?.initial_payment_cents || 0),
         term_start_basis: 'successful_payment',
+        sales_preview_id: previewId,
         created_at: now,
         updated_at: now
       }
@@ -374,7 +462,13 @@ function createSalesRouter(options = {}) {
         .insert(intentPayload)
         .select(INTENT_COLUMNS)
         .single()
-      if (intentError) throw makeSalesError(503, 'deal_create_failed', 'The sales transaction could not be created.')
+      if (intentError) {
+        if (intentError.code === '23505') {
+          throw makeSalesError(409, 'existing_signup_conflict', 'This preview or buyer is already associated with an active sales transaction.')
+        }
+        throw makeSalesError(503, 'deal_create_failed', 'The sales transaction could not be created.')
+      }
+      createdIntentId = intentId
 
       const agreementInput = agreementInputFromDraft(draft, preview.package_snapshot)
       const { html, normalized } = renderAgreement(agreementInput, { showPackageTerms: true })
@@ -383,6 +477,7 @@ function createSalesRouter(options = {}) {
         margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' }
       })
       const draftPdfPath = `membership-agreements/${agreementId}/sales-assisted-draft.pdf`
+      createdAgreementPdfPath = draftPdfPath
       const upload = await db.storage.from(AGREEMENTS_BUCKET).upload(draftPdfPath, pdf, {
         contentType: 'application/pdf',
         upsert: false
@@ -428,14 +523,7 @@ function createSalesRouter(options = {}) {
         created_by_email: req.salesRep.email
       })
       if (agreementError) throw makeSalesError(503, 'agreement_create_failed', 'The agreement could not be created.')
-
-      const mailResult = await sendAgreementEmail(draft.buyer_email, signingUrl, {
-        client_legal_name: draft.company_legal_name,
-        primary_admin_name: `${draft.buyer_first_name} ${draft.buyer_last_name}`.trim(),
-        membership_tier: preview.package_snapshot?.display_name || draft.plan_key,
-        expires_on: signerTokenExpiresAt
-      })
-      if (mailResult?.skipped) throw makeSalesError(503, 'agreement_email_not_configured', 'Agreement email delivery is not configured.')
+      createdAgreementId = agreementId
 
       const { data: updatedIntent, error: finalizeError } = await db
         .from('public_purchase_intents')
@@ -445,12 +533,44 @@ function createSalesRouter(options = {}) {
         .select(INTENT_COLUMNS)
         .single()
       if (finalizeError) throw makeSalesError(503, 'deal_finalize_failed', 'The agreement was sent but the deal status could not be finalized.')
-      await db.from('membership_agreements').update({ status: 'sent', sent_at: nowIso() }).eq('id', agreementId)
-      await db.from('sales_deal_previews').update({ consumed_at: nowIso() }).eq('id', previewId).eq('created_by_user_id', req.salesRep.user_id)
+      const sentAt = nowIso()
+      const { error: agreementFinalizeError } = await db
+        .from('membership_agreements')
+        .update({ status: 'sent', sent_at: sentAt })
+        .eq('id', agreementId)
+        .eq('status', 'draft')
+      if (agreementFinalizeError) throw makeSalesError(503, 'agreement_finalize_failed', 'The agreement was created but could not be made available for signing.')
+      const { error: previewConsumeError } = await db
+        .from('sales_deal_previews')
+        .update({ consumed_at: sentAt })
+        .eq('id', previewId)
+        .eq('created_by_user_id', req.salesRep.user_id)
+        .is('consumed_at', null)
+      if (previewConsumeError) {
+        console.error('[sales/preview] consume_marker_failed', { preview_id: previewId, code: previewConsumeError.code || null })
+      }
+      dealReadyForRecovery = true
+
+      let mailResult
+      try {
+        mailResult = await sendAgreementEmail(draft.buyer_email, signingUrl, {
+          client_legal_name: draft.company_legal_name,
+          primary_admin_name: `${draft.buyer_first_name} ${draft.buyer_last_name}`.trim(),
+          membership_tier: preview.package_snapshot?.display_name || draft.plan_key,
+          expires_on: signerTokenExpiresAt
+        })
+      } catch (mailError) {
+        await event(intentId, req.salesRep.user_id, 'agreement_email_failed')
+        throw makeSalesError(503, 'agreement_email_failed', 'The deal was saved, but the agreement email was not delivered. Open the deal and resend it.', { deal_id: intentId })
+      }
+      if (mailResult?.skipped) {
+        await event(intentId, req.salesRep.user_id, 'agreement_email_failed')
+        throw makeSalesError(503, 'agreement_email_not_configured', 'The deal was saved, but agreement email delivery is not configured. Open the deal and resend it.', { deal_id: intentId })
+      }
       await event(intentId, req.salesRep.user_id, 'agreement_sent', { agreement_id: agreementId })
 
       const body = {
-        deal: safeDeal(updatedIntent || insertedIntent, { id: agreementId, status: 'sent', sent_at: nowIso() }),
+        deal: safeDeal(updatedIntent || insertedIntent, { id: agreementId, status: 'sent', sent_at: sentAt }),
         message: `Agreement sent to ${draft.buyer_email}.`
       }
       await finishIdempotency(req.salesRep.user_id, routeKey, key, 201, body)
@@ -458,7 +578,24 @@ function createSalesRouter(options = {}) {
     } catch (error) {
       if (reserved && key) {
         const body = errorBody(error, req)
-        await finishIdempotency(req.salesRep.user_id, routeKey, key, Number(error?.status) || 500, body)
+        if (!dealReadyForRecovery && Number(error?.status || 500) >= 500) {
+          try {
+            if (createdAgreementId) await db.from('membership_agreements').delete().eq('id', createdAgreementId)
+            if (createdIntentId) {
+              await db.from('public_purchase_intents').delete().eq('id', createdIntentId).eq('created_by_user_id', req.salesRep.user_id)
+            }
+            if (createdAgreementPdfPath) await db.storage.from(AGREEMENTS_BUCKET).remove([createdAgreementPdfPath])
+          } catch (cleanupError) {
+            console.error('[sales/deals] incomplete_deal_cleanup_failed', {
+              purchase_intent_id: createdIntentId || null,
+              agreement_id: createdAgreementId || null,
+              code: cleanupError?.code || null
+            })
+          }
+          await releaseIdempotency(req.salesRep.user_id, routeKey, key)
+        } else {
+          await finishIdempotency(req.salesRep.user_id, routeKey, key, Number(error?.status) || 500, body)
+        }
       }
       return respondError(res, req, error)
     }
@@ -506,8 +643,16 @@ function createSalesRouter(options = {}) {
   })
 
   router.post('/deals/:id/resend-agreement', async (req, res) => {
+    const routeKey = 'POST:/sales/deals/:id/resend-agreement'
+    let key = ''
+    let reserved = false
     try {
-      normalizeIdempotencyKey(req)
+      key = normalizeIdempotencyKey(req)
+      const idem = await idempotentResult(req.salesRep.user_id, routeKey, key, { deal_id: req.params.id })
+      if (idem.replay) return res.status(idem.replay.status).json(idem.replay.body)
+      if (!await enforceSalesRateLimit(req, res, 'resend_agreement')) return
+      await reserveIdempotency(req.salesRep.user_id, routeKey, key, idem.requestFingerprint)
+      reserved = true
       const { intent, agreement } = await loadOwnedDeal(req.params.id, req.salesRep.user_id)
       if (!agreement || agreement.status !== 'sent') throw makeSalesError(409, 'agreement_not_resendable', 'This agreement is not waiting for signature.')
       const signerToken = crypto.randomBytes(32).toString('hex')
@@ -520,22 +665,34 @@ function createSalesRouter(options = {}) {
         updated_at: nowIso()
       }).eq('id', agreement.id).eq('status', 'sent')
       if (error) throw makeSalesError(503, 'agreement_refresh_failed', 'The agreement link could not be refreshed.')
-      await sendAgreementEmail(intent.buyer_email, buildSignUrl(signerToken), {
+      const mailResult = await sendAgreementEmail(intent.buyer_email, buildSignUrl(signerToken), {
         client_legal_name: intent.company_legal_name,
         primary_admin_name: `${intent.buyer_first_name} ${intent.buyer_last_name}`.trim(),
         membership_tier: intent.package_snapshot?.display_name || intent.selected_plan_key,
         expires_on: expiresAt
       })
+      if (mailResult?.skipped) throw makeSalesError(503, 'agreement_email_not_configured', 'Agreement email delivery is not configured.')
       await event(intent.id, req.salesRep.user_id, 'agreement_resent')
-      return res.json({ message: 'The agreement email was sent again.' })
+      const body = { message: 'The agreement email was sent again.' }
+      await finishIdempotency(req.salesRep.user_id, routeKey, key, 200, body)
+      return res.json(body)
     } catch (error) {
+      if (reserved && key) await finishIdempotency(req.salesRep.user_id, routeKey, key, Number(error?.status) || 500, errorBody(error, req))
       return respondError(res, req, error)
     }
   })
 
   router.post('/deals/:id/send-payment-reminder', async (req, res) => {
+    const routeKey = 'POST:/sales/deals/:id/send-payment-reminder'
+    let key = ''
+    let reserved = false
     try {
-      normalizeIdempotencyKey(req)
+      key = normalizeIdempotencyKey(req)
+      const idem = await idempotentResult(req.salesRep.user_id, routeKey, key, { deal_id: req.params.id })
+      if (idem.replay) return res.status(idem.replay.status).json(idem.replay.body)
+      if (!await enforceSalesRateLimit(req, res, 'send_payment_reminder')) return
+      await reserveIdempotency(req.salesRep.user_id, routeKey, key, idem.requestFingerprint)
+      reserved = true
       const { intent, agreement } = await loadOwnedDeal(req.params.id, req.salesRep.user_id)
       if (!agreement || !['signed'].includes(agreement.status) || agreement.checkout_status === 'paid') {
         throw makeSalesError(409, 'payment_reminder_not_available', 'A payment reminder is not available for this deal.')
@@ -549,21 +706,32 @@ function createSalesRouter(options = {}) {
         updated_at: nowIso()
       }).eq('id', agreement.id).eq('status', 'signed')
       if (error) throw makeSalesError(503, 'payment_link_refresh_failed', 'The payment continuation link could not be refreshed.')
-      await sendCheckoutEmail(
+      const mailResult = await sendCheckoutEmail(
         intent.buyer_email,
         buildSignUrl(signerToken),
         `${intent.buyer_first_name || ''} ${intent.buyer_last_name || ''}`.trim()
       )
+      if (mailResult?.skipped) throw makeSalesError(503, 'payment_email_not_configured', 'Payment reminder email delivery is not configured.')
       await event(intent.id, req.salesRep.user_id, 'payment_reminder_sent')
-      return res.json({ message: 'The payment reminder was sent.' })
+      const body = { message: 'The payment reminder was sent.' }
+      await finishIdempotency(req.salesRep.user_id, routeKey, key, 200, body)
+      return res.json(body)
     } catch (error) {
+      if (reserved && key) await finishIdempotency(req.salesRep.user_id, routeKey, key, Number(error?.status) || 500, errorBody(error, req))
       return respondError(res, req, error)
     }
   })
 
   router.post('/deals/:id/cancel', async (req, res) => {
+    const routeKey = 'POST:/sales/deals/:id/cancel'
+    let key = ''
+    let reserved = false
     try {
-      normalizeIdempotencyKey(req)
+      key = normalizeIdempotencyKey(req)
+      const idem = await idempotentResult(req.salesRep.user_id, routeKey, key, { deal_id: req.params.id })
+      if (idem.replay) return res.status(idem.replay.status).json(idem.replay.body)
+      await reserveIdempotency(req.salesRep.user_id, routeKey, key, idem.requestFingerprint)
+      reserved = true
       const { intent, agreement } = await loadOwnedDeal(req.params.id, req.salesRep.user_id)
       if (intent.status === 'completed' || intent.activated_at || agreement?.checkout_status === 'paid') {
         throw makeSalesError(409, 'agreement_already_paid', 'Paid agreements require administrator handling.')
@@ -580,20 +748,39 @@ function createSalesRouter(options = {}) {
         .update({ status: 'canceled', canceled_at: now, updated_at: now })
         .eq('id', intent.id)
         .eq('created_by_user_id', req.salesRep.user_id)
+        .neq('status', 'completed')
+        .is('activated_at', null)
         .select(INTENT_COLUMNS)
-        .single()
+        .maybeSingle()
       if (error) throw makeSalesError(503, 'deal_cancel_failed', 'The unpaid transaction could not be canceled.')
-      if (agreement?.id) await db.from('membership_agreements').update({ status: 'voided', is_current: false, updated_at: now }).eq('id', agreement.id)
+      if (!updated) throw makeSalesError(409, 'agreement_already_paid', 'Payment completed while cancellation was being processed. An administrator must review this deal.')
+      if (agreement?.id) {
+        const { data: voidedAgreement, error: voidError } = await db
+          .from('membership_agreements')
+          .update({ status: 'voided', is_current: false, updated_at: now })
+          .eq('id', agreement.id)
+          .neq('checkout_status', 'paid')
+          .select('id')
+          .maybeSingle()
+        if (voidError) throw makeSalesError(503, 'agreement_void_failed', 'The transaction was canceled, but the agreement could not be voided.')
+        if (!voidedAgreement) throw makeSalesError(409, 'agreement_already_paid', 'Payment completed while cancellation was being processed. An administrator must review this deal.')
+      }
       await event(intent.id, req.salesRep.user_id, 'deal_canceled')
-      return res.json({ deal: safeDeal(updated, { ...(agreement || {}), status: 'voided' }), message: 'The unpaid transaction was canceled.' })
+      const body = { deal: safeDeal(updated, { ...(agreement || {}), status: 'voided' }), message: 'The unpaid transaction was canceled.' }
+      await finishIdempotency(req.salesRep.user_id, routeKey, key, 200, body)
+      return res.json(body)
     } catch (error) {
+      if (reserved && key) await finishIdempotency(req.salesRep.user_id, routeKey, key, Number(error?.status) || 500, errorBody(error, req))
       return respondError(res, req, error)
     }
   })
 
   router.post('/enterprise-handoffs', async (req, res) => {
+    const routeKey = 'POST:/sales/enterprise-handoffs'
+    let key = ''
+    let reserved = false
     try {
-      normalizeIdempotencyKey(req)
+      key = normalizeIdempotencyKey(req)
       const input = {
         company_name: String(req.body?.company_name || '').trim().slice(0, 160),
         contact_name: String(req.body?.contact_name || '').trim().slice(0, 160),
@@ -610,6 +797,10 @@ function createSalesRouter(options = {}) {
       if (!input.company_name || !input.contact_name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.contact_email)) {
         throw makeSalesError(400, 'invalid_enterprise_handoff', 'Company name, contact name, and a valid contact email are required.')
       }
+      const idem = await idempotentResult(req.salesRep.user_id, routeKey, key, input)
+      if (idem.replay) return res.status(idem.replay.status).json(idem.replay.body)
+      await reserveIdempotency(req.salesRep.user_id, routeKey, key, idem.requestFingerprint)
+      reserved = true
       const { data, error } = await db.from('sales_enterprise_handoffs').insert({
         ...input,
         created_by_user_id: req.salesRep.user_id,
@@ -617,11 +808,14 @@ function createSalesRouter(options = {}) {
         delivery_status: 'pending'
       }).select('id').single()
       if (error) throw makeSalesError(503, 'enterprise_handoff_failed', 'The Enterprise handoff could not be recorded.')
-      return res.status(201).json({
+      const body = {
         handoff_id: data.id,
         message: `${input.company_name} was recorded for executive follow-up.`
-      })
+      }
+      await finishIdempotency(req.salesRep.user_id, routeKey, key, 201, body)
+      return res.status(201).json(body)
     } catch (error) {
+      if (reserved && key) await finishIdempotency(req.salesRep.user_id, routeKey, key, Number(error?.status) || 500, errorBody(error, req))
       return respondError(res, req, error)
     }
   })
@@ -631,5 +825,6 @@ function createSalesRouter(options = {}) {
 
 module.exports = {
   createSalesRouter,
-  promotionFromStripe
+  promotionFromStripe,
+  promotionEligibilityError
 }

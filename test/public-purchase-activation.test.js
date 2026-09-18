@@ -373,6 +373,29 @@ test('public purchase webhook activation provisions Essential and Pro monthly/an
   }
 })
 
+test('public purchase webhook activation does not reactivate a canceled sales intent', async () => {
+  const db = makeDb('basic', 'monthly', { source: 'sales_assisted' })
+  db.purchaseIntents[0].status = 'canceled'
+  db.purchaseIntents[0].canceled_at = '2026-09-18T19:00:00.000Z'
+  const beforeClient = { ...db.clients[0] }
+
+  const result = await activatePublicPurchaseAgreementCheckout({
+    db,
+    authAdmin: makeAuthAdmin([]),
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-09-18T19:01:00.000Z',
+    subscription: makeSubscription('monthly'),
+    requireParentClient: async () => ({ ok: true }),
+    logger: { error() {}, warn() {}, info() {} }
+  })
+
+  assert.deepEqual(result, { ok: false, status: 'purchase_canceled', purchase_intent_id: INTENT_ID })
+  assert.deepEqual(db.clients[0], beforeClient)
+  assert.equal(db.updates.length, 0)
+  assert.equal(db.inserts.length, 0)
+})
+
 test('sales-assisted activation starts the membership on successful payment', async () => {
   const db = makeDb('basic', 'monthly', {
     source: 'sales_assisted',

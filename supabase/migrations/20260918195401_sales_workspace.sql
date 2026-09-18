@@ -65,6 +65,10 @@ create index if not exists public_purchase_intents_ghl_opportunity_idx
   on public.public_purchase_intents (ghl_opportunity_id)
   where ghl_opportunity_id is not null;
 
+create unique index if not exists public_purchase_intents_active_sales_buyer_uidx
+  on public.public_purchase_intents (lower(buyer_email))
+  where channel = 'sales_assisted' and status not in ('canceled', 'expired');
+
 create table if not exists public.sales_deal_previews (
   id uuid primary key default gen_random_uuid(),
   created_by_user_id uuid not null references auth.users(id) on delete cascade,
@@ -81,6 +85,13 @@ create table if not exists public.sales_deal_previews (
 
 create index if not exists sales_deal_previews_owner_created_idx
   on public.sales_deal_previews (created_by_user_id, created_at desc);
+
+alter table public.public_purchase_intents
+  add column if not exists sales_preview_id uuid references public.sales_deal_previews(id) on delete set null;
+
+create unique index if not exists public_purchase_intents_sales_preview_uidx
+  on public.public_purchase_intents (sales_preview_id)
+  where sales_preview_id is not null;
 
 create table if not exists public.sales_deal_events (
   id uuid primary key default gen_random_uuid(),

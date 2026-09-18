@@ -10,6 +10,7 @@ const {
 const { ensureUserAndSendRecovery, redactEmail } = require('./recoveryHelper');
 const { sendMemberRecoveryEmail, sendAlphaScreenWelcomeEmail } = require('../../utils/mailer');
 const { buildClientPwResetUrl } = require('../../config/urlConfig');
+const { enqueueSalesWonDelivery } = require('./salesIntegrations');
 
 const LIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
 const PRIVILEGED_MEMBER_ROLES = new Set(['manager', 'admin', 'owner', 'super_admin']);
@@ -943,6 +944,21 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     welcomeEmailStatus = buyerEmail ? 'not_sent_not_public_purchase' : 'not_sent_missing_buyer_email';
   }
 
+  let salesWonDeliveryStatus = 'not_applicable';
+  if (cleanText(intent?.channel).toLowerCase() === 'sales_assisted' && intent?.id) {
+    try {
+      const delivery = await enqueueSalesWonDelivery(intent.id, { db });
+      salesWonDeliveryStatus = delivery.status;
+    } catch (error) {
+      salesWonDeliveryStatus = 'enqueue_failed';
+      logger.error?.('[public-purchase-activation] sales_won_enqueue_failed', {
+        purchase_intent_id: intent.id,
+        agreement_id: agreementId,
+        error: error?.message || error
+      });
+    }
+  }
+
   return {
     ok: true,
     agreement_id: agreementId,
@@ -956,7 +972,8 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     auth_status: setup.auth_status,
     setup_email_status: setup.setup_email_status,
     welcome_email_status: welcomeEmailStatus,
-    first_role_credit_status: firstRoleCreditStatus
+    first_role_credit_status: firstRoleCreditStatus,
+    sales_won_delivery_status: salesWonDeliveryStatus
   };
 }
 

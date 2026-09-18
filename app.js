@@ -78,6 +78,7 @@ const automationRouter = require('./routes/automation')
 const { requireAuth, withClientScope } = require('./src/middleware/auth')
 const { createRequireSalesRep } = require('./src/middleware/salesAuth')
 const { createSalesRouter } = require('./routes/sales')
+const { createInternalSalesIntegrationsRouter } = require('./routes/internalSalesIntegrations')
 const { createProfileRouter } = require('./routes/profile')
 const { createSupportVoiceGateway } = require('./src/lib/supportVoiceGateway')
 const { buildClientScopeContext, canViewLegalBillingForClient } = require('./src/lib/clientScope')
@@ -235,6 +236,11 @@ app.use('/webhook/sendgrid', express.json({
 app.use('/webhook', require('./routes/webhook'))
 
 app.use(express.json({ limit: '10mb' }))
+app.use('/internal/sales/integrations', createInternalSalesIntegrationsRouter({
+  db: supabaseAdmin,
+  env: process.env,
+  logger: console
+}))
 
 // ---------- CSP: allow Wix to embed (frame-ancestors) ----------
 app.use((req, res, next) => {

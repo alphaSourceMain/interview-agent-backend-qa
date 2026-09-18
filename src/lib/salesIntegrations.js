@@ -8,6 +8,15 @@ const SLACK_INTEGRATION = 'slack';
 const DEFAULT_BATCH_SIZE = 10;
 const MAX_RECONCILE_ROWS = 100;
 const RETRY_DELAYS_SECONDS = [60, 300, 900, 3600, 10800, 21600, 21600, 21600];
+const PERMANENT_SLACK_ERRORS = new Set([
+  'account_inactive',
+  'channel_not_found',
+  'invalid_auth',
+  'is_archived',
+  'not_authed',
+  'not_in_channel',
+  'token_revoked'
+]);
 
 function cleanText(value, max = 500) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -54,7 +63,7 @@ function toSlackDate(isoValue) {
 
 function buildSalesWonPayload(intent, rep = null) {
   const companyName = cleanText(intent?.company_dba || intent?.company_legal_name, 160) || 'New alphaScreen client';
-  const repName = cleanText(rep?.display_name || intent?.created_by_email, 120) || 'alphaSource sales team';
+  const repName = cleanText(rep?.display_name, 120) || 'alphaSource sales team';
   return {
     schema_version: 1,
     purchase_intent_id: cleanText(intent?.id, 80),
@@ -272,7 +281,7 @@ async function postSlackMessage(delivery, options = {}) {
     const error = new Error(cleanText(body.error, 160) || `slack_http_${response.status}`);
     error.code = cleanText(body.error, 160) || `slack_http_${response.status}`;
     error.retryAfterSeconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 0;
-    error.retryable = true;
+    error.retryable = !PERMANENT_SLACK_ERRORS.has(error.code);
     throw error;
   }
   return {

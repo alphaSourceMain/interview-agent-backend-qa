@@ -236,11 +236,6 @@ app.use('/webhook/sendgrid', express.json({
 app.use('/webhook', require('./routes/webhook'))
 
 app.use(express.json({ limit: '10mb' }))
-app.use('/internal/sales/integrations', createInternalSalesIntegrationsRouter({
-  db: supabaseAdmin,
-  env: process.env,
-  logger: console
-}))
 
 // ---------- CSP: allow Wix to embed (frame-ancestors) ----------
 app.use((req, res, next) => {
@@ -303,6 +298,12 @@ app.use((req, _res, next) => {
   } catch (_) {}
   next();
 });
+
+app.use('/internal/sales/integrations', createInternalSalesIntegrationsRouter({
+  db: supabaseAdmin,
+  env: process.env,
+  logger: console
+}))
 
 // ---------- auth middlewares ----------
 // NOTE: Auth + client scoping are centralized in src/middleware/auth

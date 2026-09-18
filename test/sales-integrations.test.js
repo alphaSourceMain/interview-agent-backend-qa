@@ -73,6 +73,16 @@ test('sales-won Slack message is concise, financial, and safe for an internal ch
   assert.doesNotMatch(serialized, /buyer_email|buyer_phone/i);
 });
 
+test('missing sales representative metadata does not fall back to an email address', () => {
+  const payload = buildSalesWonPayload({
+    id: DELIVERY_ID,
+    company_dba: 'Acme Dental',
+    created_by_email: 'rep@alphasourceai.com'
+  });
+  assert.equal(payload.sales_representative, 'alphaSource sales team');
+  assert.doesNotMatch(JSON.stringify(payload), /rep@alphasourceai\.com/);
+});
+
 test('Slack delivery uses a bot token, fixed channel ID, and stable client message ID', async () => {
   let captured = null;
   const result = await postSlackMessage({
@@ -123,6 +133,19 @@ test('Slack rate-limit response preserves retry timing without exposing credenti
   assert.equal(retryDelaySeconds(1, { retryAfterSeconds: 45 }), 45);
 });
 
+test('permanent Slack configuration errors fail without repeated retries', async () => {
+  await assert.rejects(
+    postSlackMessage({ id: DELIVERY_ID, payload: {} }, {
+      env: {
+        SLACK_SALES_WON_BOT_TOKEN: 'xoxb-test-token',
+        SLACK_SALES_WON_CHANNEL_ID: 'C123SALES'
+      },
+      fetchImpl: async () => fakeSlackResponse({ ok: false, error: 'invalid_auth' })
+    }),
+    (error) => error.code === 'invalid_auth' && error.retryable === false
+  );
+});
+
 test('internal worker requires its dedicated secret and returns processor summary', async () => {
   assert.equal(secretMatches('runner-secret', 'runner-secret'), true);
   assert.equal(secretMatches('wrong', 'runner-secret'), false);
@@ -151,5 +174,6 @@ test('sales integration migration provides a private idempotent SKIP LOCKED outb
   assert.match(sql, /for update skip locked/i);
   assert.match(sql, /alter table public\.sales_integration_deliveries enable row level security/i);
   assert.match(sql, /revoke all on table public\.sales_integration_deliveries from anon, authenticated/i);
+  assert.match(sql, /grant select, insert, update on table public\.sales_integration_deliveries to service_role/i);
   assert.match(sql, /grant execute on function public\.claim_sales_integration_deliveries[\s\S]*to service_role/i);
 });

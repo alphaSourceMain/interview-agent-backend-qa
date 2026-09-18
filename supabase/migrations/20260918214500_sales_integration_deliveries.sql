@@ -48,6 +48,7 @@ create index if not exists sales_integration_deliveries_intent_idx
 
 alter table public.sales_integration_deliveries enable row level security;
 revoke all on table public.sales_integration_deliveries from anon, authenticated;
+grant select, insert, update on table public.sales_integration_deliveries to service_role;
 
 create or replace function public.claim_sales_integration_deliveries(
   p_limit integer default 10,

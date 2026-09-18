@@ -304,6 +304,20 @@ async function markAgreementCheckoutPaid(agreementId, options = {}) {
   });
 }
 
+async function shouldApplyGenericSubscriptionUpdate(metadata, db = supabaseAdmin) {
+  const source = String(metadata?.source || '').trim().toLowerCase();
+  const agreementId = String(metadata?.agreement_id || '').trim();
+  if (source !== 'agreement_checkout' || !agreementId) return true;
+  const { data: intent, error } = await db
+    .from('public_purchase_intents')
+    .select('id,status,activated_at,canceled_at')
+    .eq('agreement_id', agreementId)
+    .maybeSingle();
+  if (error) throw new Error(error.message || 'Public purchase intent lookup failed');
+  if (!intent) return true;
+  return String(intent.status || '').trim().toLowerCase() === 'completed' && !!intent.activated_at && !intent.canceled_at;
+}
+
 router.post('/', async (req, res) => {
   const request_id = req.request_id || null;
   const sig = req.headers['stripe-signature'];
@@ -365,6 +379,10 @@ router.post('/', async (req, res) => {
       event.type === 'customer.subscription.deleted'
     ) {
       const customerId = pickId(eventObject?.customer);
+      const subscriptionMetadata = eventObject?.metadata && typeof eventObject.metadata === 'object'
+        ? eventObject.metadata
+        : {};
+      const allowGenericSubscriptionUpdate = await shouldApplyGenericSubscriptionUpdate(subscriptionMetadata);
       if (customerId) {
         const incomingSubscriptionId = pickId(eventObject?.id) || pickId(eventObject?.subscription) || null;
         const { data: client, error: clientErr } = await supabaseAdmin
@@ -373,7 +391,7 @@ router.post('/', async (req, res) => {
           .eq('stripe_customer_id', customerId)
           .maybeSingle();
         if (clientErr) throw new Error(clientErr.message || 'Client lookup failed');
-        if (client?.id && !shouldIgnoreStaleSubscriptionUpdate(client, incomingSubscriptionId, event.type)) {
+        if (client?.id && allowGenericSubscriptionUpdate && !shouldIgnoreStaleSubscriptionUpdate(client, incomingSubscriptionId, event.type)) {
           await requireParentClientForStripeBilling(client.id, {
             route: 'stripe_webhook_customer_subscription',
             event_type: event.type,
@@ -396,6 +414,12 @@ router.post('/', async (req, res) => {
               fallbackBillingInterval: updates?.billing_interval || null
             });
           }
+        } else if (client?.id && !allowGenericSubscriptionUpdate) {
+          console.warn('[stripe-webhook] agreement_subscription_update_deferred', {
+            agreement_id: String(subscriptionMetadata?.agreement_id || '').trim() || null,
+            client_id: client.id,
+            event_type: event.type
+          });
         }
       }
     } else if (event.type === 'checkout.session.completed') {
@@ -795,3 +819,4 @@ router.post('/', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.shouldApplyGenericSubscriptionUpdate = shouldApplyGenericSubscriptionUpdate;

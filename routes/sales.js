@@ -113,8 +113,12 @@ function promotionEligibilityError(promotionCode, pricing) {
   const coupon = promotionCode?.coupon || promotionCode?.promotion?.coupon || {}
   const minimumAmount = Number(restrictions.minimum_amount)
   const minimumCurrency = String(restrictions.minimum_amount_currency || '').trim().toLowerCase()
+  const couponCurrency = String(coupon?.currency || '').trim().toLowerCase()
   const subtotal = Number(pricing?.platform_fee_cents || 0) + Number(pricing?.first_role_prepay_cents || 0)
   if (restrictions.first_time_transaction === true) return 'This code requires customer history that cannot be verified before account creation.'
+  if (Number.isFinite(Number(coupon?.amount_off)) && Number(coupon.amount_off) > 0 && couponCurrency && couponCurrency !== 'usd') {
+    return 'This code is not available for USD alphaScreen purchases.'
+  }
   if (Number.isFinite(minimumAmount) && minimumAmount > 0) {
     if (minimumCurrency && minimumCurrency !== 'usd') return 'This code is not available for USD alphaScreen purchases.'
     if (subtotal < minimumAmount) return 'This purchase does not meet the code minimum.'
@@ -392,6 +396,14 @@ function createSalesRouter(options = {}) {
       if (preview.draft_fingerprint !== fingerprint(draft) || fingerprint(preview.normalized_draft) !== fingerprint(draft)) {
         throw makeSalesError(409, 'preview_mismatch', 'The agreement terms changed. Generate a new preview.')
       }
+      const currentPromotion = draft.promotion_code ? await validatePromotion(draft.promotion_code, draft) : null
+      const currentTerms = calculatePricing(draft, currentPromotion)
+      if (
+        fingerprint(currentTerms.package_snapshot) !== fingerprint(preview.package_snapshot) ||
+        fingerprint(currentTerms.pricing) !== fingerprint(preview.pricing_snapshot)
+      ) {
+        throw makeSalesError(409, 'preview_terms_changed', 'Pricing or promotion eligibility changed. Generate a new preview.')
+      }
 
       const { data: existingClient, error: clientError } = await db
         .from('clients')
@@ -534,12 +546,15 @@ function createSalesRouter(options = {}) {
         .single()
       if (finalizeError) throw makeSalesError(503, 'deal_finalize_failed', 'The agreement was sent but the deal status could not be finalized.')
       const sentAt = nowIso()
-      const { error: agreementFinalizeError } = await db
+      const { data: finalizedAgreement, error: agreementFinalizeError } = await db
         .from('membership_agreements')
         .update({ status: 'sent', sent_at: sentAt })
         .eq('id', agreementId)
         .eq('status', 'draft')
+        .select('id')
+        .maybeSingle()
       if (agreementFinalizeError) throw makeSalesError(503, 'agreement_finalize_failed', 'The agreement was created but could not be made available for signing.')
+      if (!finalizedAgreement) throw makeSalesError(409, 'agreement_state_changed', 'The agreement state changed before delivery. Review the deal before retrying.')
       const { error: previewConsumeError } = await db
         .from('sales_deal_previews')
         .update({ consumed_at: sentAt })
@@ -578,19 +593,25 @@ function createSalesRouter(options = {}) {
     } catch (error) {
       if (reserved && key) {
         const body = errorBody(error, req)
-        if (!dealReadyForRecovery && Number(error?.status || 500) >= 500) {
-          try {
-            if (createdAgreementId) await db.from('membership_agreements').delete().eq('id', createdAgreementId)
-            if (createdIntentId) {
-              await db.from('public_purchase_intents').delete().eq('id', createdIntentId).eq('created_by_user_id', req.salesRep.user_id)
+        if (!dealReadyForRecovery && (createdIntentId || Number(error?.status || 500) >= 500)) {
+          const cleanup = async (step, operation) => {
+            try { await operation() } catch (cleanupError) {
+              console.error('[sales/deals] incomplete_deal_cleanup_failed', {
+                step,
+                purchase_intent_id: createdIntentId || null,
+                agreement_id: createdAgreementId || null,
+                code: cleanupError?.code || null
+              })
             }
-            if (createdAgreementPdfPath) await db.storage.from(AGREEMENTS_BUCKET).remove([createdAgreementPdfPath])
-          } catch (cleanupError) {
-            console.error('[sales/deals] incomplete_deal_cleanup_failed', {
-              purchase_intent_id: createdIntentId || null,
-              agreement_id: createdAgreementId || null,
-              code: cleanupError?.code || null
-            })
+          }
+          if (createdIntentId) {
+            await cleanup('purchase_intent', () => db.from('public_purchase_intents').delete().eq('id', createdIntentId).eq('created_by_user_id', req.salesRep.user_id))
+          }
+          if (createdAgreementId) {
+            await cleanup('agreement', () => db.from('membership_agreements').delete().eq('id', createdAgreementId))
+          }
+          if (createdAgreementPdfPath) {
+            await cleanup('agreement_pdf', () => db.storage.from(AGREEMENTS_BUCKET).remove([createdAgreementPdfPath]))
           }
           await releaseIdempotency(req.salesRep.user_id, routeKey, key)
         } else {

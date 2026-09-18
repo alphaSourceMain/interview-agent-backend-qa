@@ -34,6 +34,12 @@ alter table public.public_purchase_intents
   add column if not exists activated_at timestamptz,
   add column if not exists canceled_at timestamptz;
 
+-- Sales-assisted agreements intentionally leave these dates unset until the
+-- successful payment timestamp establishes the membership term.
+alter table public.membership_agreements
+  alter column initial_term_start drop not null,
+  alter column initial_renewal_date drop not null;
+
 do $$
 begin
   if not exists (
@@ -87,7 +93,7 @@ create index if not exists sales_deal_previews_owner_created_idx
   on public.sales_deal_previews (created_by_user_id, created_at desc);
 
 alter table public.public_purchase_intents
-  add column if not exists sales_preview_id uuid references public.sales_deal_previews(id) on delete set null;
+  add column if not exists sales_preview_id uuid references public.sales_deal_previews(id) on delete restrict;
 
 create unique index if not exists public_purchase_intents_sales_preview_uidx
   on public.public_purchase_intents (sales_preview_id)

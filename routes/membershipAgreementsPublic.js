@@ -226,7 +226,9 @@ function isPublicPurchaseIntentAgreement(agreement) {
   const snapshot = agreement?.template_snapshot && typeof agreement.template_snapshot === 'object'
     ? agreement.template_snapshot
     : null;
-  return String(snapshot?.source || '').trim() === 'public_purchase_intent';
+  return ['public_purchase_intent', 'sales_assisted'].includes(
+    String(snapshot?.source || '').trim().toLowerCase()
+  );
 }
 
 function publicPurchaseIntentIdFromAgreement(agreement) {
@@ -389,7 +391,7 @@ async function loadPublicPurchaseIntentForAgreement(agreement) {
 
   const { data, error } = await supabaseAdmin
     .from('public_purchase_intents')
-    .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,expires_at,created_at')
+    .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,promotion_code_id,expires_at,created_at')
     .eq('id', purchaseIntentId)
     .maybeSingle();
   if (error) {
@@ -1160,6 +1162,7 @@ router.post('/checkout-session', publicAgreementTokenRateLimit, async (req, res)
       metadataSource: 'agreement_checkout',
       metadata: checkoutMetadata,
       firstRolePrepay,
+      promotionCodeId: purchaseIntent?.promotion_code_id || '',
       enterpriseFees,
       embedded: embeddedCheckoutRequested,
       cancelUrl,

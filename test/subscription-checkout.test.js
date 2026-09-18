@@ -243,3 +243,31 @@ test('subscription checkout fails selected first-role prepay when one-time Strip
     }
   }
 })
+
+test('subscription checkout applies a validated promotion code instead of allowing arbitrary entry', async () => {
+  const previous = {
+    STRIPE_PRICE_BASIC_MONTHLY: process.env.STRIPE_PRICE_BASIC_MONTHLY,
+    STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY
+  }
+  const stripeCalls = { sessions: [], customerUpdates: [], customerCreates: [], subscriptionLists: [] }
+  process.env.STRIPE_PRICE_BASIC_MONTHLY = 'price_basic_monthly'
+  process.env.STRIPE_SECRET_KEY = 'sk_test_fake'
+  try {
+    const { createSubscriptionCheckoutSession } = loadCheckout({ stripeCalls })
+    await createSubscriptionCheckoutSession({
+      clientId: 'client-1',
+      planTier: 'basic',
+      billingInterval: 'monthly',
+      promotionCodeId: 'promo_validated',
+      requestContext: { forwardedHost: 'api.qa.alphasourceai.com' }
+    })
+    const payload = stripeCalls.sessions[0].payload
+    assert.deepEqual(payload.discounts, [{ promotion_code: 'promo_validated' }])
+    assert.equal('allow_promotion_codes' in payload, false)
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})

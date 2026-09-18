@@ -29,6 +29,11 @@ function normalizeBillingOption(value) {
   return normalized === 'annual' ? 'annual' : 'monthly';
 }
 
+function normalizeTermStartBasis(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  return normalized === 'successful_payment' ? 'successful_payment' : 'agreement_date';
+}
+
 function normalizeAutoRenew(value) {
   if (typeof value === 'boolean') return value;
   const normalized = normalizeText(value).toLowerCase();
@@ -222,6 +227,7 @@ function normalizeMembershipAgreementInput(input = {}) {
     first_role_prepay: normalizeFirstRolePrepayInput(input.first_role_prepay || input.firstRolePrepay),
     initial_term_start: normalizeDateInput(input.initial_term_start || input.initialTermStart),
     initial_renewal_date: normalizeDateInput(input.initial_renewal_date || input.initialRenewalDate),
+    term_start_basis: normalizeTermStartBasis(input.term_start_basis || input.termStartBasis),
     billing_option: normalizeBillingOption(input.billing_option || input.billingOption),
     auto_renew: normalizeAutoRenew(input.auto_renew ?? input.autoRenew),
     notice_deadline_days: normalizeNoticeDays(input.notice_deadline_days || input.noticeDeadlineDays)
@@ -282,6 +288,7 @@ function buildMembershipAgreementHtml(payload = {}, options = {}) {
     first_role_prepay_discount_percent: normalized.first_role_prepay.discount_percent || '10',
     initial_term_start_display: formatDateShort(normalized.initial_term_start),
     initial_renewal_date_display: formatDateShort(normalized.initial_renewal_date),
+    term_starts_on_payment: normalized.term_start_basis === 'successful_payment',
     billing_option: normalized.billing_option === 'annual' ? 'Annual' : 'Monthly',
     auto_renew: normalized.auto_renew ? 'Yes' : 'No',
     notice_deadline_days: `${normalized.notice_deadline_days} Days`,

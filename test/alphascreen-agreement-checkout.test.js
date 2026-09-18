@@ -207,7 +207,7 @@ function agreement(overrides = {}) {
     auto_renew: true,
     notice_deadline_days: 30,
     template_snapshot: {
-      source: 'public_purchase_intent',
+      source: overrides.source || 'public_purchase_intent',
       purchase_intent: { id: INTENT_ID },
       package_snapshot: snapshot,
       values
@@ -444,6 +444,19 @@ test('signed public purchase checkout passes first-role prepay line item metadat
   assert.equal(call.metadata.first_role_prepay_discount_percent, 10)
   assert.equal(call.metadata.public_purchase_intent_id, INTENT_ID)
   assert.equal(call.metadata.membership_agreement_id, AGREEMENT_ID)
+})
+
+test('signed sales-assisted agreement uses the public purchase checkout path', async () => {
+  const db = makeDb({
+    membershipAgreements: [agreement({ source: 'sales_assisted' })],
+    purchaseIntents: [intent()]
+  })
+  const response = await postCheckout(buildApp(db))
+
+  assert.equal(response.status, 200)
+  assert.equal(db.checkoutCalls.length, 1)
+  assert.equal(db.checkoutCalls[0].metadata.purchase_intent_id, INTENT_ID)
+  assert.equal(db.checkoutCalls[0].planTier, 'basic')
 })
 
 test('unsigned public agreement cannot start checkout and creates no access records', async () => {

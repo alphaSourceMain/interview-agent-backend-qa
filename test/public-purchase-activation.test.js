@@ -163,7 +163,7 @@ function makeAgreement(plan = 'basic', cadence = 'monthly', options = {}) {
     billing_option: cadence,
     auto_renew: true,
     template_snapshot: {
-      source: 'public_purchase_intent',
+      source: options.source || 'public_purchase_intent',
       purchase_intent: { id: INTENT_ID },
       package_snapshot: packageSnapshot
     }
@@ -192,7 +192,8 @@ function makeIntent(plan = 'basic', cadence = 'monthly', options = {}) {
     buyer_email: BUYER_EMAIL,
     agreement_id: AGREEMENT_ID,
     stripe_checkout_session_id: 'cs_test_public',
-    client_id: CLIENT_ID
+    client_id: CLIENT_ID,
+    term_start_basis: options.termStartBasis || 'agreement_date'
   }
 }
 
@@ -370,6 +371,18 @@ test('public purchase webhook activation provisions Essential and Pro monthly/an
     })
     assert.doesNotMatch(JSON.stringify(result), /recovery-token|setup\.example/)
   }
+})
+
+test('sales-assisted activation starts the membership on successful payment', async () => {
+  const db = makeDb('basic', 'monthly', {
+    source: 'sales_assisted',
+    termStartBasis: 'successful_payment'
+  })
+  const { result } = await activateCase('basic', 'monthly', { db })
+  assert.equal(result.ok, true)
+  assert.equal(db.membershipAgreements[0].initial_term_start, '2026-06-23')
+  assert.equal(db.membershipAgreements[0].initial_renewal_date, '2027-06-23')
+  assert.equal(db.purchaseIntents[0].activated_at, '2026-06-23T12:00:00.000Z')
 })
 
 test('public purchase activation creates first-role prepay credit once when selected', async () => {

@@ -76,6 +76,8 @@ const rolesRouter = require('./routes/roles')
 const { createRoleJdReplacementRouter } = require('./routes/roleJdReplacement')
 const automationRouter = require('./routes/automation')
 const { requireAuth, withClientScope } = require('./src/middleware/auth')
+const { createRequireSalesRep } = require('./src/middleware/salesAuth')
+const { createSalesRouter } = require('./routes/sales')
 const { createProfileRouter } = require('./routes/profile')
 const { createSupportVoiceGateway } = require('./src/lib/supportVoiceGateway')
 const { buildClientScopeContext, canViewLegalBillingForClient } = require('./src/lib/clientScope')
@@ -216,7 +218,8 @@ app.use(cors({
     'x-client-info',
     'Prefer',
     'Range',
-    'Accept'
+    'Accept',
+    'Idempotency-Key'
   ],
   exposedHeaders: ['Content-Range', 'Range-Unit']
 }))
@@ -273,7 +276,8 @@ app.use((req, res, next) => {
       pathName.startsWith('/roles') ||
       pathName.startsWith('/reports') ||
       pathName.startsWith('/files') ||
-      pathName.startsWith('/membership-agreements')
+      pathName.startsWith('/membership-agreements') ||
+      pathName.startsWith('/sales')
     ) {
       res.setHeader('Cache-Control', 'private, no-store');
     }
@@ -1475,6 +1479,7 @@ app.use('/api/feedback', require('./routes/feedback'))
 app.use('/api/alphascreen', require('./routes/alphaScreenPackages'))
 app.use('/api/public-analytics', require('./routes/publicAnalytics'))
 app.use('/api/public-leads', require('./routes/publicLeads'))
+app.use('/sales', requireAuth, createRequireSalesRep(), createSalesRouter())
 
 // ---------- Dashboard: scoped rows ----------
 async function buildDashboardRows(req, res) {

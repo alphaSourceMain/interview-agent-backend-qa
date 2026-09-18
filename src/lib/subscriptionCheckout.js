@@ -157,6 +157,7 @@ async function createSubscriptionCheckoutSession({
   metadataSource = 'admin_subscription_checkout',
   metadata = {},
   firstRolePrepay = null,
+  promotionCodeId = '',
   enterpriseFees = null,
   requestContext = null,
   idempotencyKey = ''
@@ -168,6 +169,7 @@ async function createSubscriptionCheckoutSession({
   const normalizedReturnTab = String(returnTab || '').trim().toLowerCase()
   const embeddedCheckoutRequested = wantsEmbeddedCheckout(embedded)
   const normalizedIdempotencyKey = normalizeIdempotencyKey(idempotencyKey)
+  const normalizedPromotionCodeId = String(promotionCodeId || '').trim().slice(0, 255)
   const firstRolePrepayCheckout = normalizeFirstRolePrepayCheckout(firstRolePrepay)
 
   if (!normalizedClientId) throw makeError(400, 'client_id_required', 'Client id is required.')
@@ -357,7 +359,9 @@ async function createSubscriptionCheckoutSession({
     mode: 'subscription',
     customer: resolvedStripeCustomerId,
     line_items: lineItems,
-    allow_promotion_codes: true,
+    ...(normalizedPromotionCodeId
+      ? { discounts: [{ promotion_code: normalizedPromotionCodeId }] }
+      : { allow_promotion_codes: true }),
     metadata: checkoutMetadata,
     subscription_data: {
       metadata: checkoutMetadata

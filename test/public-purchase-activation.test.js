@@ -33,7 +33,11 @@ const CLIENT_ID = '44444444-4444-4444-8444-444444444444'
 const BUYER_EMAIL = 'alex@acmedental.example'
 
 function matchesFilters(row, filters) {
-  return filters.every(({ column, value }) => String(row?.[column] ?? '') === String(value ?? ''))
+  return filters.every(({ column, value, op = 'eq' }) => {
+    if (op === 'is') return value === null ? row?.[column] == null : row?.[column] === value
+    if (op === 'neq') return String(row?.[column] ?? '') !== String(value ?? '')
+    return String(row?.[column] ?? '') === String(value ?? '')
+  })
 }
 
 class FakeQuery {
@@ -52,7 +56,17 @@ class FakeQuery {
   }
 
   eq(column, value) {
-    this.filters.push({ column, value })
+    this.filters.push({ column, value, op: 'eq' })
+    return this
+  }
+
+  neq(column, value) {
+    this.filters.push({ column, value, op: 'neq' })
+    return this
+  }
+
+  is(column, value) {
+    this.filters.push({ column, value, op: 'is' })
     return this
   }
 
@@ -84,7 +98,12 @@ class FakeQuery {
   }
 
   async maybeSingle() {
-    const row = this.rows().find((item) => matchesFilters(item, this.filters)) || null
+    const rows = this.rows().filter((item) => matchesFilters(item, this.filters))
+    const row = rows[0] || null
+    if (row && this.updatePayload) {
+      for (const item of rows) Object.assign(item, this.updatePayload)
+      this.db.updates.push({ table: this.table, rows, payload: this.updatePayload })
+    }
     return { data: row, error: null }
   }
 

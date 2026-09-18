@@ -14,7 +14,10 @@ require.cache[supabaseClientPath] = {
 }
 
 const { promotionEligibilityError } = require('../routes/sales')
-const { shouldApplyGenericSubscriptionUpdate } = require('../routes/webhookStripe')
+const {
+  shouldApplyGenericSubscriptionUpdate,
+  claimAgreementPurchaseActivation
+} = require('../routes/webhookStripe')
 
 test('sales promotion validation rejects restrictions that cannot be honored before checkout', () => {
   const pricing = { platform_fee_cents: 29900, first_role_prepay_cents: 0 }
@@ -44,6 +47,83 @@ test('sales migration prevents preview reuse and concurrent active buyer duplica
   assert.match(sql, /create unique index if not exists public_purchase_intents_active_sales_buyer_uidx[\s\S]*lower\(buyer_email\)[\s\S]*channel = 'sales_assisted'/i)
   assert.match(sql, /alter column initial_term_start drop not null[\s\S]*alter column initial_renewal_date drop not null/i)
   assert.match(sql, /sales_preview_id uuid references public\.sales_deal_previews\(id\) on delete restrict/i)
+  assert.match(sql, /add column if not exists activation_claimed_at timestamptz/i)
+  assert.match(sql, /add column if not exists activation_claim_key text/i)
+})
+
+function activationClaimDb(intent, options = {}) {
+  const state = { intent: intent ? { ...intent } : null }
+  return {
+    state,
+    from() {
+      const query = {
+        action: 'select',
+        payload: null,
+        filters: [],
+        select() { return this },
+        update(payload) { this.action = 'update'; this.payload = payload; return this },
+        eq(column, value) { this.filters.push({ op: 'eq', column, value }); return this },
+        neq(column, value) { this.filters.push({ op: 'neq', column, value }); return this },
+        is(column, value) { this.filters.push({ op: 'is', column, value }); return this },
+        async maybeSingle() {
+          const matches = state.intent && this.filters.every(({ op, column, value }) => {
+            if (op === 'is') return value === null ? state.intent[column] == null : state.intent[column] === value
+            if (op === 'neq') return String(state.intent[column] ?? '') !== String(value ?? '')
+            return String(state.intent[column] ?? '') === String(value ?? '')
+          })
+          if (this.action === 'update' && options.beforeClaim) options.beforeClaim(state)
+          const stillMatches = state.intent && this.filters.every(({ op, column, value }) => {
+            if (op === 'is') return value === null ? state.intent[column] == null : state.intent[column] === value
+            if (op === 'neq') return String(state.intent[column] ?? '') !== String(value ?? '')
+            return String(state.intent[column] ?? '') === String(value ?? '')
+          })
+          if (!matches || !stillMatches) return { data: null, error: null }
+          if (this.action === 'update') Object.assign(state.intent, this.payload)
+          return { data: state.intent ? { ...state.intent } : null, error: null }
+        }
+      }
+      return query
+    }
+  }
+}
+
+test('payment activation atomically claims an open sales intent', async () => {
+  const db = activationClaimDb({
+    id: 'intent-1',
+    agreement_id: 'agreement-1',
+    status: 'checkout_pending',
+    activated_at: null,
+    canceled_at: null,
+    activation_claimed_at: null,
+    activation_claim_key: null
+  })
+  const claim = await claimAgreementPurchaseActivation('agreement-1', 'cs_1', db)
+  assert.deepEqual(claim, { proceed: true, claimed: true, intentId: 'intent-1', key: 'cs_1' })
+  assert.equal(db.state.intent.activation_claim_key, 'cs_1')
+  assert.ok(db.state.intent.activation_claimed_at)
+})
+
+test('payment activation loses to a concurrent cancellation without reactivating it', async () => {
+  const db = activationClaimDb({
+    id: 'intent-2',
+    agreement_id: 'agreement-2',
+    status: 'checkout_pending',
+    activated_at: null,
+    canceled_at: null,
+    activation_claimed_at: null,
+    activation_claim_key: null
+  }, {
+    beforeClaim(state) {
+      state.intent.status = 'canceled'
+      state.intent.canceled_at = '2026-09-18T21:00:00.000Z'
+    }
+  })
+  const claim = await claimAgreementPurchaseActivation('agreement-2', 'cs_2', db)
+  assert.deepEqual(claim, {
+    proceed: false,
+    result: { ok: false, status: 'purchase_canceled', purchase_intent_id: 'intent-2' }
+  })
+  assert.equal(db.state.intent.activation_claimed_at, null)
 })
 
 test('agreement checkout webhooks do not fall through to generic client activation', () => {

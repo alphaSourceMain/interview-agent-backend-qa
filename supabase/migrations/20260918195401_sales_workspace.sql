@@ -32,7 +32,9 @@ alter table public.public_purchase_intents
   add column if not exists initial_payment_cents bigint,
   add column if not exists term_start_basis text not null default 'agreement_date',
   add column if not exists activated_at timestamptz,
-  add column if not exists canceled_at timestamptz;
+  add column if not exists canceled_at timestamptz,
+  add column if not exists activation_claimed_at timestamptz,
+  add column if not exists activation_claim_key text;
 
 -- Sales-assisted agreements intentionally leave these dates unset until the
 -- successful payment timestamp establishes the membership term.

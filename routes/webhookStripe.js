@@ -290,17 +290,102 @@ function shouldIgnoreStaleSubscriptionUpdate(client, incomingSubscriptionId, eve
 async function markAgreementCheckoutPaid(agreementId, options = {}) {
   const normalizedAgreementId = String(agreementId || '').trim();
   if (!normalizedAgreementId) return;
-  return activatePublicPurchaseAgreementCheckout({
-    agreementId: normalizedAgreementId,
-    checkoutSessionId: options.checkoutSessionId || null,
-    paidAt: options.paidAt || null,
-    subscription: options.subscription || null,
-    fallbackCustomerId: options.fallbackCustomerId || null,
-    fallbackSubscriptionId: options.fallbackSubscriptionId || null,
-    fallbackClientId: options.fallbackClientId || null,
-    fallbackPlanTier: options.fallbackPlanTier || null,
-    fallbackBillingInterval: options.fallbackBillingInterval || null,
-    requestId: options.requestId || null
+  const db = options.db || supabaseAdmin;
+  const claim = await claimAgreementPurchaseActivation(
+    normalizedAgreementId,
+    options.checkoutSessionId || null,
+    db
+  );
+  if (!claim.proceed) return claim.result;
+  try {
+    return await activatePublicPurchaseAgreementCheckout({
+      agreementId: normalizedAgreementId,
+      checkoutSessionId: options.checkoutSessionId || null,
+      paidAt: options.paidAt || null,
+      subscription: options.subscription || null,
+      fallbackCustomerId: options.fallbackCustomerId || null,
+      fallbackSubscriptionId: options.fallbackSubscriptionId || null,
+      fallbackClientId: options.fallbackClientId || null,
+      fallbackPlanTier: options.fallbackPlanTier || null,
+      fallbackBillingInterval: options.fallbackBillingInterval || null,
+      requestId: options.requestId || null,
+      db
+    });
+  } catch (error) {
+    if (claim.claimed) {
+      await releaseAgreementPurchaseActivationClaim(claim.intentId, claim.key, db);
+    }
+    throw error;
+  }
+}
+
+async function claimAgreementPurchaseActivation(agreementId, checkoutSessionId, db = supabaseAdmin) {
+  const normalizedAgreementId = String(agreementId || '').trim();
+  if (!normalizedAgreementId) return { proceed: false, result: { ok: false, status: 'agreement_missing' } };
+  const { data: intent, error: lookupError } = await db
+    .from('public_purchase_intents')
+    .select('id,status,activated_at,canceled_at,activation_claimed_at,activation_claim_key')
+    .eq('agreement_id', normalizedAgreementId)
+    .maybeSingle();
+  if (lookupError) throw new Error(lookupError.message || 'Public purchase intent lookup failed');
+  if (!intent) return { proceed: true, claimed: false };
+
+  const status = String(intent.status || '').trim().toLowerCase();
+  if (status === 'canceled' || intent.canceled_at) {
+    return {
+      proceed: false,
+      result: { ok: false, status: 'purchase_canceled', purchase_intent_id: intent.id }
+    };
+  }
+  if (status === 'completed' && intent.activated_at) return { proceed: true, claimed: false };
+
+  const key = String(checkoutSessionId || '').trim() || `agreement:${normalizedAgreementId}`;
+  const claimedAt = new Date().toISOString();
+  const { data: claimedIntent, error: claimError } = await db
+    .from('public_purchase_intents')
+    .update({ activation_claimed_at: claimedAt, activation_claim_key: key, updated_at: claimedAt })
+    .eq('id', intent.id)
+    .neq('status', 'canceled')
+    .is('canceled_at', null)
+    .is('activation_claimed_at', null)
+    .select('id')
+    .maybeSingle();
+  if (claimError) throw new Error(claimError.message || 'Purchase activation claim failed');
+  if (claimedIntent) {
+    return { proceed: true, claimed: true, intentId: intent.id, key };
+  }
+
+  const { data: latest, error: latestError } = await db
+    .from('public_purchase_intents')
+    .select('id,status,activated_at,canceled_at,activation_claimed_at,activation_claim_key')
+    .eq('id', intent.id)
+    .maybeSingle();
+  if (latestError) throw new Error(latestError.message || 'Purchase activation state lookup failed');
+  const latestStatus = String(latest?.status || '').trim().toLowerCase();
+  if (latestStatus === 'completed' && latest?.activated_at) return { proceed: true, claimed: false };
+  if (latestStatus === 'canceled' || latest?.canceled_at) {
+    return {
+      proceed: false,
+      result: { ok: false, status: 'purchase_canceled', purchase_intent_id: intent.id }
+    };
+  }
+  return {
+    proceed: false,
+    result: { ok: false, status: 'activation_in_progress', purchase_intent_id: intent.id }
+  };
+}
+
+async function releaseAgreementPurchaseActivationClaim(intentId, claimKey, db = supabaseAdmin) {
+  if (!intentId || !claimKey) return;
+  const { error } = await db
+    .from('public_purchase_intents')
+    .update({ activation_claimed_at: null, activation_claim_key: null, updated_at: new Date().toISOString() })
+    .eq('id', intentId)
+    .eq('activation_claim_key', claimKey)
+    .neq('status', 'completed');
+  if (error) console.error('stripe_webhook_activation_claim_release_failed', {
+    purchase_intent_id: intentId,
+    error: error.message || String(error)
   });
 }
 
@@ -820,3 +905,5 @@ router.post('/', async (req, res) => {
 
 module.exports = router;
 module.exports.shouldApplyGenericSubscriptionUpdate = shouldApplyGenericSubscriptionUpdate;
+module.exports.claimAgreementPurchaseActivation = claimAgreementPurchaseActivation;
+module.exports.releaseAgreementPurchaseActivationClaim = releaseAgreementPurchaseActivationClaim;

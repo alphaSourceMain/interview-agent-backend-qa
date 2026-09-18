@@ -44,6 +44,7 @@ const INTENT_COLUMNS = [
   'promotion_code_id', 'promotion_code', 'promotion_label', 'promotion_amount_off_cents',
   'promotion_percent_off', 'promotion_discount_cents', 'platform_fee_cents',
   'initial_payment_cents', 'term_start_basis', 'activated_at', 'canceled_at',
+  'activation_claimed_at', 'activation_claim_key',
   'sales_preview_id'
 ].join(',')
 const AGREEMENT_COLUMNS = [
@@ -771,6 +772,7 @@ function createSalesRouter(options = {}) {
         .eq('created_by_user_id', req.salesRep.user_id)
         .neq('status', 'completed')
         .is('activated_at', null)
+        .is('activation_claimed_at', null)
         .select(INTENT_COLUMNS)
         .maybeSingle()
       if (error) throw makeSalesError(503, 'deal_cancel_failed', 'The unpaid transaction could not be canceled.')

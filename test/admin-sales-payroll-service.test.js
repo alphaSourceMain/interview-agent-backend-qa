@@ -94,6 +94,16 @@ test('sales payroll route is mounted behind both authentication and admin author
   assert.match(appSource, /adminRouter\.use\('\/sales-payroll', requireAuth, requireAdmin, createAdminSalesPayrollRouter\(\{ db: supabaseAdmin \}\)\)/);
 });
 
+test('sales payroll migrations keep browser roles denied and grant only required service-role operations', () => {
+  const foundation = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20260918233000_sales_commission_adjustments.sql'), 'utf8');
+  const grant = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20260919011500_sales_commission_adjustments_service_grant.sql'), 'utf8');
+  assert.match(foundation, /alter table public\.sales_commission_adjustments enable row level security/i);
+  assert.match(foundation, /revoke all on table public\.sales_commission_adjustments from anon, authenticated/i);
+  assert.match(foundation, /'sales-payroll-documents'[\s\S]*false/i);
+  assert.match(grant, /grant select, insert on table public\.sales_commission_adjustments to service_role/i);
+  assert.doesNotMatch(grant, /\b(update|delete|truncate)\b/i);
+});
+
 test('commission calculation annualizes monthly platform fee and discount and excludes other fees', () => {
   assert.deepEqual(calculateSaleCommission({
     selected_billing_cadence: 'monthly',

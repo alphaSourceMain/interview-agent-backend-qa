@@ -183,6 +183,28 @@ test('Slack DM capability errors are permanent and never fall back to the sales 
   assert.equal(capturedChannel, 'U123456789');
 });
 
+test('Slack worker rejects an invalid stored member ID before making a network request', async () => {
+  let called = false;
+  await assert.rejects(
+    postSlackMessage({ id: DELIVERY_ID, event_type: 'sales_won_rep_dm', payload: { slack_user_id: 'rep@example.com' } }, {
+      env: { SLACK_SALES_WON_BOT_TOKEN: 'xoxb-test-token', SLACK_SALES_WON_CHANNEL_ID: 'C123SALES' },
+      fetchImpl: async () => {
+        called = true;
+        return fakeSlackResponse({ ok: true });
+      }
+    }),
+    (error) => error.code === 'invalid_slack_user_id' && error.retryable === false
+  );
+  assert.equal(called, false);
+});
+
+test('sales-won reconciliation separates team posts from mapped representative DMs', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'salesIntegrations.js'), 'utf8');
+  assert.match(source, /\.is\('sales_won_enqueued_at', null\)/);
+  assert.match(source, /\.is\('sales_rep_slack_enqueued_at', null\)[\s\S]*\.in\('created_by_user_id', mappedUserIds\)/);
+  assert.doesNotMatch(source, /\.or\('sales_won_enqueued_at\.is\.null,sales_rep_slack_enqueued_at\.is\.null'\)/);
+});
+
 test('internal worker requires its dedicated secret and returns processor summary', async () => {
   assert.equal(secretMatches('runner-secret', 'runner-secret'), true);
   assert.equal(secretMatches('wrong', 'runner-secret'), false);

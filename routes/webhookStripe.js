@@ -298,7 +298,8 @@ async function markAgreementCheckoutPaid(agreementId, options = {}) {
   );
   if (!claim.proceed) return claim.result;
   try {
-    return await activatePublicPurchaseAgreementCheckout({
+    const activate = options.activate || activatePublicPurchaseAgreementCheckout;
+    const result = await activate({
       agreementId: normalizedAgreementId,
       checkoutSessionId: options.checkoutSessionId || null,
       paidAt: options.paidAt || null,
@@ -311,6 +312,10 @@ async function markAgreementCheckoutPaid(agreementId, options = {}) {
       requestId: options.requestId || null,
       db
     });
+    if (claim.claimed && result?.ok !== true) {
+      await releaseAgreementPurchaseActivationClaim(claim.intentId, claim.key, db);
+    }
+    return result;
   } catch (error) {
     if (claim.claimed) {
       await releaseAgreementPurchaseActivationClaim(claim.intentId, claim.key, db);
@@ -345,6 +350,7 @@ async function claimAgreementPurchaseActivation(agreementId, checkoutSessionId, 
     .from('public_purchase_intents')
     .update({ activation_claimed_at: claimedAt, activation_claim_key: key, updated_at: claimedAt })
     .eq('id', intent.id)
+    .eq('agreement_id', normalizedAgreementId)
     .neq('status', 'canceled')
     .is('canceled_at', null)
     .is('activation_claimed_at', null)
@@ -357,7 +363,7 @@ async function claimAgreementPurchaseActivation(agreementId, checkoutSessionId, 
 
   const { data: latest, error: latestError } = await db
     .from('public_purchase_intents')
-    .select('id,status,activated_at,canceled_at,activation_claimed_at,activation_claim_key')
+    .select('id,agreement_id,status,activated_at,canceled_at,activation_claimed_at,activation_claim_key')
     .eq('id', intent.id)
     .maybeSingle();
   if (latestError) throw new Error(latestError.message || 'Purchase activation state lookup failed');
@@ -367,6 +373,12 @@ async function claimAgreementPurchaseActivation(agreementId, checkoutSessionId, 
     return {
       proceed: false,
       result: { ok: false, status: 'purchase_canceled', purchase_intent_id: intent.id }
+    };
+  }
+  if (latest?.agreement_id && String(latest.agreement_id).trim() !== normalizedAgreementId) {
+    return {
+      proceed: false,
+      result: { ok: false, status: 'agreement_superseded', purchase_intent_id: intent.id }
     };
   }
   return {
@@ -382,7 +394,9 @@ async function releaseAgreementPurchaseActivationClaim(intentId, claimKey, db = 
     .update({ activation_claimed_at: null, activation_claim_key: null, updated_at: new Date().toISOString() })
     .eq('id', intentId)
     .eq('activation_claim_key', claimKey)
-    .neq('status', 'completed');
+    .neq('status', 'completed')
+    .select('id')
+    .maybeSingle();
   if (error) console.error('stripe_webhook_activation_claim_release_failed', {
     purchase_intent_id: intentId,
     error: error.message || String(error)
@@ -905,5 +919,6 @@ router.post('/', async (req, res) => {
 
 module.exports = router;
 module.exports.shouldApplyGenericSubscriptionUpdate = shouldApplyGenericSubscriptionUpdate;
+module.exports.markAgreementCheckoutPaid = markAgreementCheckoutPaid;
 module.exports.claimAgreementPurchaseActivation = claimAgreementPurchaseActivation;
 module.exports.releaseAgreementPurchaseActivationClaim = releaseAgreementPurchaseActivationClaim;

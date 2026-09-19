@@ -30,6 +30,7 @@ const AGREEMENTS_BUCKET = process.env.SUPABASE_AGREEMENTS_BUCKET || 'agreements'
 const MEMBERSHIP_INTERNAL_NOTIFY_EMAIL = 'memberships@alphasourceai.com';
 const SIGNED_URL_TTL_SECONDS = Math.max(60, Number(process.env.SIGNED_URL_TTL_SECONDS || 600));
 const EMAIL_SIGNED_URL_TTL_SECONDS = Math.max(300, Number(process.env.AGREEMENT_SIGNED_EMAIL_LINK_TTL_SECONDS || 604800));
+const SALES_AGREEMENT_TIME_ZONE = 'America/Denver';
 const PUBLIC_TOKEN_RATE_WINDOW_MS = 10 * 60 * 1000;
 const PUBLIC_TOKEN_RATE_MAX = Number(process.env.MEMBERSHIP_AGREEMENT_PUBLIC_TOKEN_RATE_MAX || 60);
 const publicAgreementTokenRateBuckets = new Map();
@@ -571,6 +572,21 @@ function buildAgreementInputFromRow(row) {
   });
 }
 
+function buildExecutedMembershipAgreementHtml(agreement, execution) {
+  const normalizedInput = buildAgreementInputFromRow(agreement);
+  const generatedAt = String(agreement?.template_snapshot?.generated_at || agreement?.created_at || '').trim();
+  const agreementInput = {
+    ...normalizedInput,
+    agreement_expires_at: agreement?.agreement_expires_at || normalizedInput.agreement_expires_at
+  };
+  return buildMembershipAgreementHtml(agreementInput, {
+    showPackageTerms: isPublicPurchaseIntentAgreement(agreement),
+    timeZone: SALES_AGREEMENT_TIME_ZONE,
+    ...(generatedAt ? { generatedAt } : {}),
+    execution
+  });
+}
+
 async function createAgreementSignedUrl(path, expiresInSeconds) {
   const key = String(path || '').trim();
   if (!key) return null;
@@ -839,15 +855,11 @@ router.post('/sign', publicAgreementTokenRateLimit, async (req, res) => {
       });
     }
 
-    const agreementInput = buildAgreementInputFromRow(agreement);
-    const { html } = buildMembershipAgreementHtml(agreementInput, {
-      showPackageTerms: isPublicPurchaseIntentAgreement(agreement),
-      execution: {
-        accepted: true,
-        signer_typed_name: typedName,
-        signature_image_src: signaturePayload.dataUrl,
-        signed_at: signedAt
-      }
+    const { html } = buildExecutedMembershipAgreementHtml(agreement, {
+      accepted: true,
+      signer_typed_name: typedName,
+      signature_image_src: signaturePayload.dataUrl,
+      signed_at: signedAt
     });
 
     const executedPdf = await htmlToPdf(html, {
@@ -1418,3 +1430,4 @@ router.get('/latest-signed-url', requireAuth, withClientScope, async (req, res) 
 });
 
 module.exports = router;
+module.exports.buildExecutedMembershipAgreementHtml = buildExecutedMembershipAgreementHtml;

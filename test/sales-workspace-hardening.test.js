@@ -16,8 +16,10 @@ require.cache[supabaseClientPath] = {
 const { promotionEligibilityError, replacementCheckoutDisposition } = require('../routes/sales')
 const {
   shouldApplyGenericSubscriptionUpdate,
-  claimAgreementPurchaseActivation
+  claimAgreementPurchaseActivation,
+  markAgreementCheckoutPaid
 } = require('../routes/webhookStripe')
+const { buildExecutedMembershipAgreementHtml } = require('../routes/membershipAgreementsPublic')
 
 test('sales promotion validation rejects restrictions that cannot be honored before checkout', () => {
   const pricing = { platform_fee_cents: 29900, first_role_prepay_cents: 0 }
@@ -136,6 +138,71 @@ test('payment activation loses to a concurrent cancellation without reactivating
     result: { ok: false, status: 'purchase_canceled', purchase_intent_id: 'intent-2' }
   })
   assert.equal(db.state.intent.activation_claimed_at, null)
+})
+
+test('payment activation loses safely when agreement replacement moves the intent during the claim', async () => {
+  const db = activationClaimDb({
+    id: 'intent-3',
+    agreement_id: 'agreement-old',
+    status: 'checkout_pending',
+    activated_at: null,
+    canceled_at: null,
+    activation_claimed_at: null,
+    activation_claim_key: null
+  }, {
+    beforeClaim(state) {
+      state.intent.agreement_id = 'agreement-new'
+    }
+  })
+  const claim = await claimAgreementPurchaseActivation('agreement-old', 'cs_old', db)
+  assert.deepEqual(claim, {
+    proceed: false,
+    result: { ok: false, status: 'agreement_superseded', purchase_intent_id: 'intent-3' }
+  })
+  assert.equal(db.state.intent.activation_claimed_at, null)
+})
+
+test('non-ok activation releases its exact purchase claim for a legitimate retry', async () => {
+  const db = activationClaimDb({
+    id: 'intent-4',
+    agreement_id: 'agreement-4',
+    status: 'checkout_pending',
+    activated_at: null,
+    canceled_at: null,
+    activation_claimed_at: null,
+    activation_claim_key: null
+  })
+  const result = await markAgreementCheckoutPaid('agreement-4', {
+    checkoutSessionId: 'cs_4',
+    db,
+    activate: async () => ({ ok: false, status: 'agreement_superseded' })
+  })
+  assert.deepEqual(result, { ok: false, status: 'agreement_superseded' })
+  assert.equal(db.state.intent.activation_claimed_at, null)
+  assert.equal(db.state.intent.activation_claim_key, null)
+})
+
+test('signed agreement render uses the stored deadline in Denver regardless of host timezone', () => {
+  const { html } = buildExecutedMembershipAgreementHtml({
+    client_legal_name: 'Acme Dental Group',
+    primary_admin_name: 'Alex Rivera',
+    admin_email: 'alex@example.com',
+    membership_tier: 'basic',
+    initial_term_start: '2026-09-19',
+    initial_renewal_date: '2027-09-19',
+    agreement_expires_at: '2026-09-20T06:00:00.000Z',
+    billing_option: 'annual',
+    auto_renew: true,
+    notice_deadline_days: 30,
+    template_snapshot: { source: 'sales_assisted' }
+  }, {
+    accepted: true,
+    signer_typed_name: 'Alex Rivera',
+    signed_at: '2026-09-19T20:00:00.000Z'
+  })
+  assert.match(html, /Signature and initial payment deadline/)
+  assert.match(html, /September 19, 2026 at 11:59 PM MDT/)
+  assert.doesNotMatch(html, /September 20, 2026 at 6:59 AM/)
 })
 
 test('agreement checkout webhooks do not fall through to generic client activation', () => {

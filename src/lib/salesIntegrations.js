@@ -110,10 +110,14 @@ function slackConfiguration(env = process.env) {
   };
 }
 
+function validSlackUserId(value) {
+  return /^[UW][A-Z0-9]{8,20}$/.test(cleanText(value, 24));
+}
+
 async function loadSalesWonIntent(db, purchaseIntentId) {
   const { data, error } = await db
     .from('public_purchase_intents')
-    .select('id,status,channel,activated_at,client_id,company_legal_name,company_dba,selected_plan_key,selected_billing_cadence,created_by_user_id,created_by_email,platform_fee_cents,promotion_discount_cents,initial_payment_cents')
+    .select('id,status,channel,activated_at,client_id,company_legal_name,company_dba,selected_plan_key,selected_billing_cadence,created_by_user_id,created_by_email,platform_fee_cents,promotion_discount_cents,initial_payment_cents,sales_won_enqueued_at,sales_rep_slack_enqueued_at')
     .eq('id', purchaseIntentId)
     .maybeSingle();
   if (error) throw new Error(error.message || 'Sales-won intent lookup failed');
@@ -161,16 +165,19 @@ async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
 
   const rep = await loadSalesRep(db, intent.created_by_user_id);
   const payload = buildSalesWonPayload(intent, rep);
-  const rows = [{
-    integration: SLACK_INTEGRATION,
-    event_type: SALES_WON_EVENT_TYPE,
-    event_key: `sales_won:${intent.id}`,
-    purchase_intent_id: intent.id,
-    payload: { ...payload, slack_user_id: undefined },
-    status: 'pending',
-    next_attempt_at: new Date().toISOString()
-  }];
-  if (/^[UW][A-Z0-9]{8,20}$/.test(payload.slack_user_id)) {
+  const rows = [];
+  if (!intent.sales_won_enqueued_at) {
+    rows.push({
+      integration: SLACK_INTEGRATION,
+      event_type: SALES_WON_EVENT_TYPE,
+      event_key: `sales_won:${intent.id}`,
+      purchase_intent_id: intent.id,
+      payload: { ...payload, slack_user_id: undefined },
+      status: 'pending',
+      next_attempt_at: new Date().toISOString()
+    });
+  }
+  if (!intent.sales_rep_slack_enqueued_at && validSlackUserId(payload.slack_user_id)) {
     rows.push({
       integration: SLACK_INTEGRATION,
       event_type: SALES_WON_REP_DM_EVENT_TYPE,
@@ -210,29 +217,60 @@ async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
 async function reconcileSalesWonDeliveries(options = {}) {
   const db = options.db || supabaseAdmin;
   const limit = Math.max(1, Math.min(Number(options.limit || MAX_RECONCILE_ROWS), MAX_RECONCILE_ROWS));
-  const { data, error } = await db
+  const { data: teamRows, error: teamError } = await db
     .from('public_purchase_intents')
     .select('id')
     .eq('channel', 'sales_assisted')
     .eq('status', 'completed')
     .not('activated_at', 'is', null)
-    .or('sales_won_enqueued_at.is.null,sales_rep_slack_enqueued_at.is.null')
+    .is('sales_won_enqueued_at', null)
     .order('activated_at', { ascending: true })
     .limit(limit);
-  if (error) throw new Error(error.message || 'Sales-won reconciliation lookup failed');
+  if (teamError) throw new Error(teamError.message || 'Sales-won reconciliation lookup failed');
+
+  const { data: repRows, error: repError } = await db
+    .from('sales_reps')
+    .select('user_id,slack_user_id')
+    .not('slack_user_id', 'is', null)
+    .limit(MAX_RECONCILE_ROWS);
+  if (repError) throw new Error(repError.message || 'Sales representative reconciliation lookup failed');
+  const mappedUserIds = (Array.isArray(repRows) ? repRows : [])
+    .filter((row) => row?.user_id && validSlackUserId(row.slack_user_id))
+    .map((row) => row.user_id);
+
+  let dmRows = [];
+  if (mappedUserIds.length) {
+    const { data, error } = await db
+      .from('public_purchase_intents')
+      .select('id')
+      .eq('channel', 'sales_assisted')
+      .eq('status', 'completed')
+      .not('activated_at', 'is', null)
+      .is('sales_rep_slack_enqueued_at', null)
+      .in('created_by_user_id', mappedUserIds)
+      .order('activated_at', { ascending: true })
+      .limit(limit);
+    if (error) throw new Error(error.message || 'Sales representative DM reconciliation lookup failed');
+    dmRows = Array.isArray(data) ? data : [];
+  }
+
+  const candidateIds = [...new Set([
+    ...(Array.isArray(teamRows) ? teamRows : []).map((row) => row.id),
+    ...dmRows.map((row) => row.id)
+  ].filter(Boolean))];
 
   const summary = { scanned: 0, enqueued: 0, existing: 0, pending_activation: 0, failed: 0 };
-  for (const row of Array.isArray(data) ? data : []) {
+  for (const purchaseIntentId of candidateIds) {
     summary.scanned += 1;
     try {
-      const result = await enqueueSalesWonDelivery(row.id, { db, logger: options.logger });
+      const result = await enqueueSalesWonDelivery(purchaseIntentId, { db, logger: options.logger });
       if (result.enqueued) summary.enqueued += 1;
       else if (result.status === 'already_enqueued') summary.existing += 1;
       else if (result.status === 'activation_pending') summary.pending_activation += 1;
     } catch (error) {
       summary.failed += 1;
       options.logger?.warn?.('[sales-integrations] reconciliation_enqueue_failed', {
-        purchase_intent_id: row.id,
+        purchase_intent_id: purchaseIntentId,
         error: cleanText(error?.message, 300)
       });
     }
@@ -251,6 +289,14 @@ async function postSlackMessage(delivery, options = {}) {
     throw error;
   }
   if (typeof fetchImpl !== 'function') throw new Error('Fetch implementation unavailable.');
+  const isRepDm = delivery.event_type === SALES_WON_REP_DM_EVENT_TYPE;
+  const slackUserId = cleanText(delivery.payload?.slack_user_id, 24);
+  if (isRepDm && !validSlackUserId(slackUserId)) {
+    const error = new Error('Slack member ID is invalid.');
+    error.code = 'invalid_slack_user_id';
+    error.retryable = false;
+    throw error;
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(options.timeoutMs || 10000));
@@ -263,8 +309,8 @@ async function postSlackMessage(delivery, options = {}) {
         'Content-Type': 'application/json; charset=utf-8'
       },
       body: JSON.stringify({
-        channel: delivery.event_type === SALES_WON_REP_DM_EVENT_TYPE
-          ? cleanText(delivery.payload?.slack_user_id, 24)
+        channel: isRepDm
+          ? slackUserId
           : config.channelId,
         client_msg_id: delivery.id,
         ...(delivery.event_type === SALES_WON_REP_DM_EVENT_TYPE
@@ -293,8 +339,8 @@ async function postSlackMessage(delivery, options = {}) {
   }
   return {
     external_message_id: cleanText(body.ts, 120) || null,
-    external_channel_id: cleanText(body.channel, 120) || (delivery.event_type === SALES_WON_REP_DM_EVENT_TYPE
-      ? cleanText(delivery.payload?.slack_user_id, 24)
+    external_channel_id: cleanText(body.channel, 120) || (isRepDm
+      ? slackUserId
       : config.channelId)
   };
 }

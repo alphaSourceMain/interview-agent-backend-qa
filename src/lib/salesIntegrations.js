@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { supabaseAdmin } = require('./supabaseClient');
 
 const SALES_WON_EVENT_TYPE = 'sales_won';
+const SALES_WON_REP_DM_EVENT_TYPE = 'sales_won_rep_dm';
 const SLACK_INTEGRATION = 'slack';
 const DEFAULT_BATCH_SIZE = 10;
 const MAX_RECONCILE_ROWS = 100;
@@ -11,11 +12,13 @@ const RETRY_DELAYS_SECONDS = [60, 300, 900, 3600, 10800, 21600, 21600, 21600];
 const PERMANENT_SLACK_ERRORS = new Set([
   'account_inactive',
   'channel_not_found',
+  'cannot_dm_bot',
   'invalid_auth',
   'is_archived',
   'not_authed',
   'not_in_channel',
-  'token_revoked'
+  'token_revoked',
+  'user_not_found'
 ]);
 
 function cleanText(value, max = 500) {
@@ -24,11 +27,6 @@ function cleanText(value, max = 500) {
 
 function escapeSlackText(value, max = 500) {
   return cleanText(value, max).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function safeInteger(value) {
-  const number = Number(value);
-  return Number.isSafeInteger(number) ? number : 0;
 }
 
 function displayPlan(planKey) {
@@ -45,15 +43,6 @@ function displayCadence(cadence) {
   return 'Membership';
 }
 
-function formatUsd(cents) {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  }).format(safeInteger(cents) / 100);
-}
-
 function toSlackDate(isoValue) {
   const parsed = new Date(isoValue);
   if (!Number.isFinite(parsed.getTime())) return cleanText(isoValue, 80) || 'Payment received';
@@ -66,43 +55,50 @@ function buildSalesWonPayload(intent, rep = null) {
   const repName = cleanText(rep?.display_name, 120) || 'alphaSource sales team';
   return {
     schema_version: 1,
-    purchase_intent_id: cleanText(intent?.id, 80),
     company_name: companyName,
     membership: displayPlan(intent?.selected_plan_key),
     billing_cadence: displayCadence(intent?.selected_billing_cadence),
     sales_representative: repName,
-    platform_fee_cents: safeInteger(intent?.platform_fee_cents),
-    discount_cents: safeInteger(intent?.promotion_discount_cents),
-    initial_payment_cents: safeInteger(intent?.initial_payment_cents),
-    activated_at: cleanText(intent?.activated_at, 80)
+    activated_at: cleanText(intent?.activated_at, 80),
+    slack_user_id: cleanText(rep?.slack_user_id, 24)
   };
 }
 
 function buildSlackSalesWonMessage(payload) {
   const membership = `${escapeSlackText(payload?.membership, 40)} · ${escapeSlackText(payload?.billing_cadence, 40)}`;
-  const cadenceSuffix = cleanText(payload?.billing_cadence, 20).toLowerCase() === 'annual' ? 'year' : 'month';
-  const text = `New alphaScreen membership activated: ${escapeSlackText(payload?.company_name, 160)} — ${escapeSlackText(payload?.membership, 40)} · ${escapeSlackText(payload?.billing_cadence, 40)}`;
+  const text = `🎉 ${escapeSlackText(payload?.company_name, 160)} completed checkout and is now active!`;
   const fields = [
     { type: 'mrkdwn', text: `*Company*\n${escapeSlackText(payload?.company_name, 160)}` },
     { type: 'mrkdwn', text: `*Membership*\n${membership}` },
-    { type: 'mrkdwn', text: `*Sales representative*\n${escapeSlackText(payload?.sales_representative, 120)}` },
-    { type: 'mrkdwn', text: `*Initial payment*\n${formatUsd(payload?.initial_payment_cents)}` },
-    { type: 'mrkdwn', text: `*Platform membership*\n${formatUsd(payload?.platform_fee_cents)} / ${cadenceSuffix}` },
-    { type: 'mrkdwn', text: `*Discount applied*\n${formatUsd(payload?.discount_cents)}` }
+    { type: 'mrkdwn', text: `*Sales representative*\n${escapeSlackText(payload?.sales_representative, 120)}` }
   ];
   return {
     text,
     blocks: [
-      { type: 'header', text: { type: 'plain_text', text: 'New alphaScreen membership activated', emoji: true } },
+      { type: 'header', text: { type: 'plain_text', text: '🎉 New alphaScreen client!', emoji: true } },
       { type: 'section', fields },
       {
         type: 'context',
         elements: [{
           type: 'mrkdwn',
-          text: `Payment received ${toSlackDate(payload?.activated_at)} · Deal ${escapeSlackText(payload?.purchase_intent_id, 80)}`
+          text: `Activated ${toSlackDate(payload?.activated_at)} · Great work, ${escapeSlackText(payload?.sales_representative, 120)}!`
         }]
       }
     ]
+  };
+}
+
+function buildSlackSalesRepMessage(payload) {
+  const company = escapeSlackText(payload?.company_name, 160);
+  return {
+    text: `${company} completed checkout and is now active. Great work!`,
+    blocks: [{
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `🎉 *${company} completed checkout and is now active.*\nGreat work!`
+      }
+    }]
   };
 }
 
@@ -128,7 +124,7 @@ async function loadSalesRep(db, userId) {
   if (!userId) return null;
   const { data, error } = await db
     .from('sales_reps')
-    .select('user_id,display_name,email')
+    .select('user_id,display_name,email,slack_user_id')
     .eq('user_id', userId)
     .maybeSingle();
   if (error) throw new Error(error.message || 'Sales representative lookup failed');
@@ -164,44 +160,51 @@ async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
   }
 
   const rep = await loadSalesRep(db, intent.created_by_user_id);
-  const eventKey = `sales_won:${intent.id}`;
-  const row = {
+  const payload = buildSalesWonPayload(intent, rep);
+  const rows = [{
     integration: SLACK_INTEGRATION,
     event_type: SALES_WON_EVENT_TYPE,
-    event_key: eventKey,
+    event_key: `sales_won:${intent.id}`,
     purchase_intent_id: intent.id,
-    payload: buildSalesWonPayload(intent, rep),
+    payload: { ...payload, slack_user_id: undefined },
     status: 'pending',
     next_attempt_at: new Date().toISOString()
-  };
-  const { data, error } = await db
-    .from('sales_integration_deliveries')
-    .insert(row)
-    .select('id,status')
-    .maybeSingle();
-  let status = data?.status || 'pending';
-  let enqueued = true;
-  if (error) {
-    const duplicate = cleanText(error.code, 40) === '23505' || /duplicate/i.test(cleanText(error.message, 500));
-    if (!duplicate) throw new Error(error.message || 'Sales-won delivery enqueue failed');
-    status = 'already_enqueued';
-    enqueued = false;
-  }
-  const { error: markerError } = await db
-    .from('public_purchase_intents')
-    .update({ sales_won_enqueued_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-    .eq('id', intent.id)
-    .is('sales_won_enqueued_at', null);
-  if (markerError && options.logger) {
-    options.logger.warn?.('[sales-integrations] sales_won_marker_failed', {
+  }];
+  if (/^[UW][A-Z0-9]{8,20}$/.test(payload.slack_user_id)) {
+    rows.push({
+      integration: SLACK_INTEGRATION,
+      event_type: SALES_WON_REP_DM_EVENT_TYPE,
+      event_key: `sales_won_rep_dm:${intent.id}`,
       purchase_intent_id: intent.id,
-      error: cleanText(markerError.message, 300)
+      payload,
+      status: 'pending',
+      next_attempt_at: new Date().toISOString()
     });
   }
-  if (error) {
-    return { enqueued, status };
+
+  const result = { enqueued: false, status: 'already_enqueued', team: false, rep_dm: false };
+  for (const row of rows) {
+    const { data, error } = await db.from('sales_integration_deliveries').insert(row).select('id,status').maybeSingle();
+    const duplicate = error && (cleanText(error.code, 40) === '23505' || /duplicate/i.test(cleanText(error.message, 500)));
+    if (error && !duplicate) throw new Error(error.message || 'Sales-won delivery enqueue failed');
+    if (!error) {
+      result.enqueued = true;
+      result.status = data?.status || 'pending';
+      if (row.event_type === SALES_WON_EVENT_TYPE) result.team = true;
+      if (row.event_type === SALES_WON_REP_DM_EVENT_TYPE) result.rep_dm = true;
+    }
   }
-  return { enqueued, status, delivery_id: data?.id || null };
+
+  const markerNow = new Date().toISOString();
+  const markerPayload = { updated_at: markerNow };
+  if (rows.some((row) => row.event_type === SALES_WON_EVENT_TYPE)) markerPayload.sales_won_enqueued_at = markerNow;
+  if (rows.some((row) => row.event_type === SALES_WON_REP_DM_EVENT_TYPE)) markerPayload.sales_rep_slack_enqueued_at = markerNow;
+  const { error: markerError } = await db.from('public_purchase_intents').update(markerPayload).eq('id', intent.id);
+  if (markerError) options.logger?.warn?.('[sales-integrations] sales_won_marker_failed', {
+    purchase_intent_id: intent.id,
+    error: cleanText(markerError.message, 300)
+  });
+  return result;
 }
 
 async function reconcileSalesWonDeliveries(options = {}) {
@@ -213,7 +216,7 @@ async function reconcileSalesWonDeliveries(options = {}) {
     .eq('channel', 'sales_assisted')
     .eq('status', 'completed')
     .not('activated_at', 'is', null)
-    .is('sales_won_enqueued_at', null)
+    .or('sales_won_enqueued_at.is.null,sales_rep_slack_enqueued_at.is.null')
     .order('activated_at', { ascending: true })
     .limit(limit);
   if (error) throw new Error(error.message || 'Sales-won reconciliation lookup failed');
@@ -260,9 +263,13 @@ async function postSlackMessage(delivery, options = {}) {
         'Content-Type': 'application/json; charset=utf-8'
       },
       body: JSON.stringify({
-        channel: config.channelId,
+        channel: delivery.event_type === SALES_WON_REP_DM_EVENT_TYPE
+          ? cleanText(delivery.payload?.slack_user_id, 24)
+          : config.channelId,
         client_msg_id: delivery.id,
-        ...buildSlackSalesWonMessage(delivery.payload)
+        ...(delivery.event_type === SALES_WON_REP_DM_EVENT_TYPE
+          ? buildSlackSalesRepMessage(delivery.payload)
+          : buildSlackSalesWonMessage(delivery.payload))
       }),
       signal: controller.signal
     });
@@ -286,14 +293,17 @@ async function postSlackMessage(delivery, options = {}) {
   }
   return {
     external_message_id: cleanText(body.ts, 120) || null,
-    external_channel_id: cleanText(body.channel, 120) || config.channelId
+    external_channel_id: cleanText(body.channel, 120) || (delivery.event_type === SALES_WON_REP_DM_EVENT_TYPE
+      ? cleanText(delivery.payload?.slack_user_id, 24)
+      : config.channelId)
   };
 }
 
 function retryDelaySeconds(attemptCount, error) {
   const retryAfter = Number(error?.retryAfterSeconds || 0);
   if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(retryAfter, 21600);
-  const index = Math.max(0, Math.min(safeInteger(attemptCount) - 1, RETRY_DELAYS_SECONDS.length - 1));
+  const count = Number.isSafeInteger(Number(attemptCount)) ? Number(attemptCount) : 0;
+  const index = Math.max(0, Math.min(count - 1, RETRY_DELAYS_SECONDS.length - 1));
   return RETRY_DELAYS_SECONDS[index];
 }
 
@@ -350,7 +360,7 @@ async function processSalesIntegrationDeliveries(options = {}) {
       });
       summary.delivered += 1;
     } catch (deliveryError) {
-      const exhausted = safeInteger(delivery.attempt_count) >= safeInteger(delivery.max_attempts);
+      const exhausted = Number(delivery.attempt_count || 0) >= Number(delivery.max_attempts || 0);
       const retryable = deliveryError?.retryable !== false && !exhausted;
       const delaySeconds = retryDelaySeconds(delivery.attempt_count, deliveryError);
       await updateClaimedDelivery(db, delivery, {
@@ -375,8 +385,10 @@ async function processSalesIntegrationDeliveries(options = {}) {
 
 module.exports = {
   SALES_WON_EVENT_TYPE,
+  SALES_WON_REP_DM_EVENT_TYPE,
   buildSalesWonPayload,
   buildSlackSalesWonMessage,
+  buildSlackSalesRepMessage,
   enqueueSalesWonDelivery,
   reconcileSalesWonDeliveries,
   postSlackMessage,

@@ -11,6 +11,8 @@ const { buildBrandedEmailShell, escapeHtml } = require('../utils/mailer');
 const { resolvePlanCapacity, resolvePlanCapacityForClient } = require('../src/lib/planCapacity');
 const { normalizeInterviewType, normalizeRoleInterviewTypeForRead } = require('../src/lib/interviewTypes');
 const { hasClientAccess, hasClientManagerAccess } = require('../src/lib/serviceRoleAuthorization');
+const { resolveBillingOwnerForScope } = require('../src/lib/clientBillingScope');
+const { findUnusedFirstRolePrepayCredit } = require('../src/lib/rolePurchaseFinalizer');
 
 const { requireAuth, withClientScope } = require('../src/middleware/auth');
 
@@ -259,7 +261,22 @@ router.get('/', requireAuth, withClientScope, async (req, res) => {
       }), entityMap, role.client_id);
     });
 
-    return res.json({ items });
+    let firstRolePrepayCredit = null;
+    try {
+      const billingScope = await resolveBillingOwnerForScope(db, clientId);
+      const billingClientId = billingScope?.billingClientId || clientId;
+      if (billingScope?.ok && billingClientId) {
+        const credit = await findUnusedFirstRolePrepayCredit({ db, billingClientId });
+        if (credit) firstRolePrepayCredit = { unused: true };
+      }
+    } catch (creditError) {
+      console.warn('[GET /roles] first_role_prepay_lookup_failed', {
+        request_id,
+        code: creditError?.code || null
+      });
+    }
+
+    return res.json({ items, first_role_prepay_credit: firstRolePrepayCredit });
   } catch (e) {
     console.error('[GET /roles] unexpected', e);
     return res.status(500).json({ error: 'Server error', code: 'SERVER_ERROR', detail: e?.message || null, hint: null, request_id });

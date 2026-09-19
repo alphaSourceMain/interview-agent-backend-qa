@@ -14,6 +14,7 @@ const { buildMembershipAgreementSignUrl } = require('../config/urlConfig')
 const { checkAndIncrementRateLimit, hashRateLimitSubject } = require('../src/lib/rateLimit')
 const {
   agreementInputFromDraft,
+  agreementSchedule,
   calculatePricing,
   fingerprint,
   listSalesPackages,
@@ -26,7 +27,7 @@ const {
 
 const AGREEMENTS_BUCKET = process.env.SUPABASE_AGREEMENTS_BUCKET || 'agreements'
 const PREVIEW_TTL_MS = 15 * 60 * 1000
-const SIGNING_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const LEGACY_SIGNING_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9_.:-]{8,255}$/
 const SALES_RATE_WINDOW_MS = 10 * 60 * 1000
 const SALES_RATE_LIMITS = Object.freeze({
@@ -49,11 +50,20 @@ const INTENT_COLUMNS = [
 ].join(',')
 const AGREEMENT_COLUMNS = [
   'id', 'status', 'is_current', 'checkout_status', 'checkout_session_id',
-  'client_id', 'sent_at', 'opened_at', 'signed_at', 'signer_token_expires_at'
+  'client_id', 'sent_at', 'opened_at', 'signed_at', 'signer_token_expires_at',
+  'agreement_expires_at', 'checkout_created_at', 'template_snapshot', 'draft_pdf_path',
+  'initial_term_start', 'initial_renewal_date', 'superseded_by_agreement_id'
 ].join(',')
 
 function nowIso() {
   return new Date().toISOString()
+}
+
+function replacementCheckoutDisposition(session) {
+  if (!session) return 'missing'
+  if (String(session.status || '').toLowerCase() === 'complete' || String(session.payment_status || '').toLowerCase() === 'paid') return 'paid'
+  if (String(session.status || '').toLowerCase() === 'open') return 'open'
+  return 'expired'
 }
 
 function requestId(req) {
@@ -220,6 +230,134 @@ function createSalesRouter(options = {}) {
     if (error) console.error('[sales/events] write_failed', { intent_id: intentId, event_type: eventType, code: error.code || null })
   }
 
+  async function removeReplacementArtifacts(agreementId, pdfPath) {
+    try { await db.from('membership_agreements').delete().eq('id', agreementId).eq('status', 'draft') } catch (_) {}
+    if (pdfPath) {
+      try { await db.storage.from(AGREEMENTS_BUCKET).remove([pdfPath]) } catch (_) {}
+    }
+  }
+
+  async function replaceExpiredAgreement(intent, agreement, rep) {
+    const checkoutSessionId = String(intent.stripe_checkout_session_id || agreement.checkout_session_id || '').trim()
+    if (checkoutSessionId) {
+      let session = null
+      try {
+        session = await getStripe().checkout.sessions.retrieve(checkoutSessionId)
+      } catch (error) {
+        if (String(error?.code || '').toLowerCase() !== 'resource_missing') throw error
+      }
+      const disposition = replacementCheckoutDisposition(session)
+      if (disposition === 'paid') {
+        throw makeSalesError(409, 'agreement_already_paid', 'Payment has completed. This deal is being activated and cannot be replaced.')
+      }
+      if (disposition === 'open') await getStripe().checkout.sessions.expire(checkoutSessionId)
+    }
+
+    const schedule = agreementSchedule()
+    const draft = validateSalesDraft(normalizeSalesDraft({
+      company_legal_name: intent.company_legal_name,
+      company_dba: intent.company_dba,
+      buyer_first_name: intent.buyer_first_name,
+      buyer_last_name: intent.buyer_last_name,
+      buyer_email: intent.buyer_email,
+      buyer_phone: intent.buyer_phone,
+      buyer_title: intent.buyer_title,
+      candidate_assistance_name: intent.candidate_assistance_name,
+      candidate_assistance_email: intent.candidate_assistance_email,
+      ghl_contact_id: intent.ghl_contact_id,
+      ghl_opportunity_id: intent.ghl_opportunity_id,
+      sales_note: intent.sales_note,
+      plan_key: intent.selected_plan_key,
+      billing_cadence: intent.selected_billing_cadence,
+      first_role_prepay_selected: intent.package_snapshot?.first_role_prepay?.selected === true,
+      promotion_code: intent.promotion_code
+    }))
+    const agreementInput = agreementInputFromDraft(draft, intent.package_snapshot, schedule)
+    const { html, normalized } = renderAgreement(agreementInput, { showPackageTerms: true, generatedAt: nowIso(), timeZone: 'America/Denver' })
+    const pdf = await renderPdf(html, {
+      format: 'Letter',
+      margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' }
+    })
+    const agreementId = crypto.randomUUID()
+    const draftPdfPath = `membership-agreements/${agreementId}/sales-assisted-draft.pdf`
+    const upload = await db.storage.from(AGREEMENTS_BUCKET).upload(draftPdfPath, pdf, {
+      contentType: 'application/pdf',
+      upsert: false
+    })
+    if (upload.error) throw makeSalesError(503, 'agreement_storage_failed', 'The replacement agreement could not be stored.')
+
+    const signerToken = crypto.randomBytes(32).toString('hex')
+    const signerTokenHash = crypto.createHash('sha256').update(signerToken).digest('hex')
+    const generatedAt = nowIso()
+    const templateSnapshot = {
+      template_name: 'membership-agreement',
+      template_version: 'membership_agreement_v3_sales_assisted',
+      source: 'sales_assisted',
+      generated_at: generatedAt,
+      term_start_basis: 'agreement_date',
+      agreement_expires_at: schedule.expires_at,
+      purchase_intent: { id: intent.id, channel: 'sales_assisted' },
+      package_snapshot: intent.package_snapshot,
+      pricing_snapshot: agreement.template_snapshot?.pricing_snapshot || null,
+      values: normalized,
+      rendered_html: html
+    }
+    const { error: insertError } = await db.from('membership_agreements').insert({
+      id: agreementId,
+      client_id: agreement.client_id || intent.client_id || null,
+      status: 'draft',
+      is_current: false,
+      client_legal_name: normalized.client_legal_name,
+      dba_trade_name: normalized.dba_trade_name || null,
+      primary_admin_name: normalized.primary_admin_name,
+      admin_email: normalized.admin_email,
+      membership_tier: normalized.membership_tier,
+      initial_term_start: normalized.initial_term_start,
+      initial_renewal_date: normalized.initial_renewal_date,
+      agreement_expires_at: schedule.expires_at,
+      billing_option: normalized.billing_option,
+      auto_renew: normalized.auto_renew,
+      notice_deadline_days: normalized.notice_deadline_days,
+      template_version: 'membership_agreement_v3_sales_assisted',
+      template_snapshot: templateSnapshot,
+      draft_pdf_path: draftPdfPath,
+      signer_token_hash: signerTokenHash,
+      signer_token_expires_at: schedule.expires_at,
+      created_by_user_id: rep.user_id,
+      created_by_email: rep.email
+    })
+    if (insertError) {
+      await removeReplacementArtifacts(agreementId, draftPdfPath)
+      throw makeSalesError(503, 'agreement_create_failed', 'The replacement agreement could not be created.')
+    }
+
+    const { data: replaced, error: replaceError } = await db.rpc('replace_sales_assisted_agreement', {
+      p_intent_id: intent.id,
+      p_old_agreement_id: agreement.id,
+      p_new_agreement_id: agreementId,
+      p_new_expires_at: schedule.expires_at,
+      p_replaced_at: generatedAt
+    })
+    if (replaceError || replaced !== true) {
+      await removeReplacementArtifacts(agreementId, draftPdfPath)
+      if (!replaceError) throw makeSalesError(409, 'agreement_state_changed', 'The agreement changed while it was being replaced. Refresh the deal.')
+      if (String(replaceError.message || '').includes('not_replaceable')) {
+        throw makeSalesError(409, 'agreement_already_paid', 'Payment completed while the agreement was being replaced.')
+      }
+      throw makeSalesError(503, 'agreement_replace_failed', 'The replacement agreement could not be finalized.')
+    }
+
+    const mailResult = await sendAgreementEmail(intent.buyer_email, buildSignUrl(signerToken), {
+      client_legal_name: intent.company_legal_name,
+      primary_admin_name: `${intent.buyer_first_name || ''} ${intent.buyer_last_name || ''}`.trim(),
+      membership_tier: intent.package_snapshot?.display_name || intent.selected_plan_key,
+      expires_on: schedule.expires_at
+    })
+    if (mailResult?.skipped) throw makeSalesError(503, 'agreement_email_not_configured', 'The replacement agreement was saved, but email delivery is not configured.')
+    await event(intent.id, rep.user_id, 'agreement_replaced', { prior_agreement_id: agreement.id, agreement_id: agreementId })
+    return { message: 'A newly dated agreement was sent for signature.', agreement_id: agreementId }
+  }
+
   async function loadAgreements(intents) {
     const ids = Array.from(new Set((intents || []).map((item) => item.agreement_id).filter(Boolean)))
     if (!ids.length) return new Map()
@@ -325,8 +463,9 @@ function createSalesRouter(options = {}) {
       const draft = validateSalesDraft(normalizeSalesDraft(req.body))
       const promotion = draft.promotion_code ? await validatePromotion(draft.promotion_code, draft) : null
       const { package_snapshot: packageSnapshot, pricing } = calculatePricing(draft, promotion)
-      const agreementInput = agreementInputFromDraft(draft, packageSnapshot)
-      const { html } = renderAgreement(agreementInput, { showPackageTerms: true })
+      const schedule = agreementSchedule()
+      const agreementInput = agreementInputFromDraft(draft, packageSnapshot, schedule)
+      const { html } = renderAgreement(agreementInput, { showPackageTerms: true, generatedAt: nowIso(), timeZone: 'America/Denver' })
       const pdf = await renderPdf(html, {
         format: 'Letter',
         margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' }
@@ -338,7 +477,7 @@ function createSalesRouter(options = {}) {
         upsert: false
       })
       if (upload.error) throw makeSalesError(503, 'preview_storage_failed', 'The agreement preview could not be stored.')
-      const expiresAt = new Date(Date.now() + PREVIEW_TTL_MS).toISOString()
+      const expiresAt = new Date(Math.min(Date.now() + PREVIEW_TTL_MS, Date.parse(schedule.expires_at))).toISOString()
       const draftFingerprint = fingerprint(draft)
       const { error: insertError } = await db.from('sales_deal_previews').insert({
         id: previewId,
@@ -348,15 +487,22 @@ function createSalesRouter(options = {}) {
         pricing_snapshot: pricing,
         draft_fingerprint: draftFingerprint,
         preview_pdf_path: previewPath,
-        expires_at: expiresAt
+        expires_at: expiresAt,
+        agreement_effective_date: schedule.effective_date,
+        agreement_renewal_date: schedule.renewal_date,
+        agreement_expires_at: schedule.expires_at
       })
       if (insertError) throw makeSalesError(503, 'preview_persist_failed', 'The agreement preview could not be recorded.')
-      const signed = await db.storage.from(AGREEMENTS_BUCKET).createSignedUrl(previewPath, Math.ceil(PREVIEW_TTL_MS / 1000))
+      const signedUrlTtlSeconds = Math.max(1, Math.ceil((Date.parse(expiresAt) - Date.now()) / 1000))
+      const signed = await db.storage.from(AGREEMENTS_BUCKET).createSignedUrl(previewPath, signedUrlTtlSeconds)
       if (signed.error || !signed.data?.signedUrl) throw makeSalesError(503, 'preview_url_failed', 'The agreement preview link could not be created.')
       return res.status(201).json({
         preview_id: previewId,
         preview_url: signed.data.signedUrl,
         expires_at: expiresAt,
+        agreement_effective_date: schedule.effective_date,
+        agreement_renewal_date: schedule.renewal_date,
+        agreement_expires_at: schedule.expires_at,
         normalized_draft: draft,
         pricing
       })
@@ -386,7 +532,7 @@ function createSalesRouter(options = {}) {
 
       const { data: preview, error: previewError } = await db
         .from('sales_deal_previews')
-        .select('id,normalized_draft,package_snapshot,pricing_snapshot,draft_fingerprint,expires_at,consumed_at')
+        .select('id,normalized_draft,package_snapshot,pricing_snapshot,draft_fingerprint,expires_at,consumed_at,agreement_effective_date,agreement_renewal_date,agreement_expires_at')
         .eq('id', previewId)
         .eq('created_by_user_id', req.salesRep.user_id)
         .maybeSingle()
@@ -394,6 +540,16 @@ function createSalesRouter(options = {}) {
       if (!preview) throw makeSalesError(404, 'preview_not_found', 'The agreement preview was not found.')
       if (preview.consumed_at) throw makeSalesError(409, 'preview_already_used', 'This agreement preview was already used.')
       if (new Date(preview.expires_at).getTime() <= Date.now()) throw makeSalesError(409, 'preview_expired', 'The agreement preview expired. Generate a new preview.')
+      const currentSchedule = agreementSchedule()
+      if (
+        !preview.agreement_effective_date ||
+        !preview.agreement_renewal_date ||
+        !preview.agreement_expires_at ||
+        preview.agreement_effective_date !== currentSchedule.effective_date ||
+        Date.parse(preview.agreement_expires_at) <= Date.now()
+      ) {
+        throw makeSalesError(409, 'preview_expired', 'The agreement date changed. Generate a new preview.')
+      }
       if (preview.draft_fingerprint !== fingerprint(draft) || fingerprint(preview.normalized_draft) !== fingerprint(draft)) {
         throw makeSalesError(409, 'preview_mismatch', 'The agreement terms changed. Generate a new preview.')
       }
@@ -448,7 +604,7 @@ function createSalesRouter(options = {}) {
         buyer_title: draft.buyer_title || null,
         source_path: '/sales',
         agreement_id: agreementId,
-        expires_at: new Date(Date.now() + SIGNING_LINK_TTL_MS).toISOString(),
+        expires_at: preview.agreement_expires_at,
         channel: 'sales_assisted',
         created_by_user_id: req.salesRep.user_id,
         created_by_email: req.salesRep.email,
@@ -465,7 +621,7 @@ function createSalesRouter(options = {}) {
         promotion_discount_cents: Number(preview.pricing_snapshot?.promotion_discount_cents || 0),
         platform_fee_cents: Number(preview.pricing_snapshot?.platform_fee_cents || 0),
         initial_payment_cents: Number(preview.pricing_snapshot?.initial_payment_cents || 0),
-        term_start_basis: 'successful_payment',
+        term_start_basis: 'agreement_date',
         sales_preview_id: previewId,
         created_at: now,
         updated_at: now
@@ -483,8 +639,13 @@ function createSalesRouter(options = {}) {
       }
       createdIntentId = intentId
 
-      const agreementInput = agreementInputFromDraft(draft, preview.package_snapshot)
-      const { html, normalized } = renderAgreement(agreementInput, { showPackageTerms: true })
+      const agreementScheduleSnapshot = {
+        effective_date: preview.agreement_effective_date,
+        renewal_date: preview.agreement_renewal_date,
+        expires_at: preview.agreement_expires_at
+      }
+      const agreementInput = agreementInputFromDraft(draft, preview.package_snapshot, agreementScheduleSnapshot)
+      const { html, normalized } = renderAgreement(agreementInput, { showPackageTerms: true, generatedAt: now, timeZone: 'America/Denver' })
       const pdf = await renderPdf(html, {
         format: 'Letter',
         margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' }
@@ -499,14 +660,15 @@ function createSalesRouter(options = {}) {
 
       const signerToken = crypto.randomBytes(32).toString('hex')
       const signerTokenHash = crypto.createHash('sha256').update(signerToken).digest('hex')
-      const signerTokenExpiresAt = new Date(Date.now() + SIGNING_LINK_TTL_MS).toISOString()
+      const signerTokenExpiresAt = preview.agreement_expires_at
       const signingUrl = buildSignUrl(signerToken)
       const templateSnapshot = {
         template_name: 'membership-agreement',
-        template_version: 'membership_agreement_v2_sales_assisted',
+        template_version: 'membership_agreement_v3_sales_assisted',
         source: 'sales_assisted',
         generated_at: now,
-        term_start_basis: 'successful_payment',
+        term_start_basis: 'agreement_date',
+        agreement_expires_at: signerTokenExpiresAt,
         purchase_intent: { id: intentId, channel: 'sales_assisted' },
         package_snapshot: preview.package_snapshot,
         pricing_snapshot: preview.pricing_snapshot,
@@ -522,16 +684,17 @@ function createSalesRouter(options = {}) {
         primary_admin_name: normalized.primary_admin_name,
         admin_email: normalized.admin_email,
         membership_tier: normalized.membership_tier,
-        initial_term_start: null,
-        initial_renewal_date: null,
+        initial_term_start: normalized.initial_term_start,
+        initial_renewal_date: normalized.initial_renewal_date,
         billing_option: normalized.billing_option,
         auto_renew: normalized.auto_renew,
         notice_deadline_days: normalized.notice_deadline_days,
-        template_version: 'membership_agreement_v2_sales_assisted',
+        template_version: 'membership_agreement_v3_sales_assisted',
         template_snapshot: templateSnapshot,
         draft_pdf_path: draftPdfPath,
         signer_token_hash: signerTokenHash,
         signer_token_expires_at: signerTokenExpiresAt,
+        agreement_expires_at: signerTokenExpiresAt,
         created_by_user_id: req.salesRep.user_id,
         created_by_email: req.salesRep.email
       })
@@ -676,10 +839,23 @@ function createSalesRouter(options = {}) {
       await reserveIdempotency(req.salesRep.user_id, routeKey, key, idem.requestFingerprint)
       reserved = true
       const { intent, agreement } = await loadOwnedDeal(req.params.id, req.salesRep.user_id)
-      if (!agreement || agreement.status !== 'sent') throw makeSalesError(409, 'agreement_not_resendable', 'This agreement is not waiting for signature.')
+      if (!agreement || !['sent', 'signed'].includes(agreement.status) || agreement.checkout_status === 'paid') {
+        throw makeSalesError(409, 'agreement_not_resendable', 'This agreement cannot be resent.')
+      }
+      const explicitDeadline = Date.parse(String(agreement.agreement_expires_at || ''))
+      if (Number.isFinite(explicitDeadline) && explicitDeadline <= Date.now()) {
+        const body = await replaceExpiredAgreement(intent, agreement, req.salesRep)
+        await finishIdempotency(req.salesRep.user_id, routeKey, key, 200, body)
+        return res.json(body)
+      }
+      if (agreement.status !== 'sent') {
+        throw makeSalesError(409, 'agreement_not_resendable', 'This agreement is signed. Send a payment reminder before it expires.')
+      }
       const signerToken = crypto.randomBytes(32).toString('hex')
       const signerTokenHash = crypto.createHash('sha256').update(signerToken).digest('hex')
-      const expiresAt = new Date(Date.now() + SIGNING_LINK_TTL_MS).toISOString()
+      const expiresAt = Number.isFinite(explicitDeadline)
+        ? agreement.agreement_expires_at
+        : new Date(Date.now() + LEGACY_SIGNING_LINK_TTL_MS).toISOString()
       const { error } = await db.from('membership_agreements').update({
         signer_token_hash: signerTokenHash,
         signer_token_expires_at: expiresAt,
@@ -719,9 +895,15 @@ function createSalesRouter(options = {}) {
       if (!agreement || !['signed'].includes(agreement.status) || agreement.checkout_status === 'paid') {
         throw makeSalesError(409, 'payment_reminder_not_available', 'A payment reminder is not available for this deal.')
       }
+      const explicitDeadline = Date.parse(String(agreement.agreement_expires_at || ''))
+      if (Number.isFinite(explicitDeadline) && explicitDeadline <= Date.now()) {
+        throw makeSalesError(410, 'agreement_expired', 'This agreement expired. Resend a newly dated agreement for signature.')
+      }
       const signerToken = crypto.randomBytes(32).toString('hex')
       const signerTokenHash = crypto.createHash('sha256').update(signerToken).digest('hex')
-      const expiresAt = new Date(Date.now() + SIGNING_LINK_TTL_MS).toISOString()
+      const expiresAt = Number.isFinite(explicitDeadline)
+        ? agreement.agreement_expires_at
+        : new Date(Date.now() + LEGACY_SIGNING_LINK_TTL_MS).toISOString()
       const { error } = await db.from('membership_agreements').update({
         signer_token_hash: signerTokenHash,
         signer_token_expires_at: expiresAt,
@@ -848,6 +1030,7 @@ function createSalesRouter(options = {}) {
 
 module.exports = {
   createSalesRouter,
+  replacementCheckoutDisposition,
   promotionFromStripe,
   promotionEligibilityError
 }

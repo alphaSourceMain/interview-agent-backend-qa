@@ -489,6 +489,7 @@ function resolveAgreementPublicSessionState(row) {
 
   const status = String(row.status || '').trim().toLowerCase();
   const checkoutStatus = String(row.checkout_status || '').trim().toLowerCase();
+  const explicitDeadlineExpired = Boolean(row.agreement_expires_at) && isExpired(row.agreement_expires_at);
 
   if (status === 'sent') {
     if (isExpired(row.signer_token_expires_at)) {
@@ -506,6 +507,14 @@ function resolveAgreementPublicSessionState(row) {
   }
 
   if (status === 'signed' && row.is_current === true) {
+    if (checkoutStatus !== 'paid' && explicitDeadlineExpired) {
+      return {
+        ok: false,
+        status: 410,
+        code: 'agreement_expired',
+        detail: 'This agreement expired before payment. Request a newly dated agreement.'
+      };
+    }
     if (!String(row.client_id || '').trim() && isPublicPurchaseIntentAgreement(row)) {
       return {
         ok: true,
@@ -576,7 +585,7 @@ async function createAgreementSignedUrl(path, expiresInSeconds) {
 async function loadAgreementByTokenHash(tokenHash) {
   const { data, error } = await supabaseAdmin
     .from('membership_agreements')
-    .select('id,client_id,status,is_current,checkout_status,checkout_session_id,checkout_created_at,client_legal_name,dba_trade_name,primary_admin_name,admin_email,membership_tier,initial_term_start,initial_renewal_date,billing_option,auto_renew,notice_deadline_days,template_snapshot,draft_pdf_path,executed_pdf_path,signer_token_expires_at,opened_at,sent_at,signed_at,signer_typed_name')
+    .select('id,client_id,status,is_current,checkout_status,checkout_session_id,checkout_created_at,client_legal_name,dba_trade_name,primary_admin_name,admin_email,membership_tier,initial_term_start,initial_renewal_date,billing_option,auto_renew,notice_deadline_days,template_snapshot,draft_pdf_path,executed_pdf_path,signer_token_expires_at,agreement_expires_at,opened_at,sent_at,signed_at,signer_typed_name,superseded_by_agreement_id')
     .eq('signer_token_hash', tokenHash)
     .maybeSingle();
 
@@ -723,7 +732,7 @@ router.post('/session', publicAgreementTokenRateLimit, async (req, res) => {
         notice_deadline_days: agreement.notice_deadline_days,
         initial_term_start: agreement.initial_term_start,
         initial_renewal_date: agreement.initial_renewal_date,
-        expires_at: agreement.signer_token_expires_at,
+        expires_at: agreement.agreement_expires_at || agreement.signer_token_expires_at,
         sent_at: agreement.sent_at,
         signed_at: agreement.signed_at,
         opened_at: openedAt,
@@ -1055,6 +1064,15 @@ router.post('/checkout-session', publicAgreementTokenRateLimit, async (req, res)
         request_id
       });
     }
+    const explicitAgreementDeadline = String(agreement.agreement_expires_at || '').trim();
+    if (explicitAgreementDeadline && isExpired(explicitAgreementDeadline)) {
+      return res.status(410).json({
+        error: 'agreement_expired',
+        code: 'agreement_expired',
+        detail: 'This agreement expired before payment. Request a newly dated agreement.',
+        request_id
+      });
+    }
 
     const agreementInput = buildAgreementInputFromRow(agreement);
     const planTier = String(agreementInput.membership_tier || '').trim().toLowerCase();
@@ -1167,6 +1185,7 @@ router.post('/checkout-session', publicAgreementTokenRateLimit, async (req, res)
       embedded: embeddedCheckoutRequested,
       cancelUrl,
       idempotencyKey,
+      checkoutExpiresAt: explicitAgreementDeadline || null,
       requestContext: {
         forwardedProto: req.headers?.['x-forwarded-proto'],
         forwardedHost: req.headers?.['x-forwarded-host'],

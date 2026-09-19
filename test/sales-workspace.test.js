@@ -4,12 +4,14 @@ const assert = require('node:assert/strict')
 const { test } = require('node:test')
 const {
   agreementInputFromDraft,
+  agreementSchedule,
   calculatePricing,
   deriveDealStatus,
   fingerprint,
   normalizeSalesDraft,
   validateSalesDraft
 } = require('../src/lib/salesWorkspace')
+const { buildMembershipAgreementHtml } = require('../utils/renderMembershipAgreement')
 
 function validDraft(overrides = {}) {
   return normalizeSalesDraft({
@@ -55,13 +57,24 @@ test('sales pricing applies an approved promotion only to the platform fee', () 
   assert.equal(result.pricing.initial_payment_cents, 332810)
 })
 
-test('sales agreements use successful payment as the membership start basis', () => {
+test('sales agreements use concrete Denver dates and clamp leap-day renewal', () => {
   const draft = validDraft({ first_role_prepay_selected: false })
   const { package_snapshot: packageSnapshot } = calculatePricing(draft)
-  const agreement = agreementInputFromDraft(draft, packageSnapshot)
-  assert.equal(agreement.term_start_basis, 'successful_payment')
-  assert.equal(agreement.initial_term_start, '')
-  assert.equal(agreement.initial_renewal_date, '')
+  const schedule = agreementSchedule('2028-02-29T19:00:00.000Z')
+  const agreement = agreementInputFromDraft(draft, packageSnapshot, schedule)
+  assert.equal(agreement.term_start_basis, 'agreement_date')
+  assert.equal(agreement.initial_term_start, '2028-02-29')
+  assert.equal(agreement.initial_renewal_date, '2029-02-28')
+  assert.equal(schedule.expires_at, '2028-03-01T07:00:00.000Z')
+  const rendered = buildMembershipAgreementHtml(agreement, {
+    showPackageTerms: true,
+    generatedAt: '2028-02-29T19:00:00.000Z',
+    timeZone: 'America/Denver'
+  }).html
+  assert.match(rendered, /February 29, 2028/)
+  assert.match(rendered, /February 28, 2029/)
+  assert.match(rendered, /Signature and initial payment deadline/)
+  assert.doesNotMatch(rendered, /Successful initial payment date|One year after initial payment|successful payment date controls/i)
 })
 
 test('deal status reflects signature, payment, activation, and cancellation states', () => {
@@ -70,6 +83,16 @@ test('deal status reflects signature, payment, activation, and cancellation stat
   assert.equal(deriveDealStatus({ status: 'checkout_pending' }, { status: 'signed', checkout_status: 'pending_payment' }), 'checkout_in_progress')
   assert.equal(deriveDealStatus({ status: 'completed' }, { checkout_status: 'paid' }), 'activated')
   assert.equal(deriveDealStatus({ status: 'canceled' }, { status: 'voided' }), 'canceled')
+  assert.equal(deriveDealStatus(
+    { status: 'agreement_pending' },
+    { status: 'signed', agreement_expires_at: '2026-09-19T06:00:00.000Z' },
+    new Date('2026-09-19T06:00:00.000Z')
+  ), 'expired')
+  assert.equal(deriveDealStatus(
+    { status: 'completed', activated_at: '2026-09-19T05:59:00.000Z' },
+    { status: 'signed', checkout_status: 'paid', agreement_expires_at: '2026-09-19T06:00:00.000Z' },
+    new Date('2026-09-20T06:00:00.000Z')
+  ), 'activated')
 })
 
 test('fingerprint is stable across object key order', () => {

@@ -36,3 +36,18 @@ test('sales service grants keep browser roles denied and give Express only requi
   assert.doesNotMatch(grantsSql, /grant (?:all|[^;]*update[^;]*|[^;]*delete[^;]*) on table public\.sales_deal_events/)
   assert.doesNotMatch(grantsSql, /grant (?:all|[^;]*update[^;]*|[^;]*delete[^;]*) on table public\.sales_enterprise_handoffs/)
 })
+
+test('sales completion migration adds dated agreements, rep Slack mapping, and atomic replacement', () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, '..', 'supabase', 'migrations', '20260919161500_sales_completion_tweaks.sql'),
+    'utf8'
+  )
+  for (const field of ['slack_user_id', 'sales_rep_slack_enqueued_at', 'agreement_effective_date', 'agreement_renewal_date', 'agreement_expires_at']) {
+    assert.match(sql, new RegExp(field, 'i'))
+  }
+  assert.match(sql, /create or replace function public\.replace_sales_assisted_agreement/i)
+  assert.match(sql, /and agreement_id = p_old_agreement_id/i)
+  assert.match(sql, /activation_claimed_at is null/i)
+  assert.match(sql, /status = 'superseded'/i)
+  assert.match(sql, /revoke all on function public\.replace_sales_assisted_agreement[\s\S]*from public, anon, authenticated/i)
+})

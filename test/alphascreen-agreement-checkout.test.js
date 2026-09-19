@@ -215,6 +215,7 @@ function agreement(overrides = {}) {
     draft_pdf_path: 'membership-agreements/draft.pdf',
     executed_pdf_path: 'membership-agreements/executed.pdf',
     signer_token_expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    agreement_expires_at: overrides.agreement_expires_at === undefined ? null : overrides.agreement_expires_at,
     opened_at: null,
     sent_at: new Date().toISOString(),
     signed_at: new Date().toISOString(),
@@ -447,8 +448,9 @@ test('signed public purchase checkout passes first-role prepay line item metadat
 })
 
 test('signed sales-assisted agreement uses the public purchase checkout path', async () => {
+  const agreementDeadline = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
   const db = makeDb({
-    membershipAgreements: [agreement({ source: 'sales_assisted' })],
+    membershipAgreements: [agreement({ source: 'sales_assisted', agreement_expires_at: agreementDeadline })],
     purchaseIntents: [intent()]
   })
   const response = await postCheckout(buildApp(db))
@@ -457,6 +459,19 @@ test('signed sales-assisted agreement uses the public purchase checkout path', a
   assert.equal(db.checkoutCalls.length, 1)
   assert.equal(db.checkoutCalls[0].metadata.purchase_intent_id, INTENT_ID)
   assert.equal(db.checkoutCalls[0].planTier, 'basic')
+  assert.equal(db.checkoutCalls[0].checkoutExpiresAt, agreementDeadline)
+})
+
+test('expired sales-assisted agreement cannot create checkout or access records', async () => {
+  const db = makeDb({
+    membershipAgreements: [agreement({ source: 'sales_assisted', agreement_expires_at: new Date(Date.now() - 1000).toISOString() })],
+    purchaseIntents: [intent()]
+  })
+  const response = await postCheckout(buildApp(db))
+  assert.equal(response.status, 410)
+  assert.equal(response.body.code, 'agreement_expired')
+  assert.equal(db.checkoutCalls.length, 0)
+  assert.equal(db.inserts.length, 0)
 })
 
 test('unsigned public agreement cannot start checkout and creates no access records', async () => {

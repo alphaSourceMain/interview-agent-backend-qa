@@ -13,7 +13,7 @@ require.cache[supabaseClientPath] = {
   exports: { supabaseAdmin: {} }
 }
 
-const { promotionEligibilityError } = require('../routes/sales')
+const { promotionEligibilityError, replacementCheckoutDisposition } = require('../routes/sales')
 const {
   shouldApplyGenericSubscriptionUpdate,
   claimAgreementPurchaseActivation
@@ -38,6 +38,18 @@ test('sales promotion validation rejects restrictions that cannot be honored bef
     /USD/i
   )
   assert.equal(promotionEligibilityError({ restrictions: {} }, pricing), '')
+})
+
+test('expired agreement replacement refuses completed or paid Stripe sessions', () => {
+  assert.equal(replacementCheckoutDisposition({ status: 'complete', payment_status: 'unpaid' }), 'paid')
+  assert.equal(replacementCheckoutDisposition({ status: 'open', payment_status: 'paid' }), 'paid')
+  assert.equal(replacementCheckoutDisposition({ status: 'open', payment_status: 'unpaid' }), 'open')
+  assert.equal(replacementCheckoutDisposition({ status: 'expired', payment_status: 'unpaid' }), 'expired')
+  assert.equal(replacementCheckoutDisposition(null), 'missing')
+  const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'sales.js'), 'utf8')
+  assert.match(source, /checkout\.sessions\.retrieve\(checkoutSessionId\)/)
+  assert.match(source, /agreement_already_paid/)
+  assert.match(source, /replace_sales_assisted_agreement/)
 })
 
 test('sales migration prevents preview reuse and concurrent active buyer duplicates', () => {

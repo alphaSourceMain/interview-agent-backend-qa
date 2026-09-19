@@ -744,13 +744,21 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
 
   const { data: agreement, error: agreementErr } = await db
     .from('membership_agreements')
-    .select('id,client_id,status,is_current,checkout_status,checkout_session_id,checkout_paid_at,primary_admin_name,admin_email,client_legal_name,dba_trade_name,membership_tier,billing_option,auto_renew,template_snapshot')
+    .select('id,client_id,status,is_current,checkout_status,checkout_session_id,checkout_paid_at,primary_admin_name,admin_email,client_legal_name,dba_trade_name,membership_tier,billing_option,auto_renew,template_snapshot,superseded_by_agreement_id')
     .eq('id', agreementId)
     .maybeSingle();
   if (agreementErr) throw new Error(agreementErr.message || 'Agreement lookup failed');
   if (!agreement) return { ok: false, status: 'agreement_not_found' };
 
   const intent = await loadPublicPurchaseIntent(db, agreement);
+  if (cleanText(agreement.superseded_by_agreement_id) || (intent?.agreement_id && cleanText(intent.agreement_id) !== agreementId)) {
+    logger.warn?.('[public-purchase-activation] superseded_agreement_payment_requires_review', {
+      agreement_id: agreementId,
+      purchase_intent_id: intent?.id || null,
+      checkout_session_id: checkoutSessionId || null
+    });
+    return { ok: false, status: 'agreement_superseded', purchase_intent_id: intent?.id || null };
+  }
   if (cleanText(intent?.status).toLowerCase() === 'canceled' || cleanText(intent?.canceled_at)) {
     logger.warn?.('[public-purchase-activation] canceled_intent_payment_requires_review', {
       agreement_id: agreementId,

@@ -160,7 +160,9 @@ async function createSubscriptionCheckoutSession({
   promotionCodeId = '',
   enterpriseFees = null,
   requestContext = null,
-  idempotencyKey = ''
+  idempotencyKey = '',
+  checkoutExpiresAt = null,
+  now = null
 }) {
   const normalizedClientId = String(clientId || '').trim()
   const normalizedPlanTier = normalizePlanTier(planTier)
@@ -171,6 +173,19 @@ async function createSubscriptionCheckoutSession({
   const normalizedIdempotencyKey = normalizeIdempotencyKey(idempotencyKey)
   const normalizedPromotionCodeId = String(promotionCodeId || '').trim().slice(0, 255)
   const firstRolePrepayCheckout = normalizeFirstRolePrepayCheckout(firstRolePrepay)
+  const nowMs = now ? new Date(now).getTime() : Date.now()
+  let checkoutExpiresAtEpoch = null
+  if (checkoutExpiresAt) {
+    const requestedExpiryMs = new Date(checkoutExpiresAt).getTime()
+    if (!Number.isFinite(nowMs) || !Number.isFinite(requestedExpiryMs)) {
+      throw makeError(400, 'invalid_checkout_expiration', 'Checkout expiration is invalid.')
+    }
+    const remainingMs = requestedExpiryMs - nowMs
+    if (remainingMs < 30 * 60 * 1000) {
+      throw makeError(410, 'agreement_checkout_window_closed', 'This agreement is too close to expiration. Request a newly dated agreement.')
+    }
+    checkoutExpiresAtEpoch = Math.floor(Math.min(requestedExpiryMs, nowMs + (24 * 60 * 60 * 1000) - 1000) / 1000)
+  }
 
   if (!normalizedClientId) throw makeError(400, 'client_id_required', 'Client id is required.')
   if (!normalizedPlanTier) throw makeError(400, 'invalid_plan_tier', 'Invalid plan tier.')
@@ -365,7 +380,8 @@ async function createSubscriptionCheckoutSession({
     metadata: checkoutMetadata,
     subscription_data: {
       metadata: checkoutMetadata
-    }
+    },
+    ...(checkoutExpiresAtEpoch ? { expires_at: checkoutExpiresAtEpoch } : {})
   }
 
   let checkoutClientSecret = null

@@ -427,6 +427,16 @@ test('sales-assisted activation starts the membership on successful payment', as
   assert.equal(db.purchaseIntents[0].activated_at, '2026-06-23T12:00:00.000Z')
 })
 
+test('new sales-assisted activation preserves concrete agreement dates', async () => {
+  const db = makeDb('pro', 'annual', { source: 'sales_assisted', termStartBasis: 'agreement_date' })
+  db.membershipAgreements[0].initial_term_start = '2026-09-19'
+  db.membershipAgreements[0].initial_renewal_date = '2027-09-19'
+  const { result } = await activateCase('pro', 'annual', { db })
+  assert.equal(result.ok, true)
+  assert.equal(db.membershipAgreements[0].initial_term_start, '2026-09-19')
+  assert.equal(db.membershipAgreements[0].initial_renewal_date, '2027-09-19')
+})
+
 test('public purchase activation creates first-role prepay credit once when selected', async () => {
   const db = makeDb('basic', 'monthly', { firstRolePrepaySelected: true })
   const commonOptions = {

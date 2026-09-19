@@ -762,7 +762,7 @@ router.post('/', async (req, res) => {
         if (isPaidAgreementCheckout) {
           await markAgreementCheckoutPaid(metadataAgreementId, {
             checkoutSessionId: pickId(eventObject?.id) || null,
-            paidAt: new Date().toISOString(),
+            paidAt: toIsoFromUnixSeconds(event?.created) || new Date().toISOString(),
             subscription: checkoutSubscription || (subscriptionId ? await stripe.subscriptions.retrieve(subscriptionId) : null),
             fallbackCustomerId: customerId,
             fallbackSubscriptionId: subscriptionId,
@@ -853,7 +853,7 @@ router.post('/', async (req, res) => {
 
       if (isAgreementCheckoutInvoice) {
         await markAgreementCheckoutPaid(metadataAgreementId, {
-          paidAt: new Date().toISOString(),
+          paidAt: toIsoFromUnixSeconds(event?.created) || new Date().toISOString(),
           subscription: invoiceSubscription || null,
           fallbackCustomerId: customerId,
           fallbackSubscriptionId: subscriptionId,

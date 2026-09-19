@@ -15,6 +15,7 @@ require.cache[supabaseClientPath] = {
 
 const {
   buildSalesWonPayload,
+  buildSlackSalesRepMessage,
   buildSlackSalesWonMessage,
   postSlackMessage,
   retryDelaySeconds
@@ -50,7 +51,7 @@ async function invokeRouter(router, secret) {
   return response;
 }
 
-test('sales-won Slack message is concise, financial, and safe for an internal channel', () => {
+test('sales-won Slack message is celebratory, minimal, and safe for an internal channel', () => {
   const payload = buildSalesWonPayload({
     id: DELIVERY_ID,
     company_dba: 'Acme <!channel> & Dental',
@@ -64,13 +65,34 @@ test('sales-won Slack message is concise, financial, and safe for an internal ch
   }, { display_name: 'Michael Afesi' });
   const message = buildSlackSalesWonMessage(payload);
   const serialized = JSON.stringify(message);
-  assert.match(message.text, /New alphaScreen membership activated/);
+  assert.match(message.text, /completed checkout and is now active/);
   assert.match(serialized, /Essential/);
   assert.match(serialized, /Michael Afesi/);
-  assert.match(serialized, /\$3,628\.10/);
+  assert.doesNotMatch(serialized, /\$|3,628|discount|deal/i);
   assert.doesNotMatch(serialized, /<!channel>/);
   assert.match(serialized, /&lt;!channel&gt; &amp; Dental/);
   assert.doesNotMatch(serialized, /buyer_email|buyer_phone/i);
+});
+
+test('sales representative DM uses the stored Slack member destination and human copy', async () => {
+  let captured = null;
+  const payload = {
+    company_name: 'Acme Dental',
+    membership: 'Pro',
+    billing_cadence: 'Annual',
+    sales_representative: 'Michael Afesi',
+    slack_user_id: 'U123456789'
+  };
+  assert.match(buildSlackSalesRepMessage(payload).text, /Acme Dental completed checkout and is now active\. Great work!/);
+  await postSlackMessage({ id: DELIVERY_ID, event_type: 'sales_won_rep_dm', payload }, {
+    env: { SLACK_SALES_WON_BOT_TOKEN: 'xoxb-test-token', SLACK_SALES_WON_CHANNEL_ID: 'C123SALES' },
+    fetchImpl: async (_url, request) => {
+      captured = JSON.parse(request.body);
+      return fakeSlackResponse({ ok: true, channel: 'D123REP', ts: '123.456' });
+    }
+  });
+  assert.equal(captured.channel, 'U123456789');
+  assert.notEqual(captured.channel, 'C123SALES');
 });
 
 test('missing sales representative metadata does not fall back to an email address', () => {
@@ -144,6 +166,21 @@ test('permanent Slack configuration errors fail without repeated retries', async
     }),
     (error) => error.code === 'invalid_auth' && error.retryable === false
   );
+});
+
+test('Slack DM capability errors are permanent and never fall back to the sales channel', async () => {
+  let capturedChannel = null;
+  await assert.rejects(
+    postSlackMessage({ id: DELIVERY_ID, event_type: 'sales_won_rep_dm', payload: { slack_user_id: 'U123456789' } }, {
+      env: { SLACK_SALES_WON_BOT_TOKEN: 'xoxb-test-token', SLACK_SALES_WON_CHANNEL_ID: 'C123SALES' },
+      fetchImpl: async (_url, request) => {
+        capturedChannel = JSON.parse(request.body).channel;
+        return fakeSlackResponse({ ok: false, error: 'cannot_dm_bot' });
+      }
+    }),
+    (error) => error.code === 'cannot_dm_bot' && error.retryable === false
+  );
+  assert.equal(capturedChannel, 'U123456789');
 });
 
 test('internal worker requires its dedicated secret and returns processor summary', async () => {

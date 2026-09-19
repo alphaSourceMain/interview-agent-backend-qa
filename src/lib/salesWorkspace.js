@@ -1,6 +1,8 @@
 'use strict'
 
 const crypto = require('crypto')
+const { addDays, addYears, format: formatDate, parseISO } = require('date-fns')
+const { formatInTimeZone, fromZonedTime } = require('date-fns-tz')
 const {
   buildAlphaScreenPackageSnapshot,
   listPublicAlphaScreenPackages,
@@ -9,6 +11,7 @@ const {
 } = require('./alphaScreenPackages')
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const SALES_BUSINESS_TIME_ZONE = 'America/Denver'
 const DEAL_STATUSES = Object.freeze([
   'agreement_sent',
   'signed_payment_needed',
@@ -160,7 +163,28 @@ function listSalesPackages(options = {}) {
   }))
 }
 
-function agreementInputFromDraft(draft, packageSnapshot) {
+function agreementSchedule(now = new Date(), timeZone = SALES_BUSINESS_TIME_ZONE) {
+  const instant = now instanceof Date ? now : new Date(now)
+  if (Number.isNaN(instant.getTime())) throw makeSalesError(500, 'invalid_agreement_clock', 'Agreement dates could not be calculated.')
+  const effectiveDate = formatInTimeZone(instant, timeZone, 'yyyy-MM-dd')
+  const renewalDate = formatDate(addYears(parseISO(effectiveDate), 1), 'yyyy-MM-dd')
+  const nextDate = formatDate(addDays(parseISO(effectiveDate), 1), 'yyyy-MM-dd')
+  const expiresAt = fromZonedTime(`${nextDate}T00:00:00`, timeZone).toISOString()
+  return {
+    effective_date: effectiveDate,
+    renewal_date: renewalDate,
+    expires_at: expiresAt,
+    time_zone: timeZone
+  }
+}
+
+function isAgreementExpired(agreement = {}, now = new Date()) {
+  const deadline = Date.parse(String(agreement?.agreement_expires_at || ''))
+  const clock = now instanceof Date ? now.getTime() : new Date(now).getTime()
+  return Number.isFinite(deadline) && Number.isFinite(clock) && deadline <= clock
+}
+
+function agreementInputFromDraft(draft, packageSnapshot, schedule = agreementSchedule()) {
   return {
     client_id: '',
     client_legal_name: draft.company_legal_name,
@@ -174,24 +198,26 @@ function agreementInputFromDraft(draft, packageSnapshot) {
     included_interviews_per_role: packageSnapshot.included_interviews_per_role,
     max_interview_minutes: packageSnapshot.max_interview_minutes,
     first_role_prepay: packageSnapshot.first_role_prepay,
-    initial_term_start: '',
-    initial_renewal_date: '',
-    term_start_basis: 'successful_payment',
+    initial_term_start: schedule.effective_date,
+    initial_renewal_date: schedule.renewal_date,
+    agreement_expires_at: schedule.expires_at,
+    term_start_basis: 'agreement_date',
     billing_option: draft.billing_cadence,
     auto_renew: true,
     notice_deadline_days: 30
   }
 }
 
-function deriveDealStatus(intent = {}, agreement = null) {
+function deriveDealStatus(intent = {}, agreement = null, now = new Date()) {
   const intentStatus = trimText(intent.status, 40).toLowerCase()
   const agreementStatus = trimText(agreement?.status, 40).toLowerCase()
   const checkoutStatus = trimText(agreement?.checkout_status, 40).toLowerCase()
   if (intentStatus === 'canceled' || agreementStatus === 'voided') return 'canceled'
-  if (intentStatus === 'expired') return 'expired'
   if (intentStatus === 'completed' || intent.activated_at || checkoutStatus === 'paid') {
     return intentStatus === 'completed' || intent.activated_at ? 'activated' : 'setup_in_progress'
   }
+  if (isAgreementExpired(agreement, now)) return 'expired'
+  if (intentStatus === 'expired') return 'expired'
   if (intentStatus === 'checkout_pending' || checkoutStatus === 'pending_payment') return 'checkout_in_progress'
   if (agreementStatus === 'signed') return 'signed_payment_needed'
   if (agreementStatus === 'sent') return 'agreement_sent'
@@ -217,7 +243,7 @@ const STATUS_ACTIONS = Object.freeze({
   setup_in_progress: ['escalate'],
   activated: ['view'],
   needs_attention: ['escalate'],
-  expired: ['start_replacement', 'cancel'],
+  expired: ['resend_agreement', 'cancel'],
   canceled: ['view']
 })
 
@@ -251,9 +277,11 @@ function safeDeal(intent, agreement = null) {
 module.exports = {
   DEAL_STATUSES,
   agreementInputFromDraft,
+  agreementSchedule,
   calculatePricing,
   deriveDealStatus,
   fingerprint,
+  isAgreementExpired,
   listSalesPackages,
   makeSalesError,
   normalizeSalesDraft,

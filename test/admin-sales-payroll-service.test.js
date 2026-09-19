@@ -193,6 +193,33 @@ test('commission totals sum record-level rounded values exactly across represent
   assert.equal(result.policy.rounding_basis, 'per_record');
 });
 
+test('non-rostered admin sales remain visible but do not accrue contractor commission', async () => {
+  const db = makeDb({
+    public_purchase_intents: [{
+      id: '22222222-2222-4222-8222-222222222222',
+      status: 'completed',
+      channel: 'sales_assisted',
+      selected_plan_key: 'pro',
+      selected_billing_cadence: 'annual',
+      company_legal_name: 'Admin Assisted LLC',
+      buyer_email: 'buyer@example.com',
+      created_by_user_id: 'admin-user-1',
+      created_by_email: 'admin@example.com',
+      platform_fee_cents: 649900,
+      promotion_discount_cents: 49900,
+      activated_at: '2026-09-10T18:00:00.000Z',
+    }],
+  });
+
+  const result = await buildAdminSalesPayrollPayload({ db, query: { date_from: '2026-09-01', date_to: '2026-09-18' } });
+  assert.equal(result.summary.closed_won_count, 1);
+  assert.equal(result.summary.net_membership_cents, 600000);
+  assert.equal(result.summary.commission_cents, 0);
+  assert.equal(result.sales[0].commission_eligible, false);
+  assert.equal(result.sales[0].commission_cents, 0);
+  assert.equal(result.by_representative[0].commission_cents, 0);
+});
+
 test('adjustment validation rejects invalid values and preserves the selected effective date', () => {
   assert.throws(() => normalizeAdjustmentInput({}), /Effective date must use YYYY-MM-DD/);
   const normalized = normalizeAdjustmentInput({

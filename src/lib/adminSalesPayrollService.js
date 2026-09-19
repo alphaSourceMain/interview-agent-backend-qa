@@ -163,7 +163,8 @@ function repView(row = {}) {
 function saleView(row = {}, repsById = new Map()) {
   const calculated = calculateSaleCommission(row);
   const repId = trimText(row.created_by_user_id, 120);
-  const rep = repsById.get(repId) || {
+  const rosteredRep = repsById.get(repId) || null;
+  const rep = rosteredRep || {
     user_id: repId,
     email: trimText(row.created_by_email, 254),
     display_name: trimText(row.created_by_email, 254) || 'Unknown representative',
@@ -180,6 +181,8 @@ function saleView(row = {}, repsById = new Map()) {
     billing_cadence: trimText(row.selected_billing_cadence, 20),
     representative: rep,
     ...calculated,
+    commission_eligible: Boolean(rosteredRep),
+    commission_cents: rosteredRep ? calculated.commission_cents : 0,
   };
 }
 

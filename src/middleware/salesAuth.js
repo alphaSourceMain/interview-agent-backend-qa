@@ -6,7 +6,7 @@ function createRequireSalesRep(options = {}) {
   const db = options.db || supabaseAdmin
   return async function requireSalesRep(req, res, next) {
     const userId = String(req.user?.id || '').trim()
-    const verifiedEmail = String(req.user?.email || '').trim().toLowerCase()
+    const verifiedEmail = String(req.user?.email || '').trim()
     if (!userId) {
       return res.status(401).json({
         error: 'authentication_required',

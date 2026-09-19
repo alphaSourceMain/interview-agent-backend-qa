@@ -68,8 +68,8 @@ test('sales authorization gives an active rep precedence and attaches safe field
   assert.deepEqual(calls, ['sales_reps'])
 })
 
-test('sales authorization accepts an active global admin by verified email', async () => {
-  const req = { user: { id: 'admin-user-1', email: 'ADMIN@example.com' } }
+test('sales authorization accepts an active global admin by the same verified email used by admin auth', async () => {
+  const req = { user: { id: 'admin-user-1', email: 'Admin@example.com' } }
   const res = responseRecorder()
   const calls = []
   let nextCalled = false
@@ -79,7 +79,7 @@ test('sales authorization accepts an active global admin by verified email', asy
   assert.equal(nextCalled, true)
   assert.deepEqual(req.salesRep, {
     user_id: 'admin-user-1',
-    email: 'admin@example.com',
+    email: 'Admin@example.com',
     display_name: 'Global Admin',
     access_role: 'global_admin'
   })

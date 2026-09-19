@@ -23,12 +23,15 @@ class FakeQuery {
     this.ascending = true;
     this.insertPayload = null;
     this.singleMode = '';
+    this.limitCount = null;
   }
 
   select() { return this; }
   eq(column, value) { this.filters.push({ column, value: String(value) }); return this; }
   gte(column, value) { this.ranges.push({ column, value: new Date(value).getTime(), type: 'gte' }); return this; }
   lt(column, value) { this.ranges.push({ column, value: new Date(value).getTime(), type: 'lt' }); return this; }
+  not(column, operator, value) { this.filters.push({ column, operator, value }); return this; }
+  limit(count) { this.limitCount = Number(count); return this; }
   order(column, options = {}) { this.orderField = column; this.ascending = options.ascending === true; return this; }
   insert(payload) { this.insertPayload = { ...payload }; return this; }
   maybeSingle() { this.singleMode = 'maybe'; return this.execute(); }
@@ -41,7 +44,11 @@ class FakeQuery {
       return Promise.resolve({ data: { ...this.insertPayload }, error: null });
     }
     let rows = (this.db.tables[this.table] || []).map((row) => ({ ...row }));
-    for (const filter of this.filters) rows = rows.filter((row) => String(row[filter.column] || '') === filter.value);
+    for (const filter of this.filters) {
+      rows = rows.filter((row) => filter.operator === 'is' && filter.value == null
+        ? row[filter.column] != null
+        : String(row[filter.column] || '') === filter.value);
+    }
     for (const range of this.ranges) {
       rows = rows.filter((row) => {
         const value = new Date(row[range.column] || '').getTime();
@@ -54,6 +61,7 @@ class FakeQuery {
         return this.ascending ? comparison : -comparison;
       });
     }
+    if (Number.isFinite(this.limitCount)) rows = rows.slice(0, this.limitCount);
     if (this.singleMode) return Promise.resolve({ data: rows[0] || null, error: null });
     return { data: rows, error: null };
   }
@@ -150,7 +158,28 @@ test('payroll report groups sales and period adjustments by representative', asy
   assert.equal(result.summary.adjusted_net_membership_cents, 317920);
   assert.equal(result.summary.commission_cents, 158960);
   assert.equal(result.by_representative[0].commission_cents, 158960);
+  assert.equal(result.related_sales[0].label, 'Acme');
   assert.deepEqual(result.policy.excluded, ['role_fees', 'interview_fees', 'first_role_prepayment']);
+});
+
+test('commission totals sum record-level rounded values exactly across representatives', async () => {
+  const repA = '11111111-1111-4111-8111-111111111111';
+  const repB = '22222222-2222-4222-8222-222222222222';
+  const db = makeDb({
+    sales_reps: [
+      { user_id: repA, email: 'a@example.com', display_name: 'Rep A', active: true },
+      { user_id: repB, email: 'b@example.com', display_name: 'Rep B', active: true },
+    ],
+    sales_commission_adjustments: [
+      { id: 'a', sales_rep_user_id: repA, effective_at: '2026-09-10T06:00:00.000Z', adjustment_type: 'manual_adjustment', direction: 'credit', amount_cents: 1, reason: 'One cent A', created_at: '2026-09-10T06:00:00.000Z' },
+      { id: 'b', sales_rep_user_id: repB, effective_at: '2026-09-10T06:00:00.000Z', adjustment_type: 'manual_adjustment', direction: 'credit', amount_cents: 1, reason: 'One cent B', created_at: '2026-09-10T06:00:00.000Z' },
+    ],
+  });
+  const result = await buildAdminSalesPayrollPayload({ db, query: { date_from: '2026-09-01', date_to: '2026-09-18' } });
+  assert.equal(result.summary.commission_cents, 2);
+  assert.equal(result.by_representative.reduce((sum, row) => sum + row.commission_cents, 0), 2);
+  assert.equal(result.adjustments.reduce((sum, row) => sum + row.commission_impact_cents, 0), 2);
+  assert.equal(result.policy.rounding_basis, 'per_record');
 });
 
 test('adjustment validation rejects invalid values and preserves the selected effective date', () => {

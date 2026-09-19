@@ -7,6 +7,7 @@ const COMMISSION_RATE = 0.5;
 const DOCUMENT_BUCKET = 'sales-payroll-documents';
 const DOCUMENT_URL_TTL_SECONDS = 300;
 const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
+const RELATED_SALES_LIMIT = 500;
 const PAYROLL_TIME_ZONE = trimText(process.env.SALES_PAYROLL_TIME_ZONE, 80) || 'America/Denver';
 const ALLOWED_DOCUMENT_TYPES = new Set([
   'application/pdf',
@@ -50,6 +51,17 @@ const ADJUSTMENT_COLUMNS = [
   'documentation_size_bytes',
   'created_by_email',
   'created_at',
+].join(',');
+const RELATED_SALE_COLUMNS = [
+  'id',
+  'company_legal_name',
+  'company_dba',
+  'buyer_first_name',
+  'buyer_last_name',
+  'buyer_email',
+  'created_by_user_id',
+  'created_by_email',
+  'activated_at',
 ].join(',');
 
 function trimText(value, max = 300) {
@@ -114,7 +126,8 @@ function safeCents(value) {
 }
 
 function commissionCents(value) {
-  return Math.round(Number(value || 0) * COMMISSION_RATE);
+  const numeric = Number(value || 0);
+  return Math.sign(numeric) * Math.round(Math.abs(numeric) * COMMISSION_RATE);
 }
 
 function calculateSaleCommission(row = {}) {
@@ -215,16 +228,17 @@ function addSaleToTotals(totals, sale) {
   totals.gross_membership_cents += sale.gross_membership_cents;
   totals.discounts_cents += sale.discount_cents;
   totals.net_membership_cents += sale.net_membership_cents;
+  totals.commission_cents += sale.commission_cents;
 }
 
 function addAdjustmentToTotals(totals, adjustment) {
   if (adjustment.direction === 'credit') totals.credits_cents += adjustment.amount_cents;
   else totals.deductions_cents += adjustment.amount_cents;
+  totals.commission_cents += adjustment.commission_impact_cents;
 }
 
 function finalizeTotals(totals) {
   totals.adjusted_net_membership_cents = totals.net_membership_cents - totals.deductions_cents + totals.credits_cents;
-  totals.commission_cents = commissionCents(totals.adjusted_net_membership_cents);
   return totals;
 }
 
@@ -255,20 +269,43 @@ async function buildAdminSalesPayrollPayload({ db, query = {}, now = new Date(),
     .gte('effective_at', filters.from_iso)
     .lt('effective_at', filters.to_exclusive_iso)
     .order('effective_at', { ascending: false });
+  let relatedSalesQuery = db.from('public_purchase_intents')
+    .select(RELATED_SALE_COLUMNS)
+    .eq('channel', 'sales_assisted')
+    .eq('status', 'completed')
+    .not('activated_at', 'is', null)
+    .order('activated_at', { ascending: false })
+    .limit(RELATED_SALES_LIMIT);
   if (filters.representative_user_id) {
     salesQuery = salesQuery.eq('created_by_user_id', filters.representative_user_id);
     adjustmentsQuery = adjustmentsQuery.eq('sales_rep_user_id', filters.representative_user_id);
+    relatedSalesQuery = relatedSalesQuery.eq('created_by_user_id', filters.representative_user_id);
   }
-  const [repRows, saleRows, adjustmentRows] = await Promise.all([
+  const [repRows, saleRows, adjustmentRows, relatedSaleRows] = await Promise.all([
     repsPromise,
     readRows(salesQuery, 'sales_read_failed', 'Could not load completed sales.'),
     readRows(adjustmentsQuery, 'payroll_adjustments_read_failed', 'Could not load payroll adjustments.'),
+    readRows(relatedSalesQuery, 'related_sales_read_failed', 'Could not load related sales.'),
   ]);
 
   const representatives = repRows.map(repView);
   const repsById = new Map(representatives.map((rep) => [rep.user_id, rep]));
   const sales = saleRows.map((row) => saleView(row, repsById));
-  const salesById = new Map(sales.map((sale) => [sale.id, sale]));
+  const relatedSales = relatedSaleRows.map((row) => {
+    const repId = trimText(row.created_by_user_id, 120);
+    return {
+      id: trimText(row.id, 120),
+      label: saleLabel(row),
+      activated_at: row.activated_at || null,
+      representative: repsById.get(repId) || {
+        user_id: repId,
+        email: trimText(row.created_by_email, 254),
+        display_name: trimText(row.created_by_email, 254) || 'Unknown representative',
+        active: false,
+      },
+    };
+  });
+  const salesById = new Map(relatedSales.map((sale) => [sale.id, sale]));
   const adjustments = adjustmentRows.map((row) => adjustmentView(row, repsById, salesById));
   const summary = emptyTotals();
   const repTotals = new Map();
@@ -302,6 +339,7 @@ async function buildAdminSalesPayrollPayload({ db, query = {}, now = new Date(),
       excluded: ['role_fees', 'interview_fees', 'first_role_prepayment'],
       adjustment_period_basis: 'effective_at',
       time_zone: PAYROLL_TIME_ZONE,
+      rounding_basis: 'per_record',
     },
     filters: {
       date_from: filters.date_from,
@@ -312,6 +350,7 @@ async function buildAdminSalesPayrollPayload({ db, query = {}, now = new Date(),
     representatives,
     by_representative: byRepresentative,
     sales,
+    related_sales: relatedSales,
     adjustments,
   };
 }

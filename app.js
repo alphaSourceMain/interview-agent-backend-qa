@@ -126,6 +126,7 @@ const {
   safePublicPurchaseActionErrorBody,
   safePublicPurchasesErrorBody,
 } = require('./src/lib/adminPublicPurchasesService')
+const { createAdminSalesPayrollRouter } = require('./routes/adminSalesPayroll')
 const {
   sendSubscriptionCheckoutEmail,
   sendMemberRecoveryEmail,
@@ -6023,6 +6024,7 @@ adminRouter.delete('/client-members/:id', requireAuth, requireAdmin, async (req,
 })
 
 // Mount admin sub-routers (Billing + Accommodation Requests)
+adminRouter.use('/sales-payroll', requireAuth, requireAdmin, createAdminSalesPayrollRouter({ db: supabaseAdmin }))
 try {
   adminRouter.use('/billing', requireAuth, requireAdmin, require('./routes/adminBilling'))
 } catch (e) {

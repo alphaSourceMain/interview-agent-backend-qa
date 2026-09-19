@@ -144,7 +144,7 @@ test('payroll report groups sales and period adjustments by representative', asy
       activated_at: '2026-09-05T18:00:00.000Z',
     }],
     sales_commission_adjustments: [
-      { id: 'deduction', sales_rep_user_id: repId, effective_at: '2026-09-10T06:00:00.000Z', adjustment_type: 'refund', direction: 'deduction', amount_cents: 10000, reason: 'Partial refund', created_at: '2026-09-10T06:00:00.000Z' },
+      { id: 'deduction', sales_rep_user_id: repId, purchase_intent_id: '22222222-2222-4222-8222-222222222222', effective_at: '2026-09-10T06:00:00.000Z', adjustment_type: 'refund', direction: 'deduction', amount_cents: 10000, reason: 'Partial refund', created_at: '2026-09-10T06:00:00.000Z' },
       { id: 'credit', sales_rep_user_id: repId, effective_at: '2026-09-12T06:00:00.000Z', adjustment_type: 'manual_adjustment', direction: 'credit', amount_cents: 5000, reason: 'Correction', created_at: '2026-09-12T06:00:00.000Z' },
     ],
   });
@@ -159,6 +159,7 @@ test('payroll report groups sales and period adjustments by representative', asy
   assert.equal(result.summary.commission_cents, 158960);
   assert.equal(result.by_representative[0].commission_cents, 158960);
   assert.equal(result.related_sales[0].label, 'Acme');
+  assert.equal(result.adjustments.find((row) => row.id === 'deduction').related_sale.label, 'Acme');
   assert.deepEqual(result.policy.excluded, ['role_fees', 'interview_fees', 'first_role_prepayment']);
 });
 

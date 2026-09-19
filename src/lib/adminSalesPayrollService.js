@@ -305,7 +305,7 @@ async function buildAdminSalesPayrollPayload({ db, query = {}, now = new Date(),
       },
     };
   });
-  const salesById = new Map(relatedSales.map((sale) => [sale.id, sale]));
+  const salesById = new Map([...relatedSales, ...sales].map((sale) => [sale.id, sale]));
   const adjustments = adjustmentRows.map((row) => adjustmentView(row, repsById, salesById));
   const summary = emptyTotals();
   const repTotals = new Map();

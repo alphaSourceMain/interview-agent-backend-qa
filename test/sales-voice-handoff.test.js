@@ -5,6 +5,7 @@ const test = require('node:test');
 const crypto = require('node:crypto');
 const express = require('express');
 const {
+  buildSalesVoiceBootstrapPrompt,
   buildSalesVoiceAgentPrompt,
   createSalesVoiceHandoff,
   createSalesVoiceHandoffRouter,
@@ -14,7 +15,8 @@ const {
   salesVoiceHandoffEnabled,
   salesVoiceDatabaseRoutesEnabled,
   salesVoiceProviderEnabled,
-  validateSalesVoiceMessage
+  validateSalesVoiceMessage,
+  voiceContext,
 } = require('../src/lib/salesVoiceHandoff');
 
 const TOKEN = 'm'.repeat(48);
@@ -98,6 +100,27 @@ test('database-managed route resolves a token to fixed active recipients', async
   assert.equal(resolved.repEmail, 'michael@example.com');
   assert.equal(resolved.ghlNumber, '+17207904187');
   assert.equal(await routeForAuthorizationDb(`Bearer ${'z'.repeat(48)}`, db, dynamicEnv), null);
+});
+
+test('stable company-line token follows the current active assignment and returns runtime context', async () => {
+  const digest = crypto.createHash('sha256').update(TOKEN).digest('hex');
+  const tables = {
+    sales_phone_assignments: [{ id: 'assignment-2', team_member_id: 'member-2', phone_number_id: 'phone-1', status: 'active', transfer_enabled: false }],
+    sales_team_members: [{ id: 'member-2', display_name: 'New Representative', workspace_email: 'new.rep@example.com', slack_user_id: 'U987654321', status: 'active' }],
+    sales_phone_numbers: [{ id: 'phone-1', e164: '+17207904187', handoff_token_sha256: digest, active: true }],
+    sales_voice_configs: [{ assignment_id: 'assignment-2', notify_email: true, notify_slack: true, notify_sms: true, greeting_override: 'Thanks for calling alphaScreen.', approved_context: 'Essential and Pro are available.', timezone: 'America/Denver', business_hours: { summary: 'Weekdays' }, answer_approved_faqs: true, schedule_demos: true, status: 'applied', is_current: true }],
+  };
+  const db = { from(table) { const filters = []; return { select() { return this; }, eq(column, value) { filters.push([column, value]); return this; }, async maybeSingle() { return { data: tables[table].find((row) => filters.every(([column, value]) => row[column] === value)) || null, error: null }; } }; } };
+  const resolved = await routeForAuthorizationDb(`Bearer ${TOKEN}`, db, {
+    ...env,
+    SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ '+17207904187': 'https://services.leadconnectorhq.com/hooks/line-1' }),
+  });
+  assert.equal(resolved.repName, 'New Representative');
+  assert.deepEqual(voiceContext(resolved), {
+    status: 'ready', representative_name: 'New Representative', opening: 'Thanks for calling alphaScreen.', timezone: 'America/Denver',
+    business_hours: { summary: 'Weekdays' }, approved_product_context: 'Essential and Pro are available.',
+    capabilities: { answer_approved_faqs: true, schedule_demos: true, live_transfer: false },
+  });
 });
 
 test('database notification flags permit only the enabled fixed delivery channels', async () => {
@@ -227,6 +250,15 @@ test('agent prompt keeps implementation details out of speech and requires conse
   assert.match(prompt, /ask the caller to spell it/);
 });
 
+test('reusable Grok bootstrap prompt loads current line context and keeps tool names out of speech', () => {
+  const prompt = buildSalesVoiceBootstrapPrompt();
+  assert.match(prompt, /Before speaking, use the configured context action once/);
+  assert.match(prompt, /representative_name/);
+  assert.match(prompt, /Never say action, tool, or function names/);
+  assert.match(prompt, /explicit yes/);
+  assert.doesNotMatch(prompt, /Michael|Christopher|Epifanio|Daniel/);
+});
+
 test('phone endpoint identifies a fixed route from its token and rejects browser or malformed requests', async () => {
   const sent = [];
   const service = {
@@ -254,6 +286,9 @@ test('phone endpoint identifies a fixed route from its token and rejects browser
     const malformed = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: authorization }, body: '{' });
     assert.equal(malformed.status, 400);
     assert.equal((await fetch(url, { method: 'GET', headers: { Authorization: authorization } })).status, 405);
+    const contextResponse = await fetch(`${url}/context`, { method: 'GET', headers: { Authorization: authorization } });
+    assert.equal(contextResponse.status, 200);
+    assert.equal((await contextResponse.json()).representative_name, 'Michael Afesi');
     assert.equal((await fetch(`${url}/other`, { method: 'GET', headers: { Authorization: authorization } })).status, 404);
     assert.equal((await send(message, { Authorization: authorization })).status, 200);
     assert.deepEqual(sent, [{ input: message, routeKey: 'michael-afesi' }]);

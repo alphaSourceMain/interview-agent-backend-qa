@@ -8,7 +8,9 @@ const {
   reactivateSalesTeamMember,
   rotateSalesVoiceToken,
   safeSalesTeamError,
+  saveSalesLineSetup,
   saveSalesTeamMember,
+  syncSalesTeamMember,
 } = require('../src/lib/adminSalesTeamService');
 
 function createAdminSalesTeamRouter({ db } = {}) {
@@ -87,6 +89,24 @@ function createAdminSalesTeamRouter({ db } = {}) {
       const result = await rotateSalesVoiceToken({ db, memberId: req.params.memberId, actorId: req.user?.id || null });
       res.setHeader('Cache-Control', 'no-store');
       return res.json({ ok: true, ...result });
+    } catch (error) {
+      return respondError(req, res, error);
+    }
+  });
+
+  router.post('/members/:memberId/sync', async (req, res) => {
+    try {
+      const result = await syncSalesTeamMember({ db, memberId: req.params.memberId });
+      return res.json({ ok: true, ...result });
+    } catch (error) {
+      return respondError(req, res, error);
+    }
+  });
+
+  router.patch('/lines/:phoneId', async (req, res) => {
+    try {
+      const phone = await saveSalesLineSetup({ db, phoneId: req.params.phoneId, body: req.body || {}, actorId: req.user?.id || null });
+      return res.json({ ok: true, phone });
     } catch (error) {
       return respondError(req, res, error);
     }

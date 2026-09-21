@@ -21,6 +21,13 @@ const SALES_VOICE_TOOL = Object.freeze({
   }
 });
 
+const SALES_VOICE_CONTEXT_TOOL = Object.freeze({
+  type: 'function',
+  name: 'load_sales_line_context',
+  description: 'Load the current representative name, greeting, approved alphaScreen context, business hours, and allowed call capabilities for this line before speaking.',
+  parameters: { type: 'object', properties: {}, additionalProperties: false }
+});
+
 function cleanText(value, max = 500) {
   return String(value || '')
     .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, ' ')
@@ -163,35 +170,52 @@ async function routeForAuthorizationDb(authorization, db, env = process.env) {
   const match = /^Bearer ([^\s]{32,256})$/.exec(String(authorization || ''));
   if (!match) return null;
   const digest = hash(match[1]);
-  const assignmentResult = await db
-    .from('sales_phone_assignments')
-    .select('id,team_member_id,phone_number_id,status')
+  let phone = null;
+  let assignment = null;
+  const lineResult = await db.from('sales_phone_numbers')
+    .select('id,e164,active')
     .eq('handoff_token_sha256', digest)
-    .eq('status', 'active')
+    .eq('active', true)
     .maybeSingle();
-  if (assignmentResult.error || !assignmentResult.data) return null;
-  const assignment = assignmentResult.data;
+  if (!lineResult.error && lineResult.data) {
+    phone = lineResult.data;
+    const activeResult = await db.from('sales_phone_assignments')
+      .select('id,team_member_id,phone_number_id,status,transfer_enabled,backup_transfer_phone_e164')
+      .eq('phone_number_id', phone.id)
+      .eq('status', 'active')
+      .maybeSingle();
+    if (!activeResult.error) assignment = activeResult.data;
+  }
+  if (!assignment) {
+    const assignmentResult = await db.from('sales_phone_assignments')
+      .select('id,team_member_id,phone_number_id,status,transfer_enabled,backup_transfer_phone_e164')
+      .eq('handoff_token_sha256', digest)
+      .eq('status', 'active')
+      .maybeSingle();
+    if (assignmentResult.error || !assignmentResult.data) return null;
+    assignment = assignmentResult.data;
+  }
   const [memberResult, phoneResult] = await Promise.all([
     db.from('sales_team_members')
       .select('id,display_name,workspace_email,slack_user_id,status')
       .eq('id', assignment.team_member_id)
       .eq('status', 'active')
       .maybeSingle(),
-    db.from('sales_phone_numbers')
+    phone ? Promise.resolve({ data: phone, error: null }) : db.from('sales_phone_numbers')
       .select('id,e164,active')
       .eq('id', assignment.phone_number_id)
       .eq('active', true)
       .maybeSingle(),
   ]);
   const member = memberResult.data;
-  const phone = phoneResult.data;
+  phone = phoneResult.data;
   if (memberResult.error || phoneResult.error || !member || !phone) return null;
   const repName = cleanText(member.display_name, 120);
   const repEmail = cleanText(member.workspace_email, 254).toLowerCase();
   const slackUserId = cleanText(member.slack_user_id, 24);
   const ghlNumber = cleanText(phone.e164, 16);
   const configResult = await db.from('sales_voice_configs')
-    .select('notify_email,notify_slack,notify_sms,status,is_current')
+    .select('notify_email,notify_slack,notify_sms,status,is_current,greeting_override,approved_context,timezone,business_hours,answer_approved_faqs,schedule_demos')
     .eq('assignment_id', assignment.id)
     .eq('status', 'applied')
     .eq('is_current', true)
@@ -219,7 +243,31 @@ async function routeForAuthorizationDb(authorization, db, env = process.env) {
     notifyEmail,
     notifySlack,
     notifySms,
+    greeting: cleanText(config.greeting_override, 500),
+    approvedContext: cleanText(config.approved_context, 6000),
+    timezone: cleanText(config.timezone, 80),
+    businessHours: config.business_hours && typeof config.business_hours === 'object' ? config.business_hours : {},
+    answerApprovedFaqs: config.answer_approved_faqs === true,
+    scheduleDemos: config.schedule_demos === true,
+    transferEnabled: assignment.transfer_enabled === true,
   });
+}
+
+function voiceContext(route) {
+  const opening = route.greeting || `Hi, you've reached ${route.repName}'s alphaScreen line. ${route.repName} is unavailable right now, but I can take a message and make sure it reaches them.`;
+  return {
+    status: 'ready',
+    representative_name: route.repName,
+    opening,
+    timezone: route.timezone || 'America/Denver',
+    business_hours: route.businessHours || {},
+    approved_product_context: route.approvedContext || '',
+    capabilities: {
+      answer_approved_faqs: route.answerApprovedFaqs === true,
+      schedule_demos: route.scheduleDemos === true,
+      live_transfer: route.transferEnabled === true,
+    },
+  };
 }
 
 function humanMessage(input, route) {
@@ -369,7 +417,9 @@ function createSalesVoiceHandoffRouter(options = {}) {
       return res.status(503).json({ status: 'unavailable' });
     }
   });
+  router.get('/context', (req, res) => res.json(voiceContext(req.salesVoiceRoute)));
   router.all('/', (_req, res) => res.status(405).json({ status: 'method_not_allowed' }));
+  router.all('/context', (_req, res) => res.status(405).json({ status: 'method_not_allowed' }));
   router.use((_req, res) => res.status(404).json({ status: 'not_found' }));
   router.use((_error, _req, res, _next) => res.status(400).json({ status: 'invalid_request' }));
   return router;
@@ -382,9 +432,23 @@ function buildSalesVoiceAgentPrompt(repName, options = {}) {
   return `You are the alphaSource sales assistant answering ${name}'s alphaScreen sales line when ${name} is unavailable.\n\nOpen with: "${opening}"\n\nYour job is to collect a concise callback request, not to conduct a sales call. Ask one question at a time for the caller's full name, company name, callback phone, email, and reason for calling. Confirm the phone and email. If any name, company, or email spelling is unclear, ask the caller to spell it; never guess. Do not request payment details, passwords, authentication codes, candidate records, resumes, interview content, or other sensitive information. Do not promise a response time.\n\nRead back the contact details and a short natural-language message. Then ask: "Would you like me to send that message to ${name}?" Only after an explicit yes may you use the configured message action with confirmed=true. If the caller declines, do not send anything. Send at most once per call.\n\nNever say tool or function names, API, endpoint, parameters, providers, or delivery mechanics. Say only that you can send a message to ${name}. After an accepted or partial result, say: "Your message has been sent to ${name}." For any other result, say you could not confirm the message was sent and suggest calling back later. Do not retry.`;
 }
 
+function buildSalesVoiceBootstrapPrompt() {
+  return `You are the alphaSource sales assistant for one alphaScreen sales line. Before speaking, use the configured context action once. Use its representative_name, opening, business hours, approved product context, and capabilities as the only current line configuration. If context is unavailable, apologize briefly and end the call without collecting information.
+
+Say the returned opening naturally. The representative is unavailable. Help with approved alphaScreen questions only when answer_approved_faqs is true and the answer appears in approved_product_context. Schedule only when schedule_demos is true and a configured calendar action is available. Offer a live transfer only when live_transfer is true and a configured transfer is available. Otherwise, offer to take a message.
+
+For a message, ask one question at a time for the caller's full name, company name, callback phone, email, and reason for calling. Confirm the phone and email. If any name, company, or email spelling is unclear, ask the caller to spell it; never guess. Do not request payment details, passwords, authentication codes, candidate records, resumes, interview content, or other sensitive information. Do not promise a response time.
+
+Read back the contact details and a short natural-language message. Ask whether the caller wants that message sent to the named representative. Only after an explicit yes may you use the configured message action with confirmed=true. If the caller declines, do not send anything. Send at most once per call.
+
+Never say action, tool, or function names, API, endpoint, parameters, providers, or delivery mechanics. Say only that you can send a message to the support team or named representative. After an accepted or partial result, say the message has been sent. For any other result, say you could not confirm it was sent and suggest calling back later. Do not retry.`;
+}
+
 module.exports = {
   SALES_VOICE_TOOL,
+  SALES_VOICE_CONTEXT_TOOL,
   buildSalesVoiceAgentPrompt,
+  buildSalesVoiceBootstrapPrompt,
   createSalesVoiceHandoff,
   createSalesVoiceHandoffRouter,
   ghlWebhookForNumber,
@@ -394,5 +458,6 @@ module.exports = {
   salesVoiceHandoffEnabled,
   salesVoiceDatabaseRoutesEnabled,
   salesVoiceProviderEnabled,
-  validateSalesVoiceMessage
+  validateSalesVoiceMessage,
+  voiceContext,
 };

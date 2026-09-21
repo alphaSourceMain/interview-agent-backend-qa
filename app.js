@@ -127,6 +127,7 @@ const {
   safePublicPurchasesErrorBody,
 } = require('./src/lib/adminPublicPurchasesService')
 const { createAdminSalesPayrollRouter } = require('./routes/adminSalesPayroll')
+const { createAdminSalesTeamRouter } = require('./routes/adminSalesTeam')
 const {
   sendSubscriptionCheckoutEmail,
   sendMemberRecoveryEmail,
@@ -189,7 +190,7 @@ const supportVoiceGateway = createSupportVoiceGateway({
 })
 app.use('/api/support/voice', supportVoiceGateway.router)
 app.use('/api/support/phone-handoff', require('./src/lib/supportHandoff').createPhoneHandoffRouter())
-app.use('/api/sales/voice-handoff', require('./src/lib/salesVoiceHandoff').createSalesVoiceHandoffRouter())
+app.use('/api/sales/voice-handoff', require('./src/lib/salesVoiceHandoff').createSalesVoiceHandoffRouter({ db: supabaseAdmin }))
 
 // ---------- CORS ----------
 const DEFAULT_ORIGINS = corsDefaultOrigins
@@ -6026,6 +6027,7 @@ adminRouter.delete('/client-members/:id', requireAuth, requireAdmin, async (req,
 
 // Mount admin sub-routers (Billing + Accommodation Requests)
 adminRouter.use('/sales-payroll', requireAuth, requireAdmin, createAdminSalesPayrollRouter({ db: supabaseAdmin }))
+adminRouter.use('/sales-team', requireAuth, requireAdmin, createAdminSalesTeamRouter({ db: supabaseAdmin }))
 try {
   adminRouter.use('/billing', requireAuth, requireAdmin, require('./routes/adminBilling'))
 } catch (e) {

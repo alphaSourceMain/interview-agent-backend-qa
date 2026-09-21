@@ -19,6 +19,10 @@ The Grok agent states that the named representative is unavailable, collects the
 
 `POST /api/sales/voice-handoff` accepts the six exact tool fields documented by `SALES_VOICE_TOOL`. A distinct bearer token identifies each representative. The request cannot choose a recipient. The backend resolves the fixed Workspace email, Slack member ID, GHL number, and GHL notification workflow from server configuration.
 
+The global-admin **Sales Team & Call Routing** page is the operational source of truth for representative identity, the active GHL-number assignment, the Grok agent and fallback number, the approved agent context, transfer rules, and notification preferences. Active database assignments supersede the original representative-specific environment route table. The original table remains a rollback-compatible path during migration.
+
+Each active assignment has a distinct handoff token. Only its SHA-256 digest is stored. Rotating it invalidates the old token immediately and returns the replacement once to the global admin for the corresponding Grok message tool. Never place the plaintext token in source, database metadata, logs, screenshots, or release evidence.
+
 An approved message fans out to:
 
 1. A Slack DM from the existing alphaScreen Sales app.
@@ -43,6 +47,7 @@ Provider redirects are rejected. Slack renders every caller-provided field as pl
   - `slack_user_id`
   - `ghl_number`
   - `ghl_notification_webhook`
+- `SALES_VOICE_GHL_WEBHOOKS_JSON`: object mapping each company-owned GHL number in E.164 format to that number's fixed `leadconnectorhq.com` notification-workflow webhook. This capability URL remains server-side; the admin page stores only the workflow identifier.
 
 Keep the feature disabled unless all route objects validate. Never put bearer tokens in source, agent prompts, URLs, documentation, or logs.
 
@@ -57,7 +62,7 @@ The four named Grok Voice drafts were created on September 21, 2026. They have t
 - Epifanio Sierra: `agent_b32kYrh6mSVlrSK3`
 - Daniel Broyles: `agent_QzE6yzA9ZHC6P0wN`
 
-No GHL number routing was changed. Do not publish or attach a number until the fixed message tool and recipient routes are complete.
+No GHL number routing is changed merely by saving the admin record. **Apply changes** activates the database-owned recipient route and records the remaining GHL and Grok provider actions. Do not report either provider as synchronized until the saved GHL routing and published Grok agent have been verified.
 
 Publishing agents, provisioning Grok phone numbers, adding the sales-agent Workspace alias, creating a GHL private integration or workflow webhook, and changing live GHL routing are separate external changes. Complete those only against the confirmed QA route after reviewing the exact configuration.
 

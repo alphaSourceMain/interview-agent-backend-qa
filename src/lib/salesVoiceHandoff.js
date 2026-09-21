@@ -117,11 +117,15 @@ function parseRouteConfig(env = process.env) {
 }
 
 function salesVoiceHandoffEnabled(env = process.env) {
+  return salesVoiceProviderEnabled(env) &&
+    parseRouteConfig(env).length > 0;
+}
+
+function salesVoiceProviderEnabled(env = process.env) {
   return env.SALES_VOICE_HANDOFF_ENABLED === 'true' &&
     validEmail(env.SALES_VOICE_FROM_EMAIL) &&
     cleanText(env.SENDGRID_API_KEY, 500).length > 20 &&
-    cleanText(env.SLACK_SALES_WON_BOT_TOKEN, 500).length > 20 &&
-    parseRouteConfig(env).length > 0;
+    cleanText(env.SLACK_SALES_WON_BOT_TOKEN, 500).length > 20;
 }
 
 function routeForAuthorization(authorization, env = process.env) {
@@ -133,6 +137,62 @@ function routeForAuthorization(authorization, env = process.env) {
     if (crypto.timingSafeEqual(Buffer.from(route.tokenHash, 'hex'), Buffer.from(digest, 'hex'))) matched = route;
   }
   return matched;
+}
+
+function ghlWebhookForNumber(number, env = process.env) {
+  let mapping;
+  try {
+    mapping = JSON.parse(String(env.SALES_VOICE_GHL_WEBHOOKS_JSON || '{}'));
+  } catch {
+    return '';
+  }
+  if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) return '';
+  return safeGhlWebhook(mapping[number]);
+}
+
+async function routeForAuthorizationDb(authorization, db, env = process.env) {
+  if (!db) return null;
+  const match = /^Bearer ([^\s]{32,256})$/.exec(String(authorization || ''));
+  if (!match) return null;
+  const digest = hash(match[1]);
+  const assignmentResult = await db
+    .from('sales_phone_assignments')
+    .select('id,team_member_id,phone_number_id,status')
+    .eq('handoff_token_sha256', digest)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (assignmentResult.error || !assignmentResult.data) return null;
+  const assignment = assignmentResult.data;
+  const [memberResult, phoneResult] = await Promise.all([
+    db.from('sales_team_members')
+      .select('id,display_name,workspace_email,slack_user_id,status')
+      .eq('id', assignment.team_member_id)
+      .eq('status', 'active')
+      .maybeSingle(),
+    db.from('sales_phone_numbers')
+      .select('id,e164,active')
+      .eq('id', assignment.phone_number_id)
+      .eq('active', true)
+      .maybeSingle(),
+  ]);
+  const member = memberResult.data;
+  const phone = phoneResult.data;
+  if (memberResult.error || phoneResult.error || !member || !phone) return null;
+  const repName = cleanText(member.display_name, 120);
+  const repEmail = cleanText(member.workspace_email, 254).toLowerCase();
+  const slackUserId = cleanText(member.slack_user_id, 24);
+  const ghlNumber = cleanText(phone.e164, 16);
+  const ghlNotificationWebhook = ghlWebhookForNumber(ghlNumber, env);
+  if (!repName || !validEmail(repEmail) || !validSlackUserId(slackUserId) || !validE164(ghlNumber) || !ghlNotificationWebhook) return null;
+  return Object.freeze({
+    routeKey: cleanText(assignment.id, 80).toLowerCase(),
+    tokenHash: digest,
+    repName,
+    repEmail,
+    slackUserId,
+    ghlNumber,
+    ghlNotificationWebhook,
+  });
 }
 
 function humanMessage(input, route) {
@@ -182,6 +242,7 @@ function createSalesVoiceHandoff(options = {}) {
   const env = options.env || process.env;
   const fetchImpl = options.fetch || global.fetch;
   const rateLimit = options.rateLimit || require('./rateLimit').checkAndIncrementRateLimit;
+  const routeModeEnabled = options.db ? salesVoiceProviderEnabled(env) : salesVoiceHandoffEnabled(env);
   async function reserve(routeName, subjectKey, windowMs, maxCount) {
     let timer;
     try {
@@ -193,7 +254,7 @@ function createSalesVoiceHandoff(options = {}) {
   }
 
   async function send(input, route) {
-    if (!salesVoiceHandoffEnabled(env) || !route) return { status: 'unavailable' };
+    if (!routeModeEnabled || !route) return { status: 'unavailable' };
     const reference = hash(`${route.routeKey}:${JSON.stringify(input)}`).slice(0, 32);
     try {
       if (!await reserve('sales_voice_handoff_global', 'all', 3600000, 100) ||
@@ -244,19 +305,27 @@ function createSalesVoiceHandoff(options = {}) {
       reference
     };
   }
-  return { send, enabled: () => salesVoiceHandoffEnabled(env) };
+  return { send, enabled: () => routeModeEnabled };
 }
 
 function createSalesVoiceHandoffRouter(options = {}) {
   const express = require('express');
   const router = express.Router();
   const env = options.env || process.env;
+  const db = options.db || null;
   const service = options.service || createSalesVoiceHandoff(options);
-  router.use((req, res, next) => {
+  router.use(async (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     if (!service.enabled()) return res.status(503).json({ status: 'unavailable' });
     if (req.headers.origin) return res.status(401).json({ status: 'unauthorized' });
-    const route = routeForAuthorization(req.headers.authorization, env);
+    let route = routeForAuthorization(req.headers.authorization, env);
+    if (!route && db) {
+      try {
+        route = await routeForAuthorizationDb(req.headers.authorization, db, env);
+      } catch {
+        return res.status(503).json({ status: 'unavailable' });
+      }
+    }
     if (!route) return res.status(401).json({ status: 'unauthorized' });
     req.salesVoiceRoute = route;
     next();
@@ -290,6 +359,8 @@ module.exports = {
   createSalesVoiceHandoffRouter,
   parseRouteConfig,
   routeForAuthorization,
+  routeForAuthorizationDb,
   salesVoiceHandoffEnabled,
+  salesVoiceProviderEnabled,
   validateSalesVoiceMessage
 };

@@ -362,6 +362,17 @@ function providerApplyError(result, detail) {
   return serviceError(409, result?.errorCode || 'sales_team_provider_sync_required', detail, { providers: ['ghl'] });
 }
 
+async function activeMobileForLine(db, phoneId) {
+  const assignmentResult = await db.from('sales_phone_assignments').select('team_member_id').eq('phone_number_id', phoneId).eq('status', 'active').maybeSingle();
+  if (assignmentResult.error) throw Object.assign(new Error('Active line assignment lookup failed'), { cause: assignmentResult.error });
+  if (!assignmentResult.data?.team_member_id) return null;
+  const memberResult = await db.from('sales_team_members').select('mobile_phone_e164').eq('id', assignmentResult.data.team_member_id).eq('status', 'active').maybeSingle();
+  if (memberResult.error || !/^\+1[2-9]\d{9}$/.test(memberResult.data?.mobile_phone_e164 || '')) {
+    throw Object.assign(new Error('Active line recipient lookup failed'), { cause: memberResult.error });
+  }
+  return memberResult.data.mobile_phone_e164;
+}
+
 async function applySalesTeamMember({ db, memberId, actorId, env = process.env, fetchImpl = global.fetch }) {
   const record = await loadMemberRecord({ db, memberId });
   const readiness = readinessFor(record);
@@ -382,6 +393,14 @@ async function applySalesTeamMember({ db, memberId, actorId, env = process.env, 
   if (occupiedResult.error) throw Object.assign(new Error('Sales line occupancy lookup failed'), { cause: occupiedResult.error });
   if (occupiedResult.data && occupiedResult.data.team_member_id !== memberId) {
     throw serviceError(409, 'sales_phone_number_in_use', 'That company line is assigned to another active salesperson. Choose an available line.');
+  }
+  const lineTokenResult = await db.from('sales_phone_numbers')
+    .select('handoff_token_sha256,handoff_token_rotated_at')
+    .eq('id', record.phone.id)
+    .eq('active', true)
+    .maybeSingle();
+  if (lineTokenResult.error || !lineTokenResult.data?.handoff_token_sha256 || !lineTokenResult.data?.handoff_token_rotated_at) {
+    throw serviceError(409, 'sales_voice_line_token_required', 'Prepare the selected company line token before applying this salesperson.');
   }
   const provider_sync = await checkSalesTeamProviderReadiness({ record: providerRecord, env, fetchImpl });
   if (!providersReady(provider_sync)) {
@@ -408,14 +427,6 @@ async function applySalesTeamMember({ db, memberId, actorId, env = process.env, 
     ghlChanges.push({ record: appliedRecord, previousMobile: record.applied_member?.mobile_phone_e164 || '' });
   }
   const replaceAssignment = assignmentChanged(record.applied_assignment, assignment);
-  const lineTokenResult = await db.from('sales_phone_numbers')
-    .select('handoff_token_sha256,handoff_token_rotated_at')
-    .eq('id', record.phone.id)
-    .eq('active', true)
-    .maybeSingle();
-  if (lineTokenResult.error || !lineTokenResult.data?.handoff_token_sha256 || !lineTokenResult.data?.handoff_token_rotated_at) {
-    throw serviceError(409, 'sales_voice_line_token_required', 'Prepare the selected company line token before applying this salesperson.');
-  }
   const prompt = record.pending_draft.generated_prompt;
   const result = await db.rpc('apply_sales_team_configuration', {
     p_member_id: memberId,
@@ -431,6 +442,14 @@ async function applySalesTeamMember({ db, memberId, actorId, env = process.env, 
     p_handoff_token_sha256: lineTokenResult.data.handoff_token_sha256,
   });
   if (result.error) {
+    if (result.error.code === '23505' && desiredPreviousMobile === '') {
+      try {
+        const incumbentMobile = await activeMobileForLine(db, record.phone.id);
+        if (incumbentMobile) ghlChanges[0].previousMobile = incumbentMobile;
+      } catch {
+        throw serviceError(409, 'sales_team_provider_restore_failed', 'The database rejected this change and the current GHL line recipient could not be resolved safely. Review this line route before retrying.', { lines: [record.phone.e164] });
+      }
+    }
     const failedRestore = await restoreGhlChanges(ghlChanges, env, fetchImpl);
     if (failedRestore.length) throw serviceError(409, 'sales_team_provider_restore_failed', 'The database rejected this change and GHL did not restore every affected line. Review the listed line routes before retrying.', { lines: failedRestore });
     const detail = String(result.error.message || result.error.details || '');

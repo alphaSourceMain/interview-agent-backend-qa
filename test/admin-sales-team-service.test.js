@@ -259,6 +259,19 @@ test('apply rejects a line held by another salesperson before any provider call'
   assert.equal(db.calls.length, 0);
 });
 
+test('apply verifies the stable line token before any provider call', async () => {
+  const db = makeControlPlaneDb();
+  db.tables.sales_phone_numbers[0].handoff_token_sha256 = null;
+  let providerCalls = 0;
+  await assert.rejects(applySalesTeamMember({
+    db, memberId: member.id,
+    env: { SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ '+17207904187': 'https://example.leadconnectorhq.com/hooks/michael' }) },
+    fetchImpl: async () => { providerCalls += 1; throw new Error('must not be called'); },
+  }), (error) => error.code === 'sales_voice_line_token_required');
+  assert.equal(providerCalls, 0);
+  assert.equal(db.calls.length, 0);
+});
+
 test('moving a salesperson confirms the new line and clears the old line before apply', async () => {
   const db = makeControlPlaneDb();
   db.tables.sales_team_members[0].status = 'active';
@@ -314,6 +327,37 @@ test('apply restores the confirmed prior mobile when the database rejects the ch
   }), (error) => error.code === 'sales_team_assignment_conflict');
   assert.deepEqual(ghlWrites, ['+17205559999', member.mobile_phone_e164]);
   assert.equal(db.tables.sales_team_members[0].status, 'active');
+});
+
+test('a concurrent occupied-line conflict restores the incumbent mobile', async () => {
+  const db = makeControlPlaneDb();
+  const incumbentId = '22000000-0000-4000-8000-000000000099';
+  const incumbentMobile = '+17205558888';
+  const originalRpc = db.rpc.bind(db);
+  db.rpc = async (name, args) => {
+    if (name !== 'apply_sales_team_configuration') return originalRpc(name, args);
+    db.calls.push({ name, args });
+    db.tables.sales_team_members.push({ ...member, id: incumbentId, sales_rep_user_id: '11111111-1111-4111-8111-111111111199', workspace_email: 'incumbent@alphasourceai.com', mobile_phone_e164: incumbentMobile, status: 'active' });
+    db.tables.sales_phone_assignments.push({ ...assignment, id: '23000000-0000-4000-8000-000000000099', team_member_id: incumbentId, status: 'active', created_at: '2026-09-21T01:00:00Z' });
+    return { data: null, error: { code: '23505', message: 'synthetic concurrent conflict' } };
+  };
+  const ghlWrites = [];
+  await assert.rejects(applySalesTeamMember({
+    db, memberId: member.id,
+    env: {
+      SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true',
+      SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ '+17207904187': 'https://example.leadconnectorhq.com/hooks/michael' }),
+      GHL_PRIVATE_INTEGRATION_TOKEN: 'pit-' + 'g'.repeat(40),
+      SLACK_SALES_WON_BOT_TOKEN: 'xoxb-' + 's'.repeat(40),
+    },
+    fetchImpl: async (url, options) => {
+      if (url.includes('slack.com')) return { ok: true, status: 200, json: async () => ({ ok: true, user: { id: member.slack_user_id, deleted: false } }) };
+      const value = JSON.parse(options.body).value;
+      ghlWrites.push(value);
+      return { ok: true, status: 200, json: async () => ({ customValue: { id: 'custom-value-1', name: 'alphaScreen Line 1 Mobile', value } }) };
+    },
+  }), (error) => error.code === 'sales_team_assignment_conflict');
+  assert.deepEqual(ghlWrites, [member.mobile_phone_e164, incumbentMobile]);
 });
 
 test('failed old-line clear restores the newly selected line before apply stops', async () => {

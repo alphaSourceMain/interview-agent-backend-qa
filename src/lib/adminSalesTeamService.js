@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { buildSalesVoiceAgentPrompt } = require('./salesVoiceHandoff');
+const { buildSalesVoiceAgentPrompt, ghlWebhookForNumber } = require('./salesVoiceHandoff');
 
 const PROVIDERS = Object.freeze(['sales_dashboard', 'ghl', 'xai', 'slack']);
 const MEMBER_SELECT = 'id,sales_rep_user_id,display_name,workspace_email,mobile_phone_e164,ghl_user_id,slack_user_id,status,active_from,inactive_at,created_at,updated_at';
@@ -253,6 +253,7 @@ async function loadAdminSalesTeam({ db }) {
     return {
       ...record,
       applied_assignment: appliedAssignment,
+      applied_phone: appliedAssignment ? phoneById.get(appliedAssignment.phone_number_id) || null : null,
       applied_config: appliedConfig,
       pending_draft: pendingDraft,
       readiness: readinessFor(record),
@@ -267,17 +268,6 @@ async function loadMemberRecord({ db, memberId }) {
   const record = payload.items.find((item) => item.member.id === memberId);
   if (!record) throw serviceError(404, 'sales_team_member_not_found', 'Salesperson not found.');
   return record;
-}
-
-async function writeAudit(db, actorId, action, memberId, assignmentId, safeMetadata = {}) {
-  const { error } = await db.from('sales_team_audit_events').insert({
-    actor_user_id: actorId || null,
-    action,
-    team_member_id: memberId || null,
-    assignment_id: assignmentId || null,
-    safe_metadata: safeMetadata,
-  });
-  if (error) throw Object.assign(new Error('Sales team audit write failed'), { cause: error });
 }
 
 async function saveSalesTeamMember({ db, memberId, body, actorId }) {
@@ -321,7 +311,7 @@ function assignmentChanged(applied, desired) {
   return ASSIGNMENT_APPLY_FIELDS.some((field) => (applied[field] ?? null) !== (desired[field] ?? null));
 }
 
-async function applySalesTeamMember({ db, memberId, actorId }) {
+async function applySalesTeamMember({ db, memberId, actorId, env = process.env }) {
   const record = await loadMemberRecord({ db, memberId });
   const readiness = readinessFor(record);
   if (!readiness.ready) {
@@ -329,6 +319,9 @@ async function applySalesTeamMember({ db, memberId, actorId }) {
   }
   if (!record.pending_draft?.payload) throw serviceError(409, 'sales_team_draft_required', 'Save the current settings before applying them.');
   const { member, assignment, config } = record.pending_draft.payload;
+  if (config.notify_sms && !ghlWebhookForNumber(record.phone?.e164, env)) {
+    throw serviceError(409, 'ghl_notification_webhook_missing', 'Configure the server-side GHL notification webhook for this company number before enabling SMS.', { ghl_notification_workflow_id: 'server_mapping_missing' });
+  }
   const replaceAssignment = assignmentChanged(record.applied_assignment, assignment);
   let oneTimeToken = null;
   let tokenHash = null;
@@ -347,9 +340,16 @@ async function applySalesTeamMember({ db, memberId, actorId }) {
     p_generated_prompt: prompt,
     p_prompt_checksum: record.pending_draft.prompt_checksum,
     p_replace_assignment: replaceAssignment,
+    p_expected_draft_updated_at: record.pending_draft.updated_at,
     p_handoff_token_sha256: tokenHash,
   });
-  if (result.error) throw Object.assign(new Error('Sales team configuration apply failed'), { cause: result.error });
+  if (result.error) {
+    const detail = String(result.error.message || result.error.details || '');
+    if (/sales_team_draft_stale/i.test(detail)) throw serviceError(409, 'sales_team_draft_stale', 'The draft changed while it was being applied. Review the latest draft and apply again.');
+    if (/sales_team_member_inactive/i.test(detail)) throw serviceError(409, 'sales_team_member_inactive', 'Reactivate this salesperson before applying their configuration.');
+    if (result.error.code === '23505') throw serviceError(409, 'sales_team_assignment_conflict', 'That salesperson, GHL number, or Grok agent is already active on another assignment.');
+    throw Object.assign(new Error('Sales team configuration apply failed'), { cause: result.error });
+  }
   return { item: await loadMemberRecord({ db, memberId }), token: oneTimeToken };
 }
 
@@ -371,22 +371,16 @@ async function reactivateSalesTeamMember({ db, memberId, actorId }) {
 
 async function rotateSalesVoiceToken({ db, memberId, actorId }) {
   const record = await loadMemberRecord({ db, memberId });
-  if (!record.assignment?.id) {
-    throw serviceError(409, 'sales_phone_assignment_missing', 'Assign a GHL phone number before creating the agent token.');
-  }
-  if (record.member.status === 'inactive') {
-    throw serviceError(409, 'sales_team_member_inactive', 'Reactivate this salesperson before creating an agent token.');
+  if (record.member.status !== 'active' || record.applied_assignment?.status !== 'active') {
+    throw serviceError(409, 'sales_team_member_not_active', 'Apply this salesperson’s routing configuration before rotating the agent token.');
   }
   const token = crypto.randomBytes(36).toString('base64url');
-  const now = new Date().toISOString();
-  const { error } = await db.from('sales_phone_assignments').update({
-    handoff_token_sha256: checksum(token),
-    handoff_token_rotated_at: now,
-    updated_by_user_id: actorId || null,
-    updated_at: now,
-  }).eq('id', record.assignment.id);
-  if (error) throw Object.assign(new Error('Sales voice token rotation failed'), { cause: error });
-  await writeAudit(db, actorId, 'sales_voice_handoff_token_rotated', memberId, record.assignment.id, {});
+  const result = await db.rpc('rotate_sales_voice_handoff_token', {
+    p_member_id: memberId,
+    p_actor_user_id: actorId || null,
+    p_handoff_token_sha256: checksum(token),
+  });
+  if (result.error) throw Object.assign(new Error('Sales voice token rotation failed'), { cause: result.error });
   return { token, item: await loadMemberRecord({ db, memberId }) };
 }
 

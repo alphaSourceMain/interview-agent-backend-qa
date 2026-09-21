@@ -378,6 +378,7 @@ create or replace function public.apply_sales_team_configuration(
   p_generated_prompt text,
   p_prompt_checksum text,
   p_replace_assignment boolean,
+  p_expected_draft_updated_at timestamptz,
   p_handoff_token_sha256 text default null
 )
 returns table (assignment_id uuid, voice_config_id uuid)
@@ -392,9 +393,19 @@ declare
   v_config_id uuid;
   v_version integer;
   v_token_sha256 text;
+  v_member_status text;
+  v_draft_updated_at timestamptz;
 begin
-  perform 1 from public.sales_team_members where id = p_member_id for update;
+  select status into v_member_status
+  from public.sales_team_members where id = p_member_id for update;
   if not found then raise exception 'sales_team_member_not_found'; end if;
+  if v_member_status = 'inactive' then raise exception 'sales_team_member_inactive'; end if;
+
+  select updated_at into v_draft_updated_at
+  from public.sales_team_config_drafts where team_member_id = p_member_id for update;
+  if not found or v_draft_updated_at is distinct from p_expected_draft_updated_at then
+    raise exception 'sales_team_draft_stale';
+  end if;
 
   if p_existing_assignment_id is not null then
     select * into v_assignment
@@ -574,11 +585,50 @@ begin
 end;
 $$;
 
+create or replace function public.rotate_sales_voice_handoff_token(
+  p_member_id uuid,
+  p_actor_user_id uuid,
+  p_handoff_token_sha256 text
+)
+returns uuid
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+  v_assignment_id uuid;
+  v_now timestamptz := now();
+begin
+  perform 1 from public.sales_team_members
+  where id = p_member_id and status = 'active' for update;
+  if not found then raise exception 'sales_team_member_not_active'; end if;
+
+  select id into v_assignment_id
+  from public.sales_phone_assignments
+  where team_member_id = p_member_id and status = 'active'
+  for update;
+  if not found then raise exception 'sales_phone_assignment_not_active'; end if;
+
+  update public.sales_phone_assignments
+  set handoff_token_sha256 = p_handoff_token_sha256,
+      handoff_token_rotated_at = v_now,
+      updated_by_user_id = p_actor_user_id,
+      updated_at = v_now
+  where id = v_assignment_id;
+
+  insert into public.sales_team_audit_events (team_member_id, assignment_id, actor_user_id, action)
+  values (p_member_id, v_assignment_id, p_actor_user_id, 'sales_voice_handoff_token_rotated');
+  return v_assignment_id;
+end;
+$$;
+
 revoke all on function public.save_sales_team_draft(uuid, uuid, boolean, jsonb, jsonb, text, text) from public, anon, authenticated;
-revoke all on function public.apply_sales_team_configuration(uuid, uuid, uuid, jsonb, jsonb, jsonb, text, text, boolean, text) from public, anon, authenticated;
+revoke all on function public.apply_sales_team_configuration(uuid, uuid, uuid, jsonb, jsonb, jsonb, text, text, boolean, timestamptz, text) from public, anon, authenticated;
 revoke all on function public.deactivate_sales_team_member(uuid, uuid) from public, anon, authenticated;
 revoke all on function public.reactivate_sales_team_member(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.rotate_sales_voice_handoff_token(uuid, uuid, text) from public, anon, authenticated;
 grant execute on function public.save_sales_team_draft(uuid, uuid, boolean, jsonb, jsonb, text, text) to service_role;
-grant execute on function public.apply_sales_team_configuration(uuid, uuid, uuid, jsonb, jsonb, jsonb, text, text, boolean, text) to service_role;
+grant execute on function public.apply_sales_team_configuration(uuid, uuid, uuid, jsonb, jsonb, jsonb, text, text, boolean, timestamptz, text) to service_role;
 grant execute on function public.deactivate_sales_team_member(uuid, uuid) to service_role;
 grant execute on function public.reactivate_sales_team_member(uuid, uuid) to service_role;
+grant execute on function public.rotate_sales_voice_handoff_token(uuid, uuid, text) to service_role;

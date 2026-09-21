@@ -387,6 +387,7 @@ module.exports = {
   buildSalesVoiceAgentPrompt,
   createSalesVoiceHandoff,
   createSalesVoiceHandoffRouter,
+  ghlWebhookForNumber,
   parseRouteConfig,
   routeForAuthorization,
   routeForAuthorizationDb,

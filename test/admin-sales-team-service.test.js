@@ -10,6 +10,7 @@ const {
   deactivateSalesTeamMember,
   normalizeDraft,
   readinessFor,
+  rotateSalesVoiceToken,
   saveSalesTeamMember,
   validateTransferDestinations,
 } = require('../src/lib/adminSalesTeamService');
@@ -65,6 +66,9 @@ function makeControlPlaneDb() {
         tables.sales_team_members[0].inactive_at = '2026-09-21T02:00:00Z';
         tables.sales_phone_assignments[0].status = 'inactive';
         tables.sales_team_config_drafts = [];
+      }
+      if (name === 'rotate_sales_voice_handoff_token') {
+        tables.sales_phone_assignments[0].handoff_token_rotated_at = '2026-09-21T03:00:00Z';
       }
       return { data: null, error: null };
     },
@@ -123,6 +127,7 @@ test('sales team migration is service-role only and preserves assignment history
   assert.match(sql, /create or replace function public\.save_sales_team_draft/);
   assert.match(sql, /create or replace function public\.apply_sales_team_configuration/);
   assert.match(sql, /create or replace function public\.deactivate_sales_team_member/);
+  assert.match(sql, /create or replace function public\.rotate_sales_voice_handoff_token/);
   assert.match(sql, /revoke all on function public\.apply_sales_team_configuration[\s\S]*from public, anon, authenticated/);
   assert.match(sql, /grant execute on function public\.save_sales_team_draft[\s\S]*to service_role/);
   assert.match(sql, /grant execute on function public\.apply_sales_team_configuration[\s\S]*to service_role/);
@@ -163,12 +168,27 @@ test('generated Grok prompt includes approved scope and keeps fixed consent guar
 
 test('apply uses one atomic RPC and returns a new handoff token only once', async () => {
   const db = makeControlPlaneDb();
-  const result = await applySalesTeamMember({ db, memberId: member.id, actorId: '99999999-9999-4999-8999-999999999999' });
+  const result = await applySalesTeamMember({
+    db,
+    memberId: member.id,
+    actorId: '99999999-9999-4999-8999-999999999999',
+    env: { SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ '+17207904187': 'https://example.leadconnectorhq.com/hooks/michael' }) },
+  });
   assert.match(result.token, /^[A-Za-z0-9_-]{48}$/);
   assert.equal(db.calls.length, 1);
   assert.equal(db.calls[0].name, 'apply_sales_team_configuration');
+  assert.equal(db.calls[0].args.p_expected_draft_updated_at, '2026-09-21T00:00:00Z');
   assert.match(db.calls[0].args.p_handoff_token_sha256, /^[a-f0-9]{64}$/);
   assert.equal(JSON.stringify(result.item).includes(db.calls[0].args.p_handoff_token_sha256), false);
+});
+
+test('apply blocks SMS until the fixed server-side GHL webhook mapping exists', async () => {
+  const db = makeControlPlaneDb();
+  await assert.rejects(
+    applySalesTeamMember({ db, memberId: member.id, actorId: '99999999-9999-4999-8999-999999999999', env: {} }),
+    /server-side GHL notification webhook/i,
+  );
+  assert.equal(db.calls.length, 0);
 });
 
 test('new salesperson and draft are saved in one atomic RPC', async () => {
@@ -196,4 +216,16 @@ test('deactivate uses one atomic RPC and preserves the member record', async () 
   assert.equal(db.calls.length, 1);
   assert.equal(db.calls[0].name, 'deactivate_sales_team_member');
   assert.equal(result.member.status, 'inactive');
+});
+
+test('token rotation updates the active assignment and audit in one RPC', async () => {
+  const db = makeControlPlaneDb();
+  db.tables.sales_team_members[0].status = 'active';
+  db.tables.sales_phone_assignments[0].status = 'active';
+  db.tables.sales_phone_assignments[0].handoff_token_rotated_at = '2026-09-21T01:00:00Z';
+  const result = await rotateSalesVoiceToken({ db, memberId: member.id, actorId: '99999999-9999-4999-8999-999999999999' });
+  assert.match(result.token, /^[A-Za-z0-9_-]{48}$/);
+  assert.equal(db.calls.length, 1);
+  assert.equal(db.calls[0].name, 'rotate_sales_voice_handoff_token');
+  assert.match(db.calls[0].args.p_handoff_token_sha256, /^[a-f0-9]{64}$/);
 });

@@ -13,6 +13,7 @@ const {
   rotateSalesVoiceToken,
   saveSalesLineSetup,
   saveSalesTeamMember,
+  syncSalesTeamMember,
   validateTransferDestinations,
 } = require('../src/lib/adminSalesTeamService');
 
@@ -42,7 +43,8 @@ function makeControlPlaneDb() {
       ghl_location_id: assignment.ghl_location_id, ghl_routing_workflow_id: 'routing-workflow-1',
       ghl_notification_workflow_id: assignment.ghl_notification_workflow_id,
       ghl_mobile_custom_value_id: 'custom-value-1', ghl_mobile_custom_value_name: 'alphaScreen Line 1 Mobile',
-      xai_setup_status: 'verified', ghl_setup_status: 'verified', handoff_token_rotated_at: '2026-09-21T00:30:00Z',
+      xai_setup_status: 'verified', ghl_setup_status: 'verified', xai_verified_at: '2026-09-21T00:45:00Z',
+      xai_verification_reference: 'qa-call-line-1', handoff_token_sha256: 'a'.repeat(64), handoff_token_rotated_at: '2026-09-21T00:30:00Z',
     }],
     sales_phone_assignments: [{ ...assignment, team_member_id: member.id, status: 'draft', handoff_token_rotated_at: null, created_at: '2026-09-21T00:00:00Z' }],
     sales_voice_configs: [],
@@ -148,6 +150,7 @@ test('line-slot migration keeps stable tokens server-only and provider status tr
   const sql = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20260921182435_sales_voice_line_slots.sql'), 'utf8').toLowerCase();
   assert.match(sql, /add column if not exists handoff_token_sha256 text/);
   assert.match(sql, /create unique index if not exists sales_phone_numbers_handoff_token_uidx/);
+  assert.match(sql, /create unique index sales_phone_assignments_handoff_token_uidx[\s\S]*where handoff_token_sha256 is not null and status = 'active'/);
   assert.match(sql, /xai_setup_status text not null default 'pending'/);
   assert.match(sql, /ghl_setup_status text not null default 'pending'/);
   assert.match(sql, /revoke all on function public\.rotate_sales_voice_line_token[\s\S]*from public, anon, authenticated/);
@@ -187,20 +190,27 @@ test('generated Grok prompt includes approved scope and keeps fixed consent guar
   assert.ok(prompt.lastIndexOf('Never say tool or function names') > prompt.indexOf('Essential and Pro memberships'));
 });
 
-test('apply commits once, hides the legacy assignment token, and checks providers', async () => {
+test('apply copies the stable line token hash into the active assignment and checks providers', async () => {
   const db = makeControlPlaneDb();
   const result = await applySalesTeamMember({
     db,
     memberId: member.id,
     actorId: '99999999-9999-4999-8999-999999999999',
-    env: { SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ '+17207904187': 'https://example.leadconnectorhq.com/hooks/michael' }) },
+    env: {
+      SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true',
+      SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ '+17207904187': 'https://example.leadconnectorhq.com/hooks/michael' }),
+      GHL_PRIVATE_INTEGRATION_TOKEN: 'pit-' + 'g'.repeat(40),
+      SLACK_SALES_WON_BOT_TOKEN: 'xoxb-' + 's'.repeat(40),
+    },
+    fetchImpl: async (url, options) => url.includes('slack.com')
+      ? ({ ok: true, status: 200, json: async () => ({ ok: true, user: { id: member.slack_user_id, deleted: false } }) })
+      : ({ ok: true, status: 200, json: async () => ({ customValue: { id: 'custom-value-1', name: 'alphaScreen Line 1 Mobile', value: JSON.parse(options.body).value } }) }),
   });
   assert.equal(result.token, undefined);
   assert.equal(db.calls.length, 4);
   assert.equal(db.calls[0].name, 'apply_sales_team_configuration');
   assert.equal(db.calls[0].args.p_expected_draft_updated_at, '2026-09-21T00:00:00Z');
-  assert.match(db.calls[0].args.p_handoff_token_sha256, /^[a-f0-9]{64}$/);
-  assert.equal(JSON.stringify(result.item).includes(db.calls[0].args.p_handoff_token_sha256), false);
+  assert.equal(db.calls[0].args.p_handoff_token_sha256, 'a'.repeat(64));
   assert.deepEqual(db.calls.slice(1).map((call) => call.name), ['finish_sales_provider_sync', 'finish_sales_provider_sync', 'finish_sales_provider_sync']);
 });
 
@@ -210,6 +220,16 @@ test('apply blocks SMS until the fixed server-side GHL webhook mapping exists', 
     applySalesTeamMember({ db, memberId: member.id, actorId: '99999999-9999-4999-8999-999999999999', env: {} }),
     /server-side GHL notification webhook/i,
   );
+  assert.equal(db.calls.length, 0);
+});
+
+test('apply remains inactive until all enabled provider checks pass', async () => {
+  const db = makeControlPlaneDb();
+  await assert.rejects(applySalesTeamMember({
+    db, memberId: member.id, actorId: '99999999-9999-4999-8999-999999999999',
+    env: { SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ '+17207904187': 'https://example.leadconnectorhq.com/hooks/michael' }) },
+  }), /Provider setup must pass/i);
+  assert.equal(db.tables.sales_team_members[0].status, 'draft');
   assert.equal(db.calls.length, 0);
 });
 
@@ -234,10 +254,23 @@ test('deactivate uses one atomic RPC and preserves the member record', async () 
   db.tables.sales_team_members[0].status = 'active';
   db.tables.sales_phone_assignments[0].status = 'active';
   db.tables.sales_phone_assignments[0].handoff_token_rotated_at = '2026-09-21T01:00:00Z';
-  const result = await deactivateSalesTeamMember({ db, memberId: member.id, actorId: '99999999-9999-4999-8999-999999999999' });
+  const result = await deactivateSalesTeamMember({
+    db, memberId: member.id, actorId: '99999999-9999-4999-8999-999999999999',
+    env: { SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true', GHL_PRIVATE_INTEGRATION_TOKEN: 'pit-' + 'g'.repeat(40) },
+    fetchImpl: async (_url, options) => ({ ok: true, status: 200, json: async () => ({ customValue: { id: 'custom-value-1', name: 'alphaScreen Line 1 Mobile', value: JSON.parse(options.body).value } }) }),
+  });
   assert.equal(db.calls.length, 4);
   assert.equal(db.calls[0].name, 'deactivate_sales_team_member');
   assert.equal(result.member.status, 'inactive');
+});
+
+test('deactivation leaves the member active when GHL cannot confirm the clear', async () => {
+  const db = makeControlPlaneDb();
+  db.tables.sales_team_members[0].status = 'active';
+  db.tables.sales_phone_assignments[0].status = 'active';
+  await assert.rejects(deactivateSalesTeamMember({ db, memberId: member.id, env: {} }), /GHL must confirm/i);
+  assert.equal(db.tables.sales_team_members[0].status, 'active');
+  assert.equal(db.calls.length, 0);
 });
 
 test('token rotation updates the stable company line and audit in one RPC', async () => {
@@ -245,7 +278,7 @@ test('token rotation updates the stable company line and audit in one RPC', asyn
   db.tables.sales_team_members[0].status = 'active';
   db.tables.sales_phone_assignments[0].status = 'active';
   db.tables.sales_phone_assignments[0].handoff_token_rotated_at = '2026-09-21T01:00:00Z';
-  const result = await rotateSalesVoiceToken({ db, memberId: member.id, actorId: '99999999-9999-4999-8999-999999999999' });
+  const result = await rotateSalesVoiceToken({ db, memberId: member.id, phoneId: assignment.phone_number_id, actorId: '99999999-9999-4999-8999-999999999999' });
   assert.match(result.token, /^[A-Za-z0-9_-]{48}$/);
   assert.equal(db.calls.length, 1);
   assert.equal(db.calls[0].name, 'rotate_sales_voice_line_token');
@@ -264,5 +297,29 @@ test('line setup can be verified only with complete reusable provider resources'
   assert.equal(saved.xai_setup_status, 'verified');
   assert.equal(saved.ghl_setup_status, 'verified');
   assert.equal(db.calls[0].name, 'save_sales_voice_line_setup');
-  await assert.rejects(saveSalesLineSetup({ db, phoneId: assignment.phone_number_id, body: { xai_setup_status: 'verified', ghl_setup_status: 'pending' } }), /Prepare the line token and enter the Grok agent/i);
+  const changed = await saveSalesLineSetup({ db, phoneId: assignment.phone_number_id, body: { xai_agent_id: 'agent_changed', xai_phone_number_e164: '+17205550003', xai_setup_status: 'verified', ghl_setup_status: 'pending' } });
+  assert.equal(changed.xai_setup_status, 'pending');
+  assert.equal(changed.xai_verification_reference, null);
+});
+
+test('provider sync uses the applied line when a pending draft selects another line', async () => {
+  const db = makeControlPlaneDb();
+  db.tables.sales_team_members[0].status = 'active';
+  db.tables.sales_phone_assignments[0].status = 'active';
+  db.tables.sales_voice_configs.push({ id: 'config-1', assignment_id: assignment.id, is_current: true, status: 'applied', ...config });
+  const otherPhone = { ...db.tables.sales_phone_numbers[0], id: '21000000-0000-4000-8000-000000000002', e164: '+17198818074', ghl_mobile_custom_value_id: 'custom-value-2', ghl_mobile_custom_value_name: 'alphaScreen Line 2 Mobile' };
+  db.tables.sales_phone_numbers.push(otherPhone);
+  db.tables.sales_team_config_drafts[0].payload.assignment.phone_number_id = otherPhone.id;
+  const calls = [];
+  await syncSalesTeamMember({
+    db, memberId: member.id,
+    env: { SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true', GHL_PRIVATE_INTEGRATION_TOKEN: 'pit-' + 'g'.repeat(40), SLACK_SALES_WON_BOT_TOKEN: 'xoxb-' + 's'.repeat(40) },
+    fetchImpl: async (url, options) => {
+      calls.push(url);
+      if (url.includes('slack.com')) return { ok: true, status: 200, json: async () => ({ ok: true, user: { id: member.slack_user_id, deleted: false } }) };
+      return { ok: true, status: 200, json: async () => ({ customValue: { id: 'custom-value-1', name: 'alphaScreen Line 1 Mobile', value: JSON.parse(options.body).value } }) };
+    },
+  });
+  assert.equal(calls.some((url) => url.includes('custom-value-1')), true);
+  assert.equal(calls.some((url) => url.includes('custom-value-2')), false);
 });

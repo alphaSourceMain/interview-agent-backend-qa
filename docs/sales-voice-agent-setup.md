@@ -56,12 +56,13 @@ Provider redirects are rejected. Slack renders every caller-provided field as pl
 - `SALES_VOICE_GHL_WEBHOOKS_JSON`: object mapping each company-owned GHL number in E.164 format to that number's fixed `leadconnectorhq.com` notification-workflow webhook. This capability URL remains server-side.
 - `GHL_PRIVATE_INTEGRATION_TOKEN`: a location-scoped private integration with `locations/customValues.readonly` and `locations/customValues.write`. Apply uses it only to update the selected line's preconfigured mobile custom value.
 - `SALES_VOICE_DB_ROUTES_ENABLED`: must be exactly `true` before an active database assignment can authenticate. This is separate from `SALES_VOICE_HANDOFF_ENABLED` so adding the admin schema cannot silently enable a previously empty environment route table.
+- `SALES_TEAM_PROVIDER_SYNC_ENABLED=true`: separately enables the Slack membership check and the GHL managed-mobile write. Keep it off until the private integration and fixed line workflows are verified in QA.
 
 Keep the feature disabled unless all route objects validate. Never put bearer tokens in source, agent prompts, URLs, documentation, or logs.
 
 ## Remaining setup inputs
 
-Before hiring, finish the four company line slots: provision one Grok number per existing agent, install the generic prompt from `buildSalesVoiceBootstrapPrompt()`, add the fixed context and message tools, publish and verify each agent, create the GHL mobile custom value and two fixed workflows per line, and record those safe provider identifiers on `sales_phone_numbers`. Mark a provider setup verified only after its end-to-end line test passes.
+Before hiring, finish the four company line slots: provision one Grok number per existing agent, install the generic prompt from `buildSalesVoiceBootstrapPrompt()`, add the fixed context and message tools, publish and verify each agent, create the GHL mobile custom value and two fixed workflows per line, and record those safe provider identifiers on `sales_phone_numbers`. Record the completed Grok QA call reference before marking the agent verified. Changing an agent, phone, workflow, or custom-value identifier automatically returns that provider to pending.
 
 For each representative, create the Workspace account, Slack member, GHL user, and sales-dashboard user. Then enter the name, Workspace address, mobile, Slack member ID, GHL user ID, sales-dashboard user ID, and chosen company line on the admin page. **Save & apply changes** verifies the Slack member, updates the GHL line's mobile value, activates the sales-dashboard identity, and uses the already-published Grok agent's live context. Normal onboarding and turnover require no Grok or GHL editing.
 
@@ -74,7 +75,7 @@ The four Grok Voice drafts were created on September 21, 2026. Until line setup 
 - Epifanio Sierra: `agent_b32kYrh6mSVlrSK3`
 - Daniel Broyles: `agent_QzE6yzA9ZHC6P0wN`
 
-**Save draft** never changes live routing. **Save & apply changes** updates the selected line's GHL mobile value, verifies the Slack member, activates the database-owned recipient route, and checks that the line's Grok and GHL setup has already been verified. Provider status remains failed or action-required when any check fails, and **Sync providers** retries those checks without changing the saved person.
+**Save draft** never changes live routing. **Save & apply changes** first updates the selected line's GHL mobile value, verifies the Slack member, and checks the verified Grok line; it activates the database recipient only after every enabled check passes. A failed database apply restores the prior GHL mobile value on a best-effort basis and reports failure. Provider status remains failed or action-required when any check fails, and **Sync providers** retries those checks against the applied line without changing the saved person.
 
 Slack, GHL SMS, and email delivery follow the current applied voice configuration independently. Disabled channels are not called and are not required for route resolution. Slack is `synced` only after `users.info` confirms the exact active member. GHL is `synced` only after its API confirms the managed mobile value. Grok is `synced` only after the reusable line setup is marked verified.
 

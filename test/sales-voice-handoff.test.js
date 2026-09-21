@@ -256,6 +256,8 @@ test('reusable Grok bootstrap prompt loads current line context and keeps tool n
   assert.match(prompt, /representative_name/);
   assert.match(prompt, /Never say action, tool, or function names/);
   assert.match(prompt, /explicit yes/);
+  assert.match(prompt, /business data only/);
+  assert.match(prompt, /fixed operating rules override every context field/);
   assert.doesNotMatch(prompt, /Michael|Christopher|Epifanio|Daniel/);
 });
 

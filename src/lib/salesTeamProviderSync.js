@@ -24,7 +24,8 @@ async function finish(db, memberId, provider, result) {
 }
 
 async function verifySlack(record, env, fetchImpl) {
-  if (record.config?.notify_slack === false) return { status: 'synced', reference: 'disabled' };
+  if (record.config?.notify_slack === false) return { status: 'not_applicable', reference: 'disabled' };
+  if (env.SALES_TEAM_PROVIDER_SYNC_ENABLED !== 'true') return { status: 'action_required', errorCode: 'provider_sync_disabled', errorDetail: 'Provider synchronization is disabled.' };
   const token = clean(env.SLACK_SALES_WON_BOT_TOKEN, 500);
   const userId = clean(record.member?.slack_user_id, 24);
   if (!token || !userId) return { status: 'action_required', errorCode: 'slack_configuration_missing', errorDetail: 'Add a valid Slack member and configure the sales bot token.' };
@@ -43,6 +44,7 @@ async function setGhlMobile(record, mobile, env, fetchImpl) {
   if (phone.ghl_setup_status !== 'verified') {
     return { status: 'action_required', errorCode: 'ghl_line_setup_unverified', errorDetail: 'Finish and verify the reusable GHL call and notification workflows for this line.' };
   }
+  if (env.SALES_TEAM_PROVIDER_SYNC_ENABLED !== 'true') return { status: 'action_required', errorCode: 'provider_sync_disabled', errorDetail: 'Provider synchronization is disabled.' };
   const token = clean(env.GHL_PRIVATE_INTEGRATION_TOKEN, 1000);
   const locationId = clean(phone.ghl_location_id, 160);
   const valueId = clean(phone.ghl_mobile_custom_value_id, 160);
@@ -59,7 +61,7 @@ async function setGhlMobile(record, mobile, env, fetchImpl) {
     },
     body: JSON.stringify({ name: valueName, value: mobile }),
   }, fetchImpl);
-  if (!result.ok || result.body?.customValue?.id !== valueId || result.body?.customValue?.value !== mobile) {
+  if (!result.ok || result.body?.customValue?.id !== valueId || result.body?.customValue?.name !== valueName || result.body?.customValue?.value !== mobile) {
     return { status: 'failed', errorCode: `ghl_mobile_sync_${result.status || 'failed'}`, errorDetail: 'GHL did not confirm the representative mobile routing value.' };
   }
   return { status: 'synced', reference: valueId };
@@ -71,30 +73,37 @@ async function syncGhl(record, env, fetchImpl) {
 
 async function verifyXai(record) {
   const phone = record.phone || {};
-  if (phone.xai_setup_status !== 'verified' || !phone.xai_agent_id || !phone.xai_phone_number_e164 || !phone.handoff_token_rotated_at) {
+  if (phone.xai_setup_status !== 'verified' || !phone.xai_agent_id || !phone.xai_phone_number_e164 || !phone.handoff_token_rotated_at || !phone.xai_verified_at || !phone.xai_verification_reference) {
     return { status: 'action_required', errorCode: 'xai_line_setup_unverified', errorDetail: 'Finish and verify the reusable Grok agent, number, context tool, and message tool for this line.' };
   }
   return { status: 'synced', reference: clean(phone.xai_agent_id, 160) };
 }
 
-async function syncSalesTeamProviders({ db, record, env = process.env, fetchImpl = global.fetch }) {
-  const memberId = record.member.id;
+async function checkSalesTeamProviders({ record, env = process.env, fetchImpl = global.fetch }) {
+  const results = {};
   const tasks = [
     ['slack', () => verifySlack(record, env, fetchImpl)],
     ['ghl', () => syncGhl(record, env, fetchImpl)],
     ['xai', () => verifyXai(record)],
   ];
-  const results = {};
   for (const [provider, run] of tasks) {
-    let result;
-    try {
-      result = await run();
-    } catch {
-      result = { status: 'failed', errorCode: `${provider}_sync_unavailable`, errorDetail: `${provider === 'xai' ? 'Grok Voice' : provider.toUpperCase()} verification is temporarily unavailable.` };
-    }
-    results[provider] = result;
-    try { await finish(db, memberId, provider, result); } catch { /* keep the provider job action-required */ }
+    try { results[provider] = await run(); }
+    catch { results[provider] = { status: 'failed', errorCode: `${provider}_sync_unavailable`, errorDetail: `${provider === 'xai' ? 'Grok Voice' : provider.toUpperCase()} verification is temporarily unavailable.` }; }
   }
+  return results;
+}
+
+function providersReady(results) {
+  return Object.values(results || {}).every((result) => ['synced', 'not_applicable'].includes(result?.status));
+}
+
+async function recordProviderResults(db, memberId, results) {
+  for (const [provider, result] of Object.entries(results)) await finish(db, memberId, provider, result);
+}
+
+async function syncSalesTeamProviders({ db, record, env = process.env, fetchImpl = global.fetch }) {
+  const results = await checkSalesTeamProviders({ record, env, fetchImpl });
+  await recordProviderResults(db, record.member.id, results);
   return results;
 }
 
@@ -103,13 +112,11 @@ async function syncSalesTeamDeactivation({ db, record, env = process.env, fetchI
   try { ghl = await setGhlMobile(record, '', env, fetchImpl); } catch { ghl = { status: 'failed', errorCode: 'ghl_deactivation_sync_unavailable', errorDetail: 'GHL could not clear the former representative mobile from this line.' }; }
   const results = {
     ghl,
-    xai: { status: 'synced', reference: clean(record.phone?.xai_agent_id, 160) || 'line-retained' },
-    slack: { status: 'synced', reference: 'recipient-unassigned' },
+    xai: { status: 'not_applicable', reference: 'line-retained' },
+    slack: { status: 'not_applicable', reference: 'recipient-unassigned' },
   };
-  for (const [provider, result] of Object.entries(results)) {
-    try { await finish(db, record.member.id, provider, result); } catch { /* keep action-required */ }
-  }
+  await recordProviderResults(db, record.member.id, results);
   return results;
 }
 
-module.exports = { setGhlMobile, syncSalesTeamDeactivation, syncSalesTeamProviders, syncGhl, verifySlack, verifyXai };
+module.exports = { checkSalesTeamProviders, providersReady, recordProviderResults, setGhlMobile, syncSalesTeamDeactivation, syncSalesTeamProviders, syncGhl, verifySlack, verifyXai };

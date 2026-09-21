@@ -11,6 +11,8 @@ alter table public.sales_phone_numbers
   add column if not exists ghl_mobile_custom_value_name text,
   add column if not exists xai_setup_status text not null default 'pending',
   add column if not exists ghl_setup_status text not null default 'pending',
+  add column if not exists xai_verified_at timestamptz,
+  add column if not exists xai_verification_reference text,
   add column if not exists handoff_token_sha256 text,
   add column if not exists handoff_token_rotated_at timestamptz;
 
@@ -35,6 +37,10 @@ alter table public.sales_phone_numbers
   add constraint sales_phone_numbers_xai_setup_status_check check (xai_setup_status in ('pending', 'verified', 'failed')),
   drop constraint if exists sales_phone_numbers_ghl_setup_status_check,
   add constraint sales_phone_numbers_ghl_setup_status_check check (ghl_setup_status in ('pending', 'verified', 'failed')),
+  drop constraint if exists sales_phone_numbers_xai_verification_reference_length,
+  add constraint sales_phone_numbers_xai_verification_reference_length check (
+    xai_verification_reference is null or char_length(xai_verification_reference) between 3 and 160
+  ),
   drop constraint if exists sales_phone_numbers_handoff_token_check,
   add constraint sales_phone_numbers_handoff_token_check check (
     handoff_token_sha256 is null or handoff_token_sha256 ~ '^[a-f0-9]{64}$'
@@ -48,6 +54,21 @@ create unique index if not exists sales_phone_numbers_handoff_token_uidx
   on public.sales_phone_numbers (handoff_token_sha256) where handoff_token_sha256 is not null;
 create unique index if not exists sales_phone_numbers_ghl_mobile_value_uidx
   on public.sales_phone_numbers (ghl_mobile_custom_value_id) where ghl_mobile_custom_value_id is not null;
+
+-- The active assignment keeps a compatibility copy of the stable line token.
+-- Historical assignments may retain the same hash when a line changes hands,
+-- while the runtime lookup always restricts this fallback to status = active.
+drop index if exists public.sales_phone_assignments_handoff_token_uidx;
+create unique index sales_phone_assignments_handoff_token_uidx
+  on public.sales_phone_assignments (handoff_token_sha256)
+  where handoff_token_sha256 is not null and status = 'active';
+
+alter table public.sales_integration_sync_jobs
+  drop constraint if exists sales_integration_sync_jobs_status_check;
+alter table public.sales_integration_sync_jobs
+  add constraint sales_integration_sync_jobs_status_check check (
+    status in ('queued', 'running', 'synced', 'not_applicable', 'action_required', 'failed')
+  );
 
 update public.sales_phone_numbers as phone
 set xai_agent_id = seed.xai_agent_id,
@@ -116,7 +137,7 @@ declare
   v_job_id uuid;
 begin
   if p_provider not in ('ghl', 'xai', 'slack') then raise exception 'sales_provider_invalid'; end if;
-  if p_status not in ('synced', 'action_required', 'failed') then raise exception 'sales_provider_status_invalid'; end if;
+  if p_status not in ('synced', 'not_applicable', 'action_required', 'failed') then raise exception 'sales_provider_status_invalid'; end if;
 
   select id into v_job_id
   from public.sales_integration_sync_jobs
@@ -151,7 +172,20 @@ set search_path = ''
 as $$
 declare
   v_member_id uuid;
+  v_current public.sales_phone_numbers%rowtype;
+  v_xai_changed boolean;
+  v_ghl_changed boolean;
 begin
+  select * into v_current from public.sales_phone_numbers where id = p_phone_number_id and active = true for update;
+  if not found then raise exception 'sales_phone_number_not_found'; end if;
+  v_xai_changed := v_current.xai_agent_id is distinct from nullif(p_setup->>'xai_agent_id', '')
+    or v_current.xai_phone_number_e164 is distinct from nullif(p_setup->>'xai_phone_number_e164', '');
+  v_ghl_changed := v_current.ghl_location_id is distinct from nullif(p_setup->>'ghl_location_id', '')
+    or v_current.ghl_routing_workflow_id is distinct from nullif(p_setup->>'ghl_routing_workflow_id', '')
+    or v_current.ghl_notification_workflow_id is distinct from nullif(p_setup->>'ghl_notification_workflow_id', '')
+    or v_current.ghl_mobile_custom_value_id is distinct from nullif(p_setup->>'ghl_mobile_custom_value_id', '')
+    or v_current.ghl_mobile_custom_value_name is distinct from nullif(p_setup->>'ghl_mobile_custom_value_name', '');
+
   update public.sales_phone_numbers
   set xai_agent_id = nullif(p_setup->>'xai_agent_id', ''),
       xai_phone_number_e164 = nullif(p_setup->>'xai_phone_number_e164', ''),
@@ -160,11 +194,19 @@ begin
       ghl_notification_workflow_id = nullif(p_setup->>'ghl_notification_workflow_id', ''),
       ghl_mobile_custom_value_id = nullif(p_setup->>'ghl_mobile_custom_value_id', ''),
       ghl_mobile_custom_value_name = nullif(p_setup->>'ghl_mobile_custom_value_name', ''),
-      xai_setup_status = p_setup->>'xai_setup_status',
-      ghl_setup_status = p_setup->>'ghl_setup_status',
+      xai_setup_status = case when v_xai_changed then 'pending' else p_setup->>'xai_setup_status' end,
+      ghl_setup_status = case when v_ghl_changed then 'pending' else p_setup->>'ghl_setup_status' end,
+      xai_verified_at = case
+        when v_xai_changed or p_setup->>'xai_setup_status' <> 'verified' then null
+        when p_setup->>'xai_setup_status' = 'verified' then now()
+        else xai_verified_at
+      end,
+      xai_verification_reference = case
+        when v_xai_changed or p_setup->>'xai_setup_status' <> 'verified' then null
+        else nullif(p_setup->>'xai_verification_reference', '')
+      end,
       updated_at = now()
   where id = p_phone_number_id and active = true;
-  if not found then raise exception 'sales_phone_number_not_found'; end if;
 
   select team_member_id into v_member_id
   from public.sales_phone_assignments
@@ -174,8 +216,8 @@ begin
   insert into public.sales_team_audit_events (team_member_id, actor_user_id, action, safe_metadata)
   values (v_member_id, p_actor_user_id, 'sales_voice_line_setup_saved', jsonb_build_object(
     'phone_number_id', p_phone_number_id,
-    'xai_setup_status', p_setup->>'xai_setup_status',
-    'ghl_setup_status', p_setup->>'ghl_setup_status'
+    'xai_setup_status', case when v_xai_changed then 'pending' else p_setup->>'xai_setup_status' end,
+    'ghl_setup_status', case when v_ghl_changed then 'pending' else p_setup->>'ghl_setup_status' end
   ));
   return p_phone_number_id;
 end;

@@ -86,7 +86,7 @@ function createAdminSalesTeamRouter({ db } = {}) {
 
   router.post('/members/:memberId/rotate-agent-token', async (req, res) => {
     try {
-      const result = await rotateSalesVoiceToken({ db, memberId: req.params.memberId, actorId: req.user?.id || null });
+      const result = await rotateSalesVoiceToken({ db, memberId: req.params.memberId, phoneId: req.body?.phone_id || null, actorId: req.user?.id || null });
       res.setHeader('Cache-Control', 'no-store');
       return res.json({ ok: true, ...result });
     } catch (error) {

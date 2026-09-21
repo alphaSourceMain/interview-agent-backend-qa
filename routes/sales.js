@@ -19,6 +19,7 @@ const {
   fingerprint,
   listSalesPackages,
   makeSalesError,
+  mergeDealTimeline,
   normalizeSalesDraft,
   safeDeal,
   safePromotionSummary,
@@ -820,7 +821,7 @@ function createSalesRouter(options = {}) {
         candidate_assistance_email: intent.candidate_assistance_email || '',
         ghl_contact_id: intent.ghl_contact_id || null,
         sales_note: intent.sales_note || '',
-        timeline: events || []
+        timeline: mergeDealTimeline(events || [], agreement)
       })
     } catch (error) {
       return respondError(res, req, error)

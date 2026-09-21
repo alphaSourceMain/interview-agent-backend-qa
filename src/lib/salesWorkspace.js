@@ -225,6 +225,48 @@ function deriveDealStatus(intent = {}, agreement = null, now = new Date()) {
   return 'needs_attention'
 }
 
+function latestDealActivityAt(intent = {}, agreement = null) {
+  const candidates = [
+    intent.created_at,
+    intent.updated_at,
+    intent.activated_at,
+    intent.canceled_at,
+    agreement?.sent_at,
+    agreement?.opened_at,
+    agreement?.signed_at,
+    agreement?.checkout_created_at
+  ]
+  let latestValue = intent.updated_at || intent.created_at || null
+  let latestTimestamp = Number.NEGATIVE_INFINITY
+  for (const value of candidates) {
+    const timestamp = Date.parse(String(value || ''))
+    if (Number.isFinite(timestamp) && timestamp > latestTimestamp) {
+      latestTimestamp = timestamp
+      latestValue = String(value)
+    }
+  }
+  return latestValue
+}
+
+function mergeDealTimeline(events = [], agreement = null) {
+  const timeline = Array.isArray(events) ? [...events] : []
+  const signedAt = String(agreement?.signed_at || '').trim()
+  const hasSignedEvent = timeline.some((item) => String(item?.event_type || '').trim().toLowerCase() === 'agreement_signed')
+  if (signedAt && Number.isFinite(Date.parse(signedAt)) && !hasSignedEvent) {
+    timeline.push({
+      id: `agreement-signed-${agreement?.id || signedAt}`,
+      event_type: 'agreement_signed',
+      safe_metadata: {},
+      created_at: signedAt
+    })
+  }
+  return timeline.sort((left, right) => {
+    const leftTime = Date.parse(String(left?.created_at || ''))
+    const rightTime = Date.parse(String(right?.created_at || ''))
+    return (Number.isFinite(leftTime) ? leftTime : 0) - (Number.isFinite(rightTime) ? rightTime : 0)
+  })
+}
+
 const STATUS_LABELS = Object.freeze({
   agreement_sent: 'Agreement sent',
   signed_payment_needed: 'Signed — payment needed',
@@ -268,6 +310,7 @@ function safeDeal(intent, agreement = null) {
     promotion_label: intent.promotion_label || null,
     created_at: intent.created_at,
     updated_at: intent.updated_at,
+    last_activity_at: latestDealActivityAt(intent, agreement),
     next_action: actions[0],
     available_actions: actions,
     ghl_opportunity_id: intent.ghl_opportunity_id || null
@@ -282,8 +325,10 @@ module.exports = {
   deriveDealStatus,
   fingerprint,
   isAgreementExpired,
+  latestDealActivityAt,
   listSalesPackages,
   makeSalesError,
+  mergeDealTimeline,
   normalizeSalesDraft,
   safeDeal,
   safePromotionSummary,

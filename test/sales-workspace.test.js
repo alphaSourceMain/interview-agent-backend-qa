@@ -8,7 +8,10 @@ const {
   calculatePricing,
   deriveDealStatus,
   fingerprint,
+  latestDealActivityAt,
+  mergeDealTimeline,
   normalizeSalesDraft,
+  safeDeal,
   validateSalesDraft
 } = require('../src/lib/salesWorkspace')
 const { buildMembershipAgreementHtml } = require('../utils/renderMembershipAgreement')
@@ -93,6 +96,38 @@ test('deal status reflects signature, payment, activation, and cancellation stat
     { status: 'signed', checkout_status: 'paid', agreement_expires_at: '2026-09-19T06:00:00.000Z' },
     new Date('2026-09-20T06:00:00.000Z')
   ), 'activated')
+})
+
+test('deal summary uses the latest agreement or transaction timestamp for activity', () => {
+  const intent = {
+    id: 'deal-1',
+    status: 'agreement_pending',
+    selected_plan_key: 'basic',
+    selected_billing_cadence: 'monthly',
+    package_snapshot: { display_name: 'Essential' },
+    created_at: '2026-09-18T12:00:00.000Z',
+    updated_at: '2026-09-18T12:05:00.000Z'
+  }
+  const agreement = {
+    id: 'agreement-1',
+    status: 'signed',
+    sent_at: '2026-09-18T12:05:00.000Z',
+    opened_at: '2026-09-19T14:00:00.000Z',
+    signed_at: '2026-09-19T14:30:00.000Z'
+  }
+  assert.equal(latestDealActivityAt(intent, agreement), agreement.signed_at)
+  assert.equal(safeDeal(intent, agreement).last_activity_at, agreement.signed_at)
+})
+
+test('deal timeline derives one chronologically ordered agreement-signed event', () => {
+  const events = [{ id: 'sent', event_type: 'agreement_sent', safe_metadata: {}, created_at: '2026-09-18T12:05:00.000Z' }]
+  const agreement = { id: 'agreement-1', signed_at: '2026-09-19T14:30:00.000Z' }
+  const timeline = mergeDealTimeline(events, agreement)
+  assert.deepEqual(timeline.map((item) => item.event_type), ['agreement_sent', 'agreement_signed'])
+  assert.equal(timeline[1].created_at, agreement.signed_at)
+
+  const existing = mergeDealTimeline([...events, { id: 'signed', event_type: 'agreement_signed', safe_metadata: {}, created_at: agreement.signed_at }], agreement)
+  assert.equal(existing.filter((item) => item.event_type === 'agreement_signed').length, 1)
 })
 
 test('fingerprint is stable across object key order', () => {

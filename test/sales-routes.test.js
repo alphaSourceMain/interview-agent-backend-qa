@@ -69,7 +69,13 @@ function makeDb() {
       selected_billing_cadence: 'annual',
       agreement_id: 'agreement-other'
     }],
-    membership_agreements: [{ id: 'agreement-owned', status: 'sent', is_current: true }],
+    membership_agreements: [{
+      id: 'agreement-owned',
+      status: 'signed',
+      is_current: true,
+      sent_at: '2026-09-18T12:01:00.000Z',
+      signed_at: '2026-09-19T14:30:00.000Z'
+    }],
     sales_deal_events: [{ id: 'event-1', purchase_intent_id: 'deal-owned', event_type: 'agreement_sent', safe_metadata: {}, created_at: '2026-09-18T12:01:00.000Z' }],
     from(table) { return new Query(this, table) }
   }
@@ -102,8 +108,11 @@ test('deal detail returns the owner-safe summary and timeline', async () => {
   assert.equal(response.status, 200)
   assert.equal(response.body.id, 'deal-owned')
   assert.equal(response.body.company_legal_name, 'Owned Company LLC')
-  assert.equal(response.body.timeline.length, 1)
+  assert.equal(response.body.timeline.length, 2)
   assert.equal(response.body.timeline[0].event_type, 'agreement_sent')
+  assert.equal(response.body.timeline[1].event_type, 'agreement_signed')
+  assert.equal(response.body.timeline[1].created_at, '2026-09-19T14:30:00.000Z')
+  assert.equal(response.body.last_activity_at, '2026-09-19T14:30:00.000Z')
   assert.equal('signer_token_hash' in response.body, false)
 })
 

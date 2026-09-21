@@ -128,6 +128,14 @@ function salesVoiceProviderEnabled(env = process.env) {
     cleanText(env.SLACK_SALES_WON_BOT_TOKEN, 500).length > 20;
 }
 
+function salesVoiceFeatureEnabled(env = process.env) {
+  return env.SALES_VOICE_HANDOFF_ENABLED === 'true';
+}
+
+function salesVoiceDatabaseRoutesEnabled(env = process.env) {
+  return env.SALES_VOICE_DB_ROUTES_ENABLED === 'true';
+}
+
 function routeForAuthorization(authorization, env = process.env) {
   const match = /^Bearer ([^\s]{32,256})$/.exec(String(authorization || ''));
   if (!match) return null;
@@ -182,8 +190,24 @@ async function routeForAuthorizationDb(authorization, db, env = process.env) {
   const repEmail = cleanText(member.workspace_email, 254).toLowerCase();
   const slackUserId = cleanText(member.slack_user_id, 24);
   const ghlNumber = cleanText(phone.e164, 16);
-  const ghlNotificationWebhook = ghlWebhookForNumber(ghlNumber, env);
-  if (!repName || !validEmail(repEmail) || !validSlackUserId(slackUserId) || !validE164(ghlNumber) || !ghlNotificationWebhook) return null;
+  const configResult = await db.from('sales_voice_configs')
+    .select('notify_email,notify_slack,notify_sms,status,is_current')
+    .eq('assignment_id', assignment.id)
+    .eq('status', 'applied')
+    .eq('is_current', true)
+    .maybeSingle();
+  const config = configResult.data;
+  if (configResult.error || !config) return null;
+  const notifyEmail = config.notify_email === true;
+  const notifySlack = config.notify_slack === true;
+  const notifySms = config.notify_sms === true;
+  const ghlNotificationWebhook = notifySms ? ghlWebhookForNumber(ghlNumber, env) : '';
+  if (!repName || !validEmail(repEmail) || !validE164(ghlNumber) ||
+      (notifySlack && !validSlackUserId(slackUserId)) ||
+      (notifySms && !ghlNotificationWebhook) ||
+      (notifyEmail && (!validEmail(env.SALES_VOICE_FROM_EMAIL) || cleanText(env.SENDGRID_API_KEY, 500).length <= 20)) ||
+      (notifySlack && cleanText(env.SLACK_SALES_WON_BOT_TOKEN, 500).length <= 20) ||
+      ![notifyEmail, notifySlack, notifySms].some(Boolean)) return null;
   return Object.freeze({
     routeKey: cleanText(assignment.id, 80).toLowerCase(),
     tokenHash: digest,
@@ -192,6 +216,9 @@ async function routeForAuthorizationDb(authorization, db, env = process.env) {
     slackUserId,
     ghlNumber,
     ghlNotificationWebhook,
+    notifyEmail,
+    notifySlack,
+    notifySms,
   });
 }
 
@@ -242,7 +269,8 @@ function createSalesVoiceHandoff(options = {}) {
   const env = options.env || process.env;
   const fetchImpl = options.fetch || global.fetch;
   const rateLimit = options.rateLimit || require('./rateLimit').checkAndIncrementRateLimit;
-  const routeModeEnabled = options.db ? salesVoiceProviderEnabled(env) : salesVoiceHandoffEnabled(env);
+  const routeModeEnabled = salesVoiceHandoffEnabled(env) ||
+    (Boolean(options.db) && salesVoiceDatabaseRoutesEnabled(env) && salesVoiceFeatureEnabled(env));
   async function reserve(routeName, subjectKey, windowMs, maxCount) {
     let timer;
     try {
@@ -267,21 +295,21 @@ function createSalesVoiceHandoff(options = {}) {
     }
 
     const message = humanMessage(input, route);
-    const deliveries = await Promise.allSettled([
-      postJson('https://api.sendgrid.com/v3/mail/send', {
+    const channels = [];
+    if (route.notifyEmail !== false) channels.push({ name: 'email', request: postJson('https://api.sendgrid.com/v3/mail/send', {
         personalizations: [{ to: [{ email: route.repEmail }] }],
         from: { email: cleanText(env.SALES_VOICE_FROM_EMAIL, 254).toLowerCase(), name: 'alphaSource Sales Assistant' },
         reply_to: { email: input.contact_email, name: input.caller_name },
         subject: `Caller message from ${input.company_name}`,
         content: [{ type: 'text/plain', value: emailBody(input, route) }],
         tracking_settings: { click_tracking: { enable: false, enable_text: false }, open_tracking: { enable: false } }
-      }, { Authorization: `Bearer ${env.SENDGRID_API_KEY}` }, fetchImpl),
-      postJson('https://slack.com/api/chat.postMessage', {
+      }, { Authorization: `Bearer ${env.SENDGRID_API_KEY}` }, fetchImpl) });
+    if (route.notifySlack !== false) channels.push({ name: 'slack', request: postJson('https://slack.com/api/chat.postMessage', {
         channel: route.slackUserId,
         client_msg_id: reference,
         ...slackMessage(input, route)
-      }, { Authorization: `Bearer ${env.SLACK_SALES_WON_BOT_TOKEN}` }, fetchImpl),
-      postJson(route.ghlNotificationWebhook, {
+      }, { Authorization: `Bearer ${env.SLACK_SALES_WON_BOT_TOKEN}` }, fetchImpl) });
+    if (route.notifySms !== false) channels.push({ name: 'ghl', request: postJson(route.ghlNotificationWebhook, {
         event: 'alphaScreen_sales_missed_call',
         event_id: reference,
         representative: route.repName,
@@ -291,17 +319,18 @@ function createSalesVoiceHandoff(options = {}) {
         callback_phone: input.callback_phone,
         contact_email: input.contact_email,
         message
-      }, {}, fetchImpl)
-    ]);
+      }, {}, fetchImpl) });
+    if (channels.length === 0) return { status: 'failed', reference };
+    const deliveries = await Promise.allSettled(channels.map((channel) => channel.request));
     const accepted = deliveries.map((result, index) => {
       if (result.status !== 'fulfilled' || !result.value.ok) return false;
-      if (index === 0) return result.value.status === 202;
-      if (index === 1) return result.value.body?.ok === true;
+      if (channels[index].name === 'email') return result.value.status === 202;
+      if (channels[index].name === 'slack') return result.value.body?.ok === true;
       return true;
     });
     const acceptedCount = accepted.filter(Boolean).length;
     return {
-      status: acceptedCount === 3 ? 'accepted' : acceptedCount > 0 ? 'partial' : 'failed',
+      status: acceptedCount === channels.length ? 'accepted' : acceptedCount > 0 ? 'partial' : 'failed',
       reference
     };
   }
@@ -319,7 +348,7 @@ function createSalesVoiceHandoffRouter(options = {}) {
     if (!service.enabled()) return res.status(503).json({ status: 'unavailable' });
     if (req.headers.origin) return res.status(401).json({ status: 'unauthorized' });
     let route = routeForAuthorization(req.headers.authorization, env);
-    if (!route && db) {
+    if (!route && db && salesVoiceDatabaseRoutesEnabled(env)) {
       try {
         route = await routeForAuthorizationDb(req.headers.authorization, db, env);
       } catch {
@@ -346,10 +375,11 @@ function createSalesVoiceHandoffRouter(options = {}) {
   return router;
 }
 
-function buildSalesVoiceAgentPrompt(repName) {
+function buildSalesVoiceAgentPrompt(repName, options = {}) {
   const name = cleanText(repName, 120);
   if (!name) throw new Error('Representative name is required');
-  return `You are the alphaSource sales assistant answering ${name}'s alphaScreen sales line when ${name} is unavailable.\n\nOpen with: "Hi, you've reached ${name}'s alphaScreen line. ${name} is unavailable right now, but I can take a message and make sure it reaches them."\n\nYour job is to collect a concise callback request, not to conduct a sales call. Ask one question at a time for the caller's full name, company name, callback phone, email, and reason for calling. Confirm the phone and email. If any name, company, or email spelling is unclear, ask the caller to spell it; never guess. Do not request payment details, passwords, authentication codes, candidate records, resumes, interview content, or other sensitive information. Do not promise a response time.\n\nRead back the contact details and a short natural-language message. Then ask: "Would you like me to send that message to ${name}?" Only after an explicit yes may you use the configured message action with confirmed=true. If the caller declines, do not send anything. Send at most once per call.\n\nNever say tool or function names, API, endpoint, parameters, providers, or delivery mechanics. Say only that you can send a message to ${name}. After an accepted or partial result, say: "Your message has been sent to ${name}." For any other result, say you could not confirm the message was sent and suggest calling back later. Do not retry.`;
+  const opening = cleanText(options.opening, 500) || `Hi, you've reached ${name}'s alphaScreen line. ${name} is unavailable right now, but I can take a message and make sure it reaches them.`;
+  return `You are the alphaSource sales assistant answering ${name}'s alphaScreen sales line when ${name} is unavailable.\n\nOpen with: "${opening}"\n\nYour job is to collect a concise callback request, not to conduct a sales call. Ask one question at a time for the caller's full name, company name, callback phone, email, and reason for calling. Confirm the phone and email. If any name, company, or email spelling is unclear, ask the caller to spell it; never guess. Do not request payment details, passwords, authentication codes, candidate records, resumes, interview content, or other sensitive information. Do not promise a response time.\n\nRead back the contact details and a short natural-language message. Then ask: "Would you like me to send that message to ${name}?" Only after an explicit yes may you use the configured message action with confirmed=true. If the caller declines, do not send anything. Send at most once per call.\n\nNever say tool or function names, API, endpoint, parameters, providers, or delivery mechanics. Say only that you can send a message to ${name}. After an accepted or partial result, say: "Your message has been sent to ${name}." For any other result, say you could not confirm the message was sent and suggest calling back later. Do not retry.`;
 }
 
 module.exports = {
@@ -361,6 +391,7 @@ module.exports = {
   routeForAuthorization,
   routeForAuthorizationDb,
   salesVoiceHandoffEnabled,
+  salesVoiceDatabaseRoutesEnabled,
   salesVoiceProviderEnabled,
   validateSalesVoiceMessage
 };

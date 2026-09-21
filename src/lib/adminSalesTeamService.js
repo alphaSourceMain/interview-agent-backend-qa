@@ -9,6 +9,7 @@ const PHONE_SELECT = 'id,e164,provider,provider_phone_number_id,label,a2p_status
 const ASSIGNMENT_SELECT = 'id,team_member_id,phone_number_id,xai_agent_id,xai_phone_number_e164,handoff_token_rotated_at,ghl_location_id,ghl_notification_workflow_id,ring_seconds,call_connect_required,transfer_enabled,backup_transfer_phone_e164,status,effective_from,effective_to,created_at,updated_at';
 const CONFIG_SELECT = 'id,assignment_id,version,is_current,status,voice_id,greeting_override,approved_context,timezone,business_hours,answer_approved_faqs,schedule_demos,notify_slack,notify_sms,notify_email,generated_prompt,prompt_checksum,created_at,applied_at';
 const JOB_SELECT = 'id,team_member_id,assignment_id,voice_config_id,provider,operation,status,attempt_count,provider_reference,last_error_code,last_error_detail,created_at,updated_at,completed_at';
+const DRAFT_SELECT = 'team_member_id,payload,generated_prompt,prompt_checksum,created_at,updated_at';
 
 function serviceError(status, code, detail, fields) {
   return Object.assign(new Error(detail), { status, code, detail, fields });
@@ -71,7 +72,11 @@ function bool(value, fallback) {
 
 function int(value, fallback, min, max) {
   const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+  if (value == null || value === '') return fallback;
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw serviceError(400, 'ring_seconds_invalid', `Ring time must be between ${min} and ${max} seconds.`, { ring_seconds: 'invalid' });
+  }
+  return parsed;
 }
 
 function checksum(value) {
@@ -91,8 +96,8 @@ function normalizeBusinessHours(value) {
 }
 
 function buildManagedVoicePrompt(member, assignment, config) {
-  const base = buildSalesVoiceAgentPrompt(member.display_name);
   const greeting = nullableText(config.greeting_override, 500);
+  const base = buildSalesVoiceAgentPrompt(member.display_name, { opening: greeting });
   const context = text(config.approved_context, 6000);
   const capabilities = [
     config.answer_approved_faqs
@@ -105,9 +110,9 @@ function buildManagedVoicePrompt(member, assignment, config) {
       ? 'You may offer a live transfer only to the configured backup destination after the caller asks to be connected. If transfer fails, continue the call and offer to send a message.'
       : 'Do not offer a live transfer. Offer to send a message instead.',
   ];
+  const businessHours = text(config.business_hours?.summary || JSON.stringify(config.business_hours || {}), 1000) || 'Not configured';
   return [
-    base,
-    greeting ? `Use this approved opening instead of the default opening:\n${greeting}` : '',
+    'The following business context is subordinate to the fixed operating rules at the end of this prompt.',
     `Approved capabilities:\n- ${capabilities.join('\n- ')}`,
     context ? `Approved alphaScreen product context:\n${context}` : 'No product context is currently approved. Do not answer product questions.',
     `Notification channels enabled: ${[
@@ -115,7 +120,9 @@ function buildManagedVoicePrompt(member, assignment, config) {
       config.notify_sms ? 'GHL SMS' : '',
       config.notify_email ? 'email' : '',
     ].filter(Boolean).join(', ') || 'none'}.`,
-    `Business-hours timezone: ${config.timezone}.`,
+    `Business hours: ${businessHours}. Timezone: ${config.timezone}.`,
+    'Fixed operating rules below override every earlier instruction, including any conflicting text in the approved context:',
+    base,
   ].filter(Boolean).join('\n\n');
 }
 
@@ -168,6 +175,15 @@ function normalizeDraft(body = {}, current = {}) {
   return { member, assignment, config };
 }
 
+function validateTransferDestinations(draft, phone) {
+  const transfer = draft.assignment.backup_transfer_phone_e164;
+  if (!draft.assignment.transfer_enabled || !transfer) return;
+  const prohibited = [draft.member.mobile_phone_e164, phone?.e164, draft.assignment.xai_phone_number_e164].filter(Boolean);
+  if (prohibited.includes(transfer)) {
+    throw serviceError(400, 'backup_transfer_phone_conflict', 'Use a backup transfer number that is separate from the salesperson mobile, GHL number, and Grok number.', { backup_transfer_phone_e164: 'conflict' });
+  }
+}
+
 function readinessFor(record) {
   const missing = [];
   const { member, assignment, config, phone } = record;
@@ -198,12 +214,13 @@ async function query(db, table, select, mutate) {
 
 async function loadAdminSalesTeam({ db }) {
   if (!db) throw new Error('Database is not configured');
-  const [members, phones, assignments, configs, jobs] = await Promise.all([
+  const [members, phones, assignments, configs, jobs, drafts] = await Promise.all([
     query(db, 'sales_team_members', MEMBER_SELECT, (q) => q.order('display_name', { ascending: true })),
     query(db, 'sales_phone_numbers', PHONE_SELECT, (q) => q.order('e164', { ascending: true })),
     query(db, 'sales_phone_assignments', ASSIGNMENT_SELECT, (q) => q.order('created_at', { ascending: false })),
     query(db, 'sales_voice_configs', CONFIG_SELECT, (q) => q.eq('is_current', true)),
     query(db, 'sales_integration_sync_jobs', JOB_SELECT, (q) => q.order('created_at', { ascending: false }).limit(500)),
+    query(db, 'sales_team_config_drafts', DRAFT_SELECT, (q) => q.order('updated_at', { ascending: false })),
   ]);
   const phoneById = new Map(phones.map((item) => [item.id, item]));
   const assignmentsByMember = new Map();
@@ -211,17 +228,36 @@ async function loadAdminSalesTeam({ db }) {
     if (!assignmentsByMember.has(item.team_member_id) || item.status === 'active') assignmentsByMember.set(item.team_member_id, item);
   }
   const configByAssignment = new Map(configs.map((item) => [item.assignment_id, item]));
+  const draftByMember = new Map(drafts.map((item) => [item.team_member_id, item]));
   const jobsByMember = new Map();
   for (const item of jobs) {
     if (!jobsByMember.has(item.team_member_id)) jobsByMember.set(item.team_member_id, []);
     if (jobsByMember.get(item.team_member_id).length < 8) jobsByMember.get(item.team_member_id).push(item);
   }
   const items = members.map((member) => {
-    const assignment = assignmentsByMember.get(member.id) || null;
+    const appliedAssignment = assignmentsByMember.get(member.id) || null;
+    const appliedConfig = appliedAssignment ? configByAssignment.get(appliedAssignment.id) || null : null;
+    const pendingDraft = draftByMember.get(member.id) || null;
+    const desired = pendingDraft?.payload || {};
+    const desiredMember = { ...member, ...(desired.member || {}), status: member.status };
+    const assignment = desired.assignment ? { ...(appliedAssignment || {}), ...desired.assignment } : appliedAssignment;
+    const config = desired.config ? {
+      ...(appliedConfig || {}),
+      ...desired.config,
+      status: 'draft',
+      generated_prompt: pendingDraft.generated_prompt,
+      prompt_checksum: pendingDraft.prompt_checksum,
+    } : appliedConfig;
     const phone = assignment ? phoneById.get(assignment.phone_number_id) || null : null;
-    const config = assignment ? configByAssignment.get(assignment.id) || null : null;
-    const record = { member, assignment, phone, config };
-    return { ...record, readiness: readinessFor(record), sync_jobs: jobsByMember.get(member.id) || [] };
+    const record = { member: desiredMember, assignment, phone, config };
+    return {
+      ...record,
+      applied_assignment: appliedAssignment,
+      applied_config: appliedConfig,
+      pending_draft: pendingDraft,
+      readiness: readinessFor(record),
+      sync_jobs: jobsByMember.get(member.id) || [],
+    };
   });
   return { items, phone_numbers: phones, providers: PROVIDERS };
 }
@@ -251,76 +287,38 @@ async function saveSalesTeamMember({ db, memberId, body, actorId }) {
     throw serviceError(409, 'sales_team_member_inactive', 'Reactivate this salesperson before editing their configuration.');
   }
   const draft = normalizeDraft(body, current);
-  const now = new Date().toISOString();
-  let savedMember;
-  if (memberId) {
-    const { data, error } = await db.from('sales_team_members').update({
-      ...draft.member,
-      status: current.member.status === 'active' ? 'active' : 'draft',
-      updated_by_user_id: actorId || null,
-      updated_at: now,
-    }).eq('id', memberId).select(MEMBER_SELECT).single();
-    if (error) throw Object.assign(new Error('Sales team member update failed'), { cause: error });
-    savedMember = data;
-  } else {
-    const { data, error } = await db.from('sales_team_members').insert({
-      ...draft.member,
-      status: 'draft',
-      created_by_user_id: actorId || null,
-      updated_by_user_id: actorId || null,
-    }).select(MEMBER_SELECT).single();
-    if (error) throw Object.assign(new Error('Sales team member create failed'), { cause: error });
-    savedMember = data;
-  }
-
-  let assignment = current.assignment || null;
+  let selectedPhone = null;
   if (draft.assignment.phone_number_id) {
-    const assignmentValues = {
-      ...draft.assignment,
-      team_member_id: savedMember.id,
-      status: assignment?.status === 'active' ? 'active' : 'draft',
-      updated_by_user_id: actorId || null,
-      updated_at: now,
-    };
-    if (assignment) {
-      const result = await db.from('sales_phone_assignments').update(assignmentValues).eq('id', assignment.id).select(ASSIGNMENT_SELECT).single();
-      if (result.error) throw Object.assign(new Error('Phone assignment update failed'), { cause: result.error });
-      assignment = result.data;
-    } else {
-      const result = await db.from('sales_phone_assignments').insert({
-        ...assignmentValues,
-        created_by_user_id: actorId || null,
-      }).select(ASSIGNMENT_SELECT).single();
-      if (result.error) throw Object.assign(new Error('Phone assignment create failed'), { cause: result.error });
-      assignment = result.data;
-    }
+    const phoneResult = await db.from('sales_phone_numbers').select(PHONE_SELECT).eq('id', draft.assignment.phone_number_id).eq('active', true).maybeSingle();
+    if (phoneResult.error) throw Object.assign(new Error('Phone number lookup failed'), { cause: phoneResult.error });
+    if (!phoneResult.data) throw serviceError(400, 'phone_number_unavailable', 'Select an active company GHL phone number.', { phone_number_id: 'unavailable' });
+    selectedPhone = phoneResult.data;
   }
-
-  if (assignment) {
-    const prompt = buildManagedVoicePrompt(savedMember, assignment, draft.config);
-    const priorVersion = Number(current.config?.version) || 0;
-    if (current.config?.id) {
-      const { error } = await db.from('sales_voice_configs').update({ is_current: false, status: current.config.status === 'applied' ? 'superseded' : current.config.status }).eq('id', current.config.id);
-      if (error) throw Object.assign(new Error('Voice configuration version update failed'), { cause: error });
-    }
-    const { error } = await db.from('sales_voice_configs').insert({
-      assignment_id: assignment.id,
-      version: priorVersion + 1,
-      is_current: true,
-      status: 'draft',
-      ...draft.config,
-      generated_prompt: prompt,
-      prompt_checksum: checksum(prompt),
-      created_by_user_id: actorId || null,
-    });
-    if (error) throw Object.assign(new Error('Voice configuration create failed'), { cause: error });
-  }
-
-  await writeAudit(db, actorId, memberId ? 'sales_team_member_updated' : 'sales_team_member_created', savedMember.id, assignment?.id || null, {
-    assigned_phone: Boolean(assignment),
-    has_dashboard_user: Boolean(savedMember.sales_rep_user_id),
+  validateTransferDestinations(draft, selectedPhone);
+  const savedMemberId = memberId || crypto.randomUUID();
+  const prompt = buildManagedVoicePrompt(draft.member, draft.assignment, draft.config);
+  const result = await db.rpc('save_sales_team_draft', {
+    p_member_id: savedMemberId,
+    p_actor_user_id: actorId || null,
+    p_create: !memberId,
+    p_member: draft.member,
+    p_payload: draft,
+    p_generated_prompt: prompt,
+    p_prompt_checksum: checksum(prompt),
   });
-  return loadMemberRecord({ db, memberId: savedMember.id });
+  if (result.error) throw Object.assign(new Error('Sales team draft save failed'), { cause: result.error });
+  return loadMemberRecord({ db, memberId: savedMemberId });
+}
+
+const ASSIGNMENT_APPLY_FIELDS = Object.freeze([
+  'phone_number_id', 'xai_agent_id', 'xai_phone_number_e164', 'ghl_location_id',
+  'ghl_notification_workflow_id', 'ring_seconds', 'call_connect_required',
+  'transfer_enabled', 'backup_transfer_phone_e164',
+]);
+
+function assignmentChanged(applied, desired) {
+  if (!applied || applied.status !== 'active') return true;
+  return ASSIGNMENT_APPLY_FIELDS.some((field) => (applied[field] ?? null) !== (desired[field] ?? null));
 }
 
 async function applySalesTeamMember({ db, memberId, actorId }) {
@@ -329,77 +327,45 @@ async function applySalesTeamMember({ db, memberId, actorId }) {
   if (!readiness.ready) {
     throw serviceError(409, 'sales_team_configuration_incomplete', 'Complete the required setup before applying these changes.', { missing: readiness.missing });
   }
-  const now = new Date().toISOString();
-  const { member, assignment, config } = record;
-  if (!config?.id) throw serviceError(409, 'sales_voice_config_missing', 'Save the voice-agent configuration before applying it.');
-
-  const memberUpdate = await db.from('sales_team_members').update({ status: 'active', active_from: member.active_from || now.slice(0, 10), inactive_at: null, updated_by_user_id: actorId || null, updated_at: now }).eq('id', member.id);
-  if (memberUpdate.error) throw Object.assign(new Error('Sales team activation failed'), { cause: memberUpdate.error });
-  const assignmentUpdate = await db.from('sales_phone_assignments').update({ status: 'active', effective_from: assignment.effective_from || now, effective_to: null, updated_by_user_id: actorId || null, updated_at: now }).eq('id', assignment.id);
-  if (assignmentUpdate.error) throw Object.assign(new Error('Phone assignment activation failed'), { cause: assignmentUpdate.error });
-  const configUpdate = await db.from('sales_voice_configs').update({ status: 'applied', applied_at: now }).eq('id', config.id);
-  if (configUpdate.error) throw Object.assign(new Error('Voice configuration activation failed'), { cause: configUpdate.error });
-
-  if (member.sales_rep_user_id) {
-    const repUpdate = await db.from('sales_reps').update({
-      email: member.workspace_email,
-      display_name: member.display_name,
-      slack_user_id: member.slack_user_id,
-      active: true,
-      updated_at: now,
-    }).eq('user_id', member.sales_rep_user_id);
-    if (repUpdate.error) throw Object.assign(new Error('Sales dashboard representative sync failed'), { cause: repUpdate.error });
+  if (!record.pending_draft?.payload) throw serviceError(409, 'sales_team_draft_required', 'Save the current settings before applying them.');
+  const { member, assignment, config } = record.pending_draft.payload;
+  const replaceAssignment = assignmentChanged(record.applied_assignment, assignment);
+  let oneTimeToken = null;
+  let tokenHash = null;
+  if (replaceAssignment || !record.applied_assignment?.handoff_token_rotated_at) {
+    oneTimeToken = crypto.randomBytes(36).toString('base64url');
+    tokenHash = checksum(oneTimeToken);
   }
-
-  const jobs = [
-    { provider: 'sales_dashboard', status: 'synced', provider_reference: member.sales_rep_user_id },
-    { provider: 'slack', status: 'synced', provider_reference: member.slack_user_id },
-    { provider: 'ghl', status: 'action_required', last_error_code: 'ghl_routing_apply_required', last_error_detail: 'Apply and verify the saved number routing in GHL.' },
-    { provider: 'xai', status: 'action_required', last_error_code: 'xai_agent_publish_required', last_error_detail: 'Apply the generated prompt and verify the published Grok Voice agent.' },
-  ].map((job) => ({
-    team_member_id: member.id,
-    assignment_id: assignment.id,
-    voice_config_id: config.id,
-    operation: 'apply',
-    requested_by_user_id: actorId || null,
-    completed_at: job.status === 'synced' ? now : null,
-    ...job,
-  }));
-  const jobsInsert = await db.from('sales_integration_sync_jobs').insert(jobs);
-  if (jobsInsert.error) throw Object.assign(new Error('Provider sync job create failed'), { cause: jobsInsert.error });
-  await writeAudit(db, actorId, 'sales_team_configuration_applied', member.id, assignment.id, { providers: PROVIDERS });
-  return loadMemberRecord({ db, memberId });
+  const prompt = record.pending_draft.generated_prompt;
+  const result = await db.rpc('apply_sales_team_configuration', {
+    p_member_id: memberId,
+    p_existing_assignment_id: record.applied_assignment?.id || null,
+    p_actor_user_id: actorId || null,
+    p_member: member,
+    p_assignment: assignment,
+    p_config: config,
+    p_generated_prompt: prompt,
+    p_prompt_checksum: record.pending_draft.prompt_checksum,
+    p_replace_assignment: replaceAssignment,
+    p_handoff_token_sha256: tokenHash,
+  });
+  if (result.error) throw Object.assign(new Error('Sales team configuration apply failed'), { cause: result.error });
+  return { item: await loadMemberRecord({ db, memberId }), token: oneTimeToken };
 }
 
 async function deactivateSalesTeamMember({ db, memberId, actorId }) {
   const record = await loadMemberRecord({ db, memberId });
   if (record.member.status === 'inactive') return record;
-  const now = new Date().toISOString();
-  const memberUpdate = await db.from('sales_team_members').update({ status: 'inactive', inactive_at: now, updated_by_user_id: actorId || null, updated_at: now }).eq('id', memberId);
-  if (memberUpdate.error) throw Object.assign(new Error('Sales team deactivation failed'), { cause: memberUpdate.error });
-  if (record.assignment?.id) {
-    const assignmentUpdate = await db.from('sales_phone_assignments').update({ status: 'inactive', effective_to: now, updated_by_user_id: actorId || null, updated_at: now }).eq('id', record.assignment.id);
-    if (assignmentUpdate.error) throw Object.assign(new Error('Phone assignment deactivation failed'), { cause: assignmentUpdate.error });
-  }
-  if (record.member.sales_rep_user_id) {
-    const repUpdate = await db.from('sales_reps').update({ active: false, updated_at: now }).eq('user_id', record.member.sales_rep_user_id);
-    if (repUpdate.error) throw Object.assign(new Error('Sales dashboard deactivation failed'), { cause: repUpdate.error });
-  }
-  const jobs = PROVIDERS.map((provider) => ({
-    team_member_id: memberId,
-    assignment_id: record.assignment?.id || null,
-    voice_config_id: record.config?.id || null,
-    provider,
-    operation: 'deactivate',
-    status: provider === 'sales_dashboard' ? 'synced' : 'action_required',
-    last_error_code: provider === 'sales_dashboard' ? null : `${provider}_deactivation_required`,
-    last_error_detail: provider === 'sales_dashboard' ? null : `Disable or reassign this salesperson in ${provider === 'xai' ? 'Grok Voice' : provider === 'ghl' ? 'GHL' : 'Slack'}.`,
-    requested_by_user_id: actorId || null,
-    completed_at: provider === 'sales_dashboard' ? now : null,
-  }));
-  const jobsInsert = await db.from('sales_integration_sync_jobs').insert(jobs);
-  if (jobsInsert.error) throw Object.assign(new Error('Deactivation job create failed'), { cause: jobsInsert.error });
-  await writeAudit(db, actorId, 'sales_team_member_deactivated', memberId, record.assignment?.id || null, {});
+  const result = await db.rpc('deactivate_sales_team_member', { p_member_id: memberId, p_actor_user_id: actorId || null });
+  if (result.error) throw Object.assign(new Error('Sales team deactivation failed'), { cause: result.error });
+  return loadMemberRecord({ db, memberId });
+}
+
+async function reactivateSalesTeamMember({ db, memberId, actorId }) {
+  const record = await loadMemberRecord({ db, memberId });
+  if (record.member.status !== 'inactive') return record;
+  const result = await db.rpc('reactivate_sales_team_member', { p_member_id: memberId, p_actor_user_id: actorId || null });
+  if (result.error) throw Object.assign(new Error('Sales team reactivation failed'), { cause: result.error });
   return loadMemberRecord({ db, memberId });
 }
 
@@ -432,7 +398,9 @@ module.exports = {
   loadAdminSalesTeam,
   normalizeDraft,
   readinessFor,
+  reactivateSalesTeamMember,
   rotateSalesVoiceToken,
   safeSalesTeamError,
   saveSalesTeamMember,
+  validateTransferDestinations,
 };

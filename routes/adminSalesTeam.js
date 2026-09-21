@@ -5,6 +5,7 @@ const {
   applySalesTeamMember,
   deactivateSalesTeamMember,
   loadAdminSalesTeam,
+  reactivateSalesTeamMember,
   rotateSalesVoiceToken,
   safeSalesTeamError,
   saveSalesTeamMember,
@@ -12,6 +13,10 @@ const {
 
 function createAdminSalesTeamRouter({ db } = {}) {
   const router = express.Router();
+  router.use((_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
 
   function respondError(req, res, error) {
     const status = Number(error?.status) || 500;
@@ -52,7 +57,16 @@ function createAdminSalesTeamRouter({ db } = {}) {
 
   router.post('/members/:memberId/apply', async (req, res) => {
     try {
-      const item = await applySalesTeamMember({ db, memberId: req.params.memberId, actorId: req.user?.id || null });
+      const result = await applySalesTeamMember({ db, memberId: req.params.memberId, actorId: req.user?.id || null });
+      return res.json({ ok: true, ...result });
+    } catch (error) {
+      return respondError(req, res, error);
+    }
+  });
+
+  router.post('/members/:memberId/reactivate', async (req, res) => {
+    try {
+      const item = await reactivateSalesTeamMember({ db, memberId: req.params.memberId, actorId: req.user?.id || null });
       return res.json({ ok: true, item });
     } catch (error) {
       return respondError(req, res, error);

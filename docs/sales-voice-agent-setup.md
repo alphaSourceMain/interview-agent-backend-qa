@@ -21,6 +21,8 @@ The Grok agent states that the named representative is unavailable, collects the
 
 The global-admin **Sales Team & Call Routing** page is the operational source of truth for representative identity, the active GHL-number assignment, the Grok agent and fallback number, the approved agent context, transfer rules, and notification preferences. Active database assignments supersede the original representative-specific environment route table. The original table remains a rollback-compatible path during migration.
 
+**Save draft** writes only the service-role draft table. It cannot change an active recipient or phone assignment. **Save & apply changes** validates the visible form, then uses one database transaction to activate the identity, assignment, prompt version, sales-dashboard mapping, audit event, and provider-status jobs. Changing assignment fields closes the previous assignment and creates a new historical row. Deactivation is also transactional and can be reversed to a draft from the admin page.
+
 Each active assignment has a distinct handoff token. Only its SHA-256 digest is stored. Rotating it invalidates the old token immediately and returns the replacement once to the global admin for the corresponding Grok message tool. Never place the plaintext token in source, database metadata, logs, screenshots, or release evidence.
 
 An approved message fans out to:
@@ -48,6 +50,7 @@ Provider redirects are rejected. Slack renders every caller-provided field as pl
   - `ghl_number`
   - `ghl_notification_webhook`
 - `SALES_VOICE_GHL_WEBHOOKS_JSON`: object mapping each company-owned GHL number in E.164 format to that number's fixed `leadconnectorhq.com` notification-workflow webhook. This capability URL remains server-side; the admin page stores only the workflow identifier.
+- `SALES_VOICE_DB_ROUTES_ENABLED`: must be exactly `true` before an active database assignment can authenticate. This is separate from `SALES_VOICE_HANDOFF_ENABLED` so adding the admin schema cannot silently enable a previously empty environment route table.
 
 Keep the feature disabled unless all route objects validate. Never put bearer tokens in source, agent prompts, URLs, documentation, or logs.
 
@@ -63,6 +66,8 @@ The four named Grok Voice drafts were created on September 21, 2026. They have t
 - Daniel Broyles: `agent_QzE6yzA9ZHC6P0wN`
 
 No GHL number routing is changed merely by saving the admin record. **Apply changes** activates the database-owned recipient route and records the remaining GHL and Grok provider actions. Do not report either provider as synchronized until the saved GHL routing and published Grok agent have been verified.
+
+Slack, GHL SMS, and email delivery follow the current applied voice configuration independently. Disabled channels are not called and are not required for route resolution. Slack remains `action_required` until the member mapping is verified; saving an ID alone is not reported as synchronization.
 
 Publishing agents, provisioning Grok phone numbers, adding the sales-agent Workspace alias, creating a GHL private integration or workflow webhook, and changing live GHL routing are separate external changes. Complete those only against the confirmed QA route after reviewing the exact configuration.
 

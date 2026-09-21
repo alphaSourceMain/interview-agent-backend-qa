@@ -12,6 +12,7 @@ const {
   routeForAuthorization,
   routeForAuthorizationDb,
   salesVoiceHandoffEnabled,
+  salesVoiceDatabaseRoutesEnabled,
   salesVoiceProviderEnabled,
   validateSalesVoiceMessage
 } = require('../src/lib/salesVoiceHandoff');
@@ -63,6 +64,8 @@ test('requires complete fixed routes and matches bearer token without a caller-s
   assert.equal(parseRouteConfig({ ...env, SALES_VOICE_HANDOFF_ROUTES_JSON: JSON.stringify([{ ...route }, { ...route, route_key: 'second-route', token_sha256: 'f'.repeat(64) }]) }).length, 0);
   assert.equal(salesVoiceHandoffEnabled({ ...env, SALES_VOICE_HANDOFF_ENABLED: 'false' }), false);
   assert.equal(salesVoiceProviderEnabled({ ...env, SALES_VOICE_HANDOFF_ROUTES_JSON: undefined }), true);
+  assert.equal(salesVoiceDatabaseRoutesEnabled(env), false);
+  assert.equal(salesVoiceDatabaseRoutesEnabled({ ...env, SALES_VOICE_DB_ROUTES_ENABLED: 'true' }), true);
 });
 
 test('database-managed route resolves a token to fixed active recipients', async () => {
@@ -71,6 +74,7 @@ test('database-managed route resolves a token to fixed active recipients', async
     sales_phone_assignments: [{ id: 'assignment-1', team_member_id: 'member-1', phone_number_id: 'phone-1', handoff_token_sha256: digest, status: 'active' }],
     sales_team_members: [{ id: 'member-1', display_name: 'Michael Afesi', workspace_email: 'michael@example.com', slack_user_id: 'U123456789', status: 'active' }],
     sales_phone_numbers: [{ id: 'phone-1', e164: '+17207904187', active: true }],
+    sales_voice_configs: [{ assignment_id: 'assignment-1', notify_email: true, notify_slack: true, notify_sms: true, status: 'applied', is_current: true }],
   };
   const db = {
     from(table) {
@@ -94,6 +98,28 @@ test('database-managed route resolves a token to fixed active recipients', async
   assert.equal(resolved.repEmail, 'michael@example.com');
   assert.equal(resolved.ghlNumber, '+17207904187');
   assert.equal(await routeForAuthorizationDb(`Bearer ${'z'.repeat(48)}`, db, dynamicEnv), null);
+});
+
+test('database notification flags permit only the enabled fixed delivery channels', async () => {
+  const calls = [];
+  const emailOnlyRoute = {
+    ...parseRouteConfig(env)[0],
+    notifyEmail: true,
+    notifySlack: false,
+    notifySms: false,
+    slackUserId: '',
+    ghlNotificationWebhook: '',
+  };
+  const service = createSalesVoiceHandoff({
+    env,
+    rateLimit: async () => ({ allowed: true }),
+    fetch: async (url) => {
+      calls.push(url);
+      return { ok: true, status: 202, json: async () => ({}) };
+    },
+  });
+  assert.equal((await service.send(message, emailOnlyRoute)).status, 'accepted');
+  assert.deepEqual(calls, ['https://api.sendgrid.com/v3/mail/send']);
 });
 
 test('fans an approved message out to fixed email, Slack DM, and GHL workflow', async () => {

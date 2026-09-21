@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { buildSalesVoiceAgentPrompt, buildSalesVoiceBootstrapPrompt, ghlWebhookForNumber } = require('./salesVoiceHandoff');
 const {
+  checkSalesTeamProviderReadiness,
   checkSalesTeamProviders,
   providersReady,
   recordProviderResults,
@@ -336,6 +337,23 @@ function assignmentChanged(applied, desired) {
   return ASSIGNMENT_APPLY_FIELDS.some((field) => (applied[field] ?? null) !== (desired[field] ?? null));
 }
 
+async function restoreGhlChanges(changes, env, fetchImpl) {
+  const failed = [];
+  for (const change of [...changes].reverse()) {
+    try {
+      const result = await setGhlMobile(change.record, change.previousMobile, env, fetchImpl);
+      if (result.status !== 'synced') failed.push(change.record.phone?.e164 || 'unknown line');
+    } catch {
+      failed.push(change.record.phone?.e164 || 'unknown line');
+    }
+  }
+  return failed;
+}
+
+function providerApplyError(result, detail) {
+  return serviceError(409, result?.errorCode || 'sales_team_provider_sync_required', detail, { providers: ['ghl'] });
+}
+
 async function applySalesTeamMember({ db, memberId, actorId, env = process.env, fetchImpl = global.fetch }) {
   const record = await loadMemberRecord({ db, memberId });
   const readiness = readinessFor(record);
@@ -348,14 +366,38 @@ async function applySalesTeamMember({ db, memberId, actorId, env = process.env, 
     throw serviceError(409, 'ghl_notification_webhook_missing', 'Configure the server-side GHL notification webhook for this company number before enabling SMS.', { ghl_notification_workflow_id: 'server_mapping_missing' });
   }
   const providerRecord = { ...record, member, assignment, phone: record.phone, config };
-  const previousMobile = record.applied_phone?.id === record.phone?.id ? (record.applied_member?.mobile_phone_e164 || '') : '';
-  const provider_sync = await checkSalesTeamProviders({ record: providerRecord, env, fetchImpl });
+  const occupiedResult = await db.from('sales_phone_assignments')
+    .select('id,team_member_id')
+    .eq('phone_number_id', record.phone.id)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (occupiedResult.error) throw Object.assign(new Error('Sales line occupancy lookup failed'), { cause: occupiedResult.error });
+  if (occupiedResult.data && occupiedResult.data.team_member_id !== memberId) {
+    throw serviceError(409, 'sales_phone_number_in_use', 'That company line is assigned to another active salesperson. Choose an available line.');
+  }
+  const provider_sync = await checkSalesTeamProviderReadiness({ record: providerRecord, env, fetchImpl });
   if (!providersReady(provider_sync)) {
-    if (provider_sync.ghl?.status === 'synced' && previousMobile !== member.mobile_phone_e164) {
-      try { await setGhlMobile(providerRecord, previousMobile, env, fetchImpl); } catch { /* status remains blocked and requires operator review */ }
-    }
     const failed = Object.entries(provider_sync).filter(([, value]) => !['synced', 'not_applicable'].includes(value.status)).map(([provider]) => provider);
     throw serviceError(409, 'sales_team_provider_sync_required', 'Provider setup must pass before this salesperson can be activated.', { providers: failed });
+  }
+  const lineChanged = Boolean(record.applied_phone?.id && record.applied_phone.id !== record.phone.id);
+  const desiredPreviousMobile = record.applied_phone?.id === record.phone.id ? (record.applied_member?.mobile_phone_e164 || '') : '';
+  const ghlChanges = [];
+  const desiredGhl = await setGhlMobile(providerRecord, member.mobile_phone_e164, env, fetchImpl);
+  provider_sync.ghl = desiredGhl;
+  if (desiredGhl.status !== 'synced') {
+    throw providerApplyError(desiredGhl, 'GHL must confirm the selected line before this salesperson can be activated.');
+  }
+  ghlChanges.push({ record: providerRecord, previousMobile: desiredPreviousMobile });
+  if (lineChanged) {
+    const appliedRecord = { ...record, member: record.applied_member, assignment: record.applied_assignment, phone: record.applied_phone, config: record.applied_config };
+    const clearedOldLine = await setGhlMobile(appliedRecord, '', env, fetchImpl);
+    if (clearedOldLine.status !== 'synced') {
+      const failedRestore = await restoreGhlChanges(ghlChanges, env, fetchImpl);
+      if (failedRestore.length) throw serviceError(409, 'sales_team_provider_restore_failed', 'GHL could not clear the previous line or restore the selected line. Review both line routes before retrying.', { lines: failedRestore });
+      throw providerApplyError(clearedOldLine, 'GHL must clear the previous company line before this salesperson can move to another line.');
+    }
+    ghlChanges.push({ record: appliedRecord, previousMobile: record.applied_member?.mobile_phone_e164 || '' });
   }
   const replaceAssignment = assignmentChanged(record.applied_assignment, assignment);
   const lineTokenResult = await db.from('sales_phone_numbers')
@@ -381,9 +423,8 @@ async function applySalesTeamMember({ db, memberId, actorId, env = process.env, 
     p_handoff_token_sha256: lineTokenResult.data.handoff_token_sha256,
   });
   if (result.error) {
-    if (provider_sync.ghl?.status === 'synced' && previousMobile !== member.mobile_phone_e164) {
-      try { await setGhlMobile(providerRecord, previousMobile, env, fetchImpl); } catch { /* activation failed and provider requires operator review */ }
-    }
+    const failedRestore = await restoreGhlChanges(ghlChanges, env, fetchImpl);
+    if (failedRestore.length) throw serviceError(409, 'sales_team_provider_restore_failed', 'The database rejected this change and GHL did not restore every affected line. Review the listed line routes before retrying.', { lines: failedRestore });
     const detail = String(result.error.message || result.error.details || '');
     if (/sales_team_draft_stale/i.test(detail)) throw serviceError(409, 'sales_team_draft_stale', 'The draft changed while it was being applied. Review the latest draft and apply again.');
     if (/sales_team_member_inactive/i.test(detail)) throw serviceError(409, 'sales_team_member_inactive', 'Reactivate this salesperson before applying their configuration.');
@@ -459,7 +500,10 @@ async function deactivateSalesTeamMember({ db, memberId, actorId, env = process.
   }
   const result = await db.rpc('deactivate_sales_team_member', { p_member_id: memberId, p_actor_user_id: actorId || null });
   if (result.error) {
-    try { await setGhlMobile(appliedRecord, record.applied_member?.mobile_phone_e164 || '', env, fetchImpl); } catch { /* deactivation failed and route restoration needs operator review */ }
+    let restored;
+    try { restored = await setGhlMobile(appliedRecord, record.applied_member?.mobile_phone_e164 || '', env, fetchImpl); }
+    catch { restored = { status: 'failed' }; }
+    if (restored.status !== 'synced') throw serviceError(409, 'sales_team_deactivation_restore_failed', 'The database kept this salesperson active, but GHL did not restore the mobile route. Review this line before retrying.');
     throw Object.assign(new Error('Sales team deactivation failed'), { cause: result.error });
   }
   await recordProviderResults(db, memberId, {
@@ -481,9 +525,15 @@ async function reactivateSalesTeamMember({ db, memberId, actorId }) {
 async function rotateSalesVoiceToken({ db, memberId, phoneId, actorId }) {
   const record = await loadMemberRecord({ db, memberId });
   if (!record.phone?.id || record.phone.id !== phoneId) throw serviceError(409, 'sales_phone_number_required', 'Save the selected company sales line before preparing its agent token.');
+  const occupiedResult = await db.from('sales_phone_assignments').select('team_member_id').eq('phone_number_id', phoneId).eq('status', 'active').maybeSingle();
+  if (occupiedResult.error) throw Object.assign(new Error('Sales line occupancy lookup failed'), { cause: occupiedResult.error });
+  if (occupiedResult.data && occupiedResult.data.team_member_id !== memberId) {
+    throw serviceError(409, 'sales_phone_number_in_use', 'That company line is assigned to another active salesperson. Choose an available line.');
+  }
   const token = crypto.randomBytes(36).toString('base64url');
   const result = await db.rpc('rotate_sales_voice_line_token', {
     p_phone_number_id: record.phone.id,
+    p_team_member_id: memberId,
     p_actor_user_id: actorId || null,
     p_handoff_token_sha256: checksum(token),
   });

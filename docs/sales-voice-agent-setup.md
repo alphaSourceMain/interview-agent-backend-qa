@@ -75,7 +75,9 @@ The four Grok Voice drafts were created on September 21, 2026. Until line setup 
 - Epifanio Sierra: `agent_b32kYrh6mSVlrSK3`
 - Daniel Broyles: `agent_QzE6yzA9ZHC6P0wN`
 
-**Save draft** never changes live routing. **Save & apply changes** first updates the selected line's GHL mobile value, verifies the Slack member, and checks the verified Grok line; it activates the database recipient only after every enabled check passes. A failed database apply restores the prior GHL mobile value on a best-effort basis and reports failure. Provider status remains failed or action-required when any check fails, and **Sync providers** retries those checks against the applied line without changing the saved person.
+**Save draft** never changes live routing. **Save & apply changes** rejects a line assigned to someone else, verifies Slack and the prepared Grok line, confirms the selected line's GHL mobile, and clears a previous line when the representative moves. It activates the database recipient only after every enabled check passes. A failed database apply restores every affected GHL line and reports an explicit operator action if any restore is not confirmed. Provider status remains failed or action-required when any check fails, and **Sync providers** retries those checks against the applied line without changing the saved person.
+
+Preparing or rotating a line token is allowed only when the line is free or assigned to the selected representative. Rotation updates the active compatibility assignment in the same transaction, invalidates the old bearer, and returns Grok setup to pending until the new token is installed and a new QA call is recorded.
 
 Slack, GHL SMS, and email delivery follow the current applied voice configuration independently. Disabled channels are not called and are not required for route resolution. Slack is `synced` only after `users.info` confirms the exact active member. GHL is `synced` only after its API confirms the managed mobile value. Grok is `synced` only after the reusable line setup is marked verified.
 

@@ -86,6 +86,7 @@ where phone.id = seed.id
 
 create or replace function public.rotate_sales_voice_line_token(
   p_phone_number_id uuid,
+  p_team_member_id uuid,
   p_actor_user_id uuid,
   p_handoff_token_sha256 text
 )
@@ -101,18 +102,38 @@ begin
     raise exception 'sales_voice_line_token_invalid';
   end if;
 
+  select team_member_id into v_member_id
+  from public.sales_phone_assignments
+  where phone_number_id = p_phone_number_id and status = 'active'
+  for update;
+  if v_member_id is not null and v_member_id is distinct from p_team_member_id then
+    raise exception 'sales_phone_number_in_use';
+  end if;
+
   update public.sales_phone_numbers
   set handoff_token_sha256 = p_handoff_token_sha256,
       handoff_token_rotated_at = now(),
+      xai_setup_status = 'pending',
+      xai_verified_at = null,
+      xai_verification_reference = null,
       updated_at = now()
   where id = p_phone_number_id and active = true;
   if not found then raise exception 'sales_phone_number_not_found'; end if;
 
-  select team_member_id into v_member_id
-  from public.sales_phone_assignments
-  where phone_number_id = p_phone_number_id
-  order by case status when 'active' then 0 when 'draft' then 1 else 2 end, created_at desc
-  limit 1;
+  update public.sales_phone_assignments
+  set handoff_token_sha256 = p_handoff_token_sha256,
+      handoff_token_rotated_at = now(),
+      updated_by_user_id = p_actor_user_id,
+      updated_at = now()
+  where phone_number_id = p_phone_number_id and status = 'active';
+
+  if v_member_id is null then
+    select team_member_id into v_member_id
+    from public.sales_phone_assignments
+    where phone_number_id = p_phone_number_id
+    order by created_at desc
+    limit 1;
+  end if;
 
   insert into public.sales_team_audit_events (team_member_id, actor_user_id, action, safe_metadata)
   values (v_member_id, p_actor_user_id, 'sales_voice_line_token_rotated', jsonb_build_object('phone_number_id', p_phone_number_id));
@@ -186,6 +207,24 @@ begin
     or v_current.ghl_mobile_custom_value_id is distinct from nullif(p_setup->>'ghl_mobile_custom_value_id', '')
     or v_current.ghl_mobile_custom_value_name is distinct from nullif(p_setup->>'ghl_mobile_custom_value_name', '');
 
+  if not v_xai_changed and p_setup->>'xai_setup_status' = 'verified' and (
+    nullif(p_setup->>'xai_agent_id', '') is null
+    or nullif(p_setup->>'xai_phone_number_e164', '') is null
+    or v_current.handoff_token_rotated_at is null
+    or nullif(p_setup->>'xai_verification_reference', '') is null
+  ) then
+    raise exception 'xai_line_setup_incomplete';
+  end if;
+  if not v_ghl_changed and p_setup->>'ghl_setup_status' = 'verified' and (
+    nullif(p_setup->>'ghl_location_id', '') is null
+    or nullif(p_setup->>'ghl_routing_workflow_id', '') is null
+    or nullif(p_setup->>'ghl_notification_workflow_id', '') is null
+    or nullif(p_setup->>'ghl_mobile_custom_value_id', '') is null
+    or nullif(p_setup->>'ghl_mobile_custom_value_name', '') is null
+  ) then
+    raise exception 'ghl_line_setup_incomplete';
+  end if;
+
   update public.sales_phone_numbers
   set xai_agent_id = nullif(p_setup->>'xai_agent_id', ''),
       xai_phone_number_e164 = nullif(p_setup->>'xai_phone_number_e164', ''),
@@ -223,9 +262,13 @@ begin
 end;
 $$;
 
-revoke all on function public.rotate_sales_voice_line_token(uuid, uuid, text) from public, anon, authenticated;
+revoke all on function public.rotate_sales_voice_line_token(uuid, uuid, uuid, text) from public, anon, authenticated;
 revoke all on function public.finish_sales_provider_sync(uuid, text, text, text, text, text) from public, anon, authenticated;
 revoke all on function public.save_sales_voice_line_setup(uuid, uuid, jsonb) from public, anon, authenticated;
-grant execute on function public.rotate_sales_voice_line_token(uuid, uuid, text) to service_role;
+grant execute on function public.rotate_sales_voice_line_token(uuid, uuid, uuid, text) to service_role;
 grant execute on function public.finish_sales_provider_sync(uuid, text, text, text, text, text) to service_role;
 grant execute on function public.save_sales_voice_line_setup(uuid, uuid, jsonb) to service_role;
+
+-- Retire the assignment-only rotation path. Stable line rotation updates the
+-- active compatibility assignment in the same transaction.
+revoke execute on function public.rotate_sales_voice_handoff_token(uuid, uuid, text) from service_role;

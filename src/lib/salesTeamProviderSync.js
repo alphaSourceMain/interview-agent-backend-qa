@@ -79,17 +79,23 @@ async function verifyXai(record) {
   return { status: 'synced', reference: clean(phone.xai_agent_id, 160) };
 }
 
-async function checkSalesTeamProviders({ record, env = process.env, fetchImpl = global.fetch }) {
+async function checkSalesTeamProviderReadiness({ record, env = process.env, fetchImpl = global.fetch }) {
   const results = {};
   const tasks = [
     ['slack', () => verifySlack(record, env, fetchImpl)],
-    ['ghl', () => syncGhl(record, env, fetchImpl)],
     ['xai', () => verifyXai(record)],
   ];
   for (const [provider, run] of tasks) {
     try { results[provider] = await run(); }
     catch { results[provider] = { status: 'failed', errorCode: `${provider}_sync_unavailable`, errorDetail: `${provider === 'xai' ? 'Grok Voice' : provider.toUpperCase()} verification is temporarily unavailable.` }; }
   }
+  return results;
+}
+
+async function checkSalesTeamProviders({ record, env = process.env, fetchImpl = global.fetch }) {
+  const results = await checkSalesTeamProviderReadiness({ record, env, fetchImpl });
+  try { results.ghl = await syncGhl(record, env, fetchImpl); }
+  catch { results.ghl = { status: 'failed', errorCode: 'ghl_sync_unavailable', errorDetail: 'GHL verification is temporarily unavailable.' }; }
   return results;
 }
 
@@ -107,16 +113,4 @@ async function syncSalesTeamProviders({ db, record, env = process.env, fetchImpl
   return results;
 }
 
-async function syncSalesTeamDeactivation({ db, record, env = process.env, fetchImpl = global.fetch }) {
-  let ghl;
-  try { ghl = await setGhlMobile(record, '', env, fetchImpl); } catch { ghl = { status: 'failed', errorCode: 'ghl_deactivation_sync_unavailable', errorDetail: 'GHL could not clear the former representative mobile from this line.' }; }
-  const results = {
-    ghl,
-    xai: { status: 'not_applicable', reference: 'line-retained' },
-    slack: { status: 'not_applicable', reference: 'recipient-unassigned' },
-  };
-  await recordProviderResults(db, record.member.id, results);
-  return results;
-}
-
-module.exports = { checkSalesTeamProviders, providersReady, recordProviderResults, setGhlMobile, syncSalesTeamDeactivation, syncSalesTeamProviders, syncGhl, verifySlack, verifyXai };
+module.exports = { checkSalesTeamProviderReadiness, checkSalesTeamProviders, providersReady, recordProviderResults, setGhlMobile, syncSalesTeamProviders, syncGhl, verifySlack, verifyXai };

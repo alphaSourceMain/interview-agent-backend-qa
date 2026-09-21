@@ -63,6 +63,34 @@ create unique index sales_phone_assignments_handoff_token_uidx
   on public.sales_phone_assignments (handoff_token_sha256)
   where handoff_token_sha256 is not null and status = 'active';
 
+create or replace function public.enforce_active_sales_line_token()
+returns trigger
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+  v_line_token_sha256 text;
+begin
+  if new.status <> 'active' then return new; end if;
+  select handoff_token_sha256 into v_line_token_sha256
+  from public.sales_phone_numbers
+  where id = new.phone_number_id and active = true;
+  if v_line_token_sha256 is null or new.handoff_token_sha256 is distinct from v_line_token_sha256 then
+    raise exception 'sales_voice_line_token_stale';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists enforce_active_sales_line_token_trigger on public.sales_phone_assignments;
+create trigger enforce_active_sales_line_token_trigger
+before insert or update of phone_number_id, handoff_token_sha256, status
+on public.sales_phone_assignments
+for each row execute function public.enforce_active_sales_line_token();
+
+revoke all on function public.enforce_active_sales_line_token() from public, anon, authenticated;
+
 alter table public.sales_integration_sync_jobs
   drop constraint if exists sales_integration_sync_jobs_status_check;
 alter table public.sales_integration_sync_jobs

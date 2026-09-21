@@ -373,6 +373,24 @@ async function activeMobileForLine(db, phoneId) {
   return memberResult.data.mobile_phone_e164;
 }
 
+async function reconcileGhlChangesAfterDatabaseFailure(db, changes, env, fetchImpl) {
+  const unresolved = [];
+  for (const change of [...changes].reverse()) {
+    let targetMobile = change.previousMobile;
+    let lookupFailed = false;
+    try {
+      targetMobile = (await activeMobileForLine(db, change.record.phone.id)) || change.previousMobile;
+    } catch {
+      lookupFailed = true;
+    }
+    let restored;
+    try { restored = await setGhlMobile(change.record, targetMobile, env, fetchImpl); }
+    catch { restored = { status: 'failed' }; }
+    if (lookupFailed || restored.status !== 'synced') unresolved.push(change.record.phone?.e164 || 'unknown line');
+  }
+  return unresolved;
+}
+
 async function applySalesTeamMember({ db, memberId, actorId, env = process.env, fetchImpl = global.fetch }) {
   const record = await loadMemberRecord({ db, memberId });
   const readiness = readinessFor(record);
@@ -442,18 +460,11 @@ async function applySalesTeamMember({ db, memberId, actorId, env = process.env, 
     p_handoff_token_sha256: lineTokenResult.data.handoff_token_sha256,
   });
   if (result.error) {
-    if (result.error.code === '23505' && desiredPreviousMobile === '') {
-      try {
-        const incumbentMobile = await activeMobileForLine(db, record.phone.id);
-        if (incumbentMobile) ghlChanges[0].previousMobile = incumbentMobile;
-      } catch {
-        throw serviceError(409, 'sales_team_provider_restore_failed', 'The database rejected this change and the current GHL line recipient could not be resolved safely. Review this line route before retrying.', { lines: [record.phone.e164] });
-      }
-    }
-    const failedRestore = await restoreGhlChanges(ghlChanges, env, fetchImpl);
+    const failedRestore = await reconcileGhlChangesAfterDatabaseFailure(db, ghlChanges, env, fetchImpl);
     if (failedRestore.length) throw serviceError(409, 'sales_team_provider_restore_failed', 'The database rejected this change and GHL did not restore every affected line. Review the listed line routes before retrying.', { lines: failedRestore });
     const detail = String(result.error.message || result.error.details || '');
     if (/sales_team_draft_stale/i.test(detail)) throw serviceError(409, 'sales_team_draft_stale', 'The draft changed while it was being applied. Review the latest draft and apply again.');
+    if (/sales_voice_line_token_stale/i.test(detail)) throw serviceError(409, 'sales_voice_line_token_stale', 'The company line token changed during this request. Verify the updated Grok line and apply again.');
     if (/sales_team_member_inactive/i.test(detail)) throw serviceError(409, 'sales_team_member_inactive', 'Reactivate this salesperson before applying their configuration.');
     if (result.error.code === '23505') throw serviceError(409, 'sales_team_assignment_conflict', 'That salesperson, GHL number, or Grok agent is already active on another assignment.');
     throw Object.assign(new Error('Sales team configuration apply failed'), { cause: result.error });

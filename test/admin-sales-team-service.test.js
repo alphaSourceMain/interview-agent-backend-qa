@@ -169,6 +169,7 @@ test('line-slot migration keeps stable tokens server-only and provider status tr
   assert.match(sql, /xai_setup_status = 'pending'[\s\S]*update public\.sales_phone_assignments[\s\S]*handoff_token_sha256 = p_handoff_token_sha256/);
   assert.match(sql, /raise exception 'xai_line_setup_incomplete'/);
   assert.match(sql, /raise exception 'ghl_line_setup_incomplete'/);
+  assert.match(sql, /raise exception 'sales_voice_line_token_stale'[\s\S]*create trigger enforce_active_sales_line_token_trigger/);
   assert.doesNotMatch(sql, /grant [^;]* to (?:anon|authenticated)/);
 });
 
@@ -358,6 +359,38 @@ test('a concurrent occupied-line conflict restores the incumbent mobile', async 
     },
   }), (error) => error.code === 'sales_team_assignment_conflict');
   assert.deepEqual(ghlWrites, [member.mobile_phone_e164, incumbentMobile]);
+});
+
+test('a stale duplicate apply reconciles GHL to the winning active member', async () => {
+  const db = makeControlPlaneDb();
+  const winningMobile = '+17205557777';
+  db.tables.sales_team_config_drafts[0].payload.member.mobile_phone_e164 = winningMobile;
+  const originalRpc = db.rpc.bind(db);
+  db.rpc = async (name, args) => {
+    if (name !== 'apply_sales_team_configuration') return originalRpc(name, args);
+    db.calls.push({ name, args });
+    db.tables.sales_team_members[0].status = 'active';
+    db.tables.sales_team_members[0].mobile_phone_e164 = winningMobile;
+    db.tables.sales_phone_assignments[0].status = 'active';
+    return { data: null, error: { message: 'sales_team_draft_stale' } };
+  };
+  const ghlWrites = [];
+  await assert.rejects(applySalesTeamMember({
+    db, memberId: member.id,
+    env: {
+      SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true',
+      SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ '+17207904187': 'https://example.leadconnectorhq.com/hooks/michael' }),
+      GHL_PRIVATE_INTEGRATION_TOKEN: 'pit-' + 'g'.repeat(40),
+      SLACK_SALES_WON_BOT_TOKEN: 'xoxb-' + 's'.repeat(40),
+    },
+    fetchImpl: async (url, options) => {
+      if (url.includes('slack.com')) return { ok: true, status: 200, json: async () => ({ ok: true, user: { id: member.slack_user_id, deleted: false } }) };
+      const value = JSON.parse(options.body).value;
+      ghlWrites.push(value);
+      return { ok: true, status: 200, json: async () => ({ customValue: { id: 'custom-value-1', name: 'alphaScreen Line 1 Mobile', value } }) };
+    },
+  }), (error) => error.code === 'sales_team_draft_stale');
+  assert.deepEqual(ghlWrites, [winningMobile, winningMobile]);
 });
 
 test('failed old-line clear restores the newly selected line before apply stops', async () => {

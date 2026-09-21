@@ -245,8 +245,10 @@ async function loadAdminSalesTeam({ db }) {
   ]);
   const phoneById = new Map(phones.map((item) => [item.id, item]));
   const assignmentsByMember = new Map();
+  const activeAssignmentsByMember = new Map();
   for (const item of assignments) {
-    if (!assignmentsByMember.has(item.team_member_id) || item.status === 'active') assignmentsByMember.set(item.team_member_id, item);
+    if (!assignmentsByMember.has(item.team_member_id)) assignmentsByMember.set(item.team_member_id, item);
+    if (item.status === 'active' && !activeAssignmentsByMember.has(item.team_member_id)) activeAssignmentsByMember.set(item.team_member_id, item);
   }
   const configByAssignment = new Map(configs.map((item) => [item.assignment_id, item]));
   const draftByMember = new Map(drafts.map((item) => [item.team_member_id, item]));
@@ -256,12 +258,13 @@ async function loadAdminSalesTeam({ db }) {
     if (jobsByMember.get(item.team_member_id).length < 8) jobsByMember.get(item.team_member_id).push(item);
   }
   const items = members.map((member) => {
-    const appliedAssignment = assignmentsByMember.get(member.id) || null;
+    const latestAssignment = assignmentsByMember.get(member.id) || null;
+    const appliedAssignment = activeAssignmentsByMember.get(member.id) || null;
     const appliedConfig = appliedAssignment ? configByAssignment.get(appliedAssignment.id) || null : null;
     const pendingDraft = draftByMember.get(member.id) || null;
     const desired = pendingDraft?.payload || {};
     const desiredMember = { ...member, ...(desired.member || {}), status: member.status };
-    const assignment = desired.assignment ? { ...(appliedAssignment || {}), ...desired.assignment } : appliedAssignment;
+    const assignment = desired.assignment ? { ...(appliedAssignment || latestAssignment || {}), ...desired.assignment } : appliedAssignment || (latestAssignment?.status === 'draft' ? latestAssignment : null);
     const config = desired.config ? {
       ...(appliedConfig || {}),
       ...desired.config,
@@ -350,6 +353,11 @@ async function restoreGhlChanges(changes, env, fetchImpl) {
   return failed;
 }
 
+async function setGhlMobileSafely(record, mobile, env, fetchImpl) {
+  try { return await setGhlMobile(record, mobile, env, fetchImpl); }
+  catch { return { status: 'failed', errorCode: 'ghl_sync_unavailable', errorDetail: 'GHL verification is temporarily unavailable.' }; }
+}
+
 function providerApplyError(result, detail) {
   return serviceError(409, result?.errorCode || 'sales_team_provider_sync_required', detail, { providers: ['ghl'] });
 }
@@ -383,7 +391,7 @@ async function applySalesTeamMember({ db, memberId, actorId, env = process.env, 
   const lineChanged = Boolean(record.applied_phone?.id && record.applied_phone.id !== record.phone.id);
   const desiredPreviousMobile = record.applied_phone?.id === record.phone.id ? (record.applied_member?.mobile_phone_e164 || '') : '';
   const ghlChanges = [];
-  const desiredGhl = await setGhlMobile(providerRecord, member.mobile_phone_e164, env, fetchImpl);
+  const desiredGhl = await setGhlMobileSafely(providerRecord, member.mobile_phone_e164, env, fetchImpl);
   provider_sync.ghl = desiredGhl;
   if (desiredGhl.status !== 'synced') {
     throw providerApplyError(desiredGhl, 'GHL must confirm the selected line before this salesperson can be activated.');
@@ -391,7 +399,7 @@ async function applySalesTeamMember({ db, memberId, actorId, env = process.env, 
   ghlChanges.push({ record: providerRecord, previousMobile: desiredPreviousMobile });
   if (lineChanged) {
     const appliedRecord = { ...record, member: record.applied_member, assignment: record.applied_assignment, phone: record.applied_phone, config: record.applied_config };
-    const clearedOldLine = await setGhlMobile(appliedRecord, '', env, fetchImpl);
+    const clearedOldLine = await setGhlMobileSafely(appliedRecord, '', env, fetchImpl);
     if (clearedOldLine.status !== 'synced') {
       const failedRestore = await restoreGhlChanges(ghlChanges, env, fetchImpl);
       if (failedRestore.length) throw serviceError(409, 'sales_team_provider_restore_failed', 'GHL could not clear the previous line or restore the selected line. Review both line routes before retrying.', { lines: failedRestore });
@@ -493,19 +501,25 @@ async function saveSalesLineSetup({ db, phoneId, body, actorId }) {
 async function deactivateSalesTeamMember({ db, memberId, actorId, env = process.env, fetchImpl = global.fetch }) {
   const record = await loadMemberRecord({ db, memberId });
   if (record.member.status === 'inactive') return record;
-  const appliedRecord = { ...record, member: record.applied_member, assignment: record.applied_assignment, phone: record.applied_phone, config: record.applied_config };
-  const ghl = await setGhlMobile(appliedRecord, '', env, fetchImpl);
-  if (ghl.status !== 'synced') {
-    throw serviceError(409, 'ghl_deactivation_sync_required', 'GHL must confirm the mobile route is cleared before this salesperson can be deactivated.', { providers: ['ghl'] });
+  const hasActiveLine = record.applied_assignment?.status === 'active' && Boolean(record.applied_phone?.id);
+  const appliedRecord = hasActiveLine
+    ? { ...record, member: record.applied_member, assignment: record.applied_assignment, phone: record.applied_phone, config: record.applied_config }
+    : null;
+  let ghl = { status: 'not_applicable', reference: 'no-active-line' };
+  if (appliedRecord) {
+    ghl = await setGhlMobileSafely(appliedRecord, '', env, fetchImpl);
+    if (ghl.status !== 'synced') {
+      throw serviceError(409, 'ghl_deactivation_sync_required', 'GHL must confirm the mobile route is cleared before this salesperson can be deactivated.', { providers: ['ghl'] });
+    }
   }
   const result = await db.rpc('deactivate_sales_team_member', { p_member_id: memberId, p_actor_user_id: actorId || null });
-  if (result.error) {
+  if (result.error && appliedRecord) {
     let restored;
     try { restored = await setGhlMobile(appliedRecord, record.applied_member?.mobile_phone_e164 || '', env, fetchImpl); }
     catch { restored = { status: 'failed' }; }
     if (restored.status !== 'synced') throw serviceError(409, 'sales_team_deactivation_restore_failed', 'The database kept this salesperson active, but GHL did not restore the mobile route. Review this line before retrying.');
-    throw Object.assign(new Error('Sales team deactivation failed'), { cause: result.error });
   }
+  if (result.error) throw Object.assign(new Error('Sales team deactivation failed'), { cause: result.error });
   await recordProviderResults(db, memberId, {
     ghl,
     xai: { status: 'not_applicable', reference: 'line-retained' },

@@ -346,6 +346,36 @@ test('failed old-line clear restores the newly selected line before apply stops'
   assert.equal(db.calls.length, 0);
 });
 
+test('thrown old-line clear restores the newly selected line before apply stops', async () => {
+  const db = makeControlPlaneDb();
+  db.tables.sales_team_members[0].status = 'active';
+  db.tables.sales_phone_assignments[0].status = 'active';
+  const oldPhone = db.tables.sales_phone_numbers[0];
+  const newPhone = { ...oldPhone, id: '21000000-0000-4000-8000-000000000002', e164: '+17198818074', xai_agent_id: 'agent_line_2', xai_phone_number_e164: '+17205550003', ghl_mobile_custom_value_id: 'custom-value-2', ghl_mobile_custom_value_name: 'alphaScreen Line 2 Mobile', handoff_token_sha256: 'b'.repeat(64) };
+  db.tables.sales_phone_numbers.push(newPhone);
+  Object.assign(db.tables.sales_team_config_drafts[0].payload.assignment, { phone_number_id: newPhone.id, xai_agent_id: newPhone.xai_agent_id, xai_phone_number_e164: newPhone.xai_phone_number_e164 });
+  const ghlWrites = [];
+  await assert.rejects(applySalesTeamMember({
+    db, memberId: member.id,
+    env: {
+      SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true',
+      SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ [newPhone.e164]: 'https://example.leadconnectorhq.com/hooks/new-line' }),
+      GHL_PRIVATE_INTEGRATION_TOKEN: 'pit-' + 'g'.repeat(40),
+      SLACK_SALES_WON_BOT_TOKEN: 'xoxb-' + 's'.repeat(40),
+    },
+    fetchImpl: async (url, options) => {
+      if (url.includes('slack.com')) return { ok: true, status: 200, json: async () => ({ ok: true, user: { id: member.slack_user_id, deleted: false } }) };
+      const value = JSON.parse(options.body).value;
+      const phone = url.includes('custom-value-2') ? newPhone : oldPhone;
+      ghlWrites.push([phone.id, value]);
+      if (phone.id === oldPhone.id) throw new Error('synthetic network failure');
+      return { ok: true, status: 200, json: async () => ({ customValue: { id: phone.ghl_mobile_custom_value_id, name: phone.ghl_mobile_custom_value_name, value } }) };
+    },
+  }), (error) => error.code === 'ghl_sync_unavailable');
+  assert.deepEqual(ghlWrites, [[newPhone.id, member.mobile_phone_e164], [oldPhone.id, ''], [newPhone.id, '']]);
+  assert.equal(db.calls.length, 0);
+});
+
 test('new salesperson and draft are saved in one atomic RPC', async () => {
   const db = makeControlPlaneDb();
   db.calls.length = 0;
@@ -384,6 +414,22 @@ test('deactivation leaves the member active when GHL cannot confirm the clear', 
   await assert.rejects(deactivateSalesTeamMember({ db, memberId: member.id, env: {} }), /GHL must confirm/i);
   assert.equal(db.tables.sales_team_members[0].status, 'active');
   assert.equal(db.calls.length, 0);
+});
+
+test('deactivating a draft-only member never clears a line held by an active salesperson', async () => {
+  const db = makeControlPlaneDb();
+  const activeMemberId = '22000000-0000-4000-8000-000000000099';
+  db.tables.sales_team_members.push({ ...member, id: activeMemberId, sales_rep_user_id: '11111111-1111-4111-8111-111111111199', workspace_email: 'active@alphasourceai.com', status: 'active' });
+  db.tables.sales_phone_assignments.push({ ...assignment, id: '23000000-0000-4000-8000-000000000099', team_member_id: activeMemberId, status: 'active', created_at: '2026-09-21T01:00:00Z' });
+  let providerCalls = 0;
+  const result = await deactivateSalesTeamMember({
+    db, memberId: member.id, actorId: '99999999-9999-4999-8999-999999999999',
+    env: { SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true', GHL_PRIVATE_INTEGRATION_TOKEN: 'pit-' + 'g'.repeat(40) },
+    fetchImpl: async () => { providerCalls += 1; throw new Error('must not be called'); },
+  });
+  assert.equal(providerCalls, 0);
+  assert.equal(result.member.status, 'inactive');
+  assert.equal(db.tables.sales_team_members.find((item) => item.id === activeMemberId).status, 'active');
 });
 
 test('deactivation reports when the database fails and GHL cannot restore the active route', async () => {

@@ -59,7 +59,12 @@ function createAdminSalesTeamRouter({ db } = {}) {
 
   router.post('/members/:memberId/apply', async (req, res) => {
     try {
-      const result = await applySalesTeamMember({ db, memberId: req.params.memberId, actorId: req.user?.id || null });
+      const result = await applySalesTeamMember({
+        db,
+        memberId: req.params.memberId,
+        replaceTeamMemberId: req.body?.replace_team_member_id || null,
+        actorId: req.user?.id || null,
+      });
       return res.json({ ok: true, ...result });
     } catch (error) {
       return respondError(req, res, error);

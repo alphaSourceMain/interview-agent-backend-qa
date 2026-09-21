@@ -226,12 +226,11 @@ async function routeForAuthorizationDb(authorization, db, env = process.env) {
   const notifySlack = config.notify_slack === true;
   const notifySms = config.notify_sms === true;
   const ghlNotificationWebhook = notifySms ? ghlWebhookForNumber(ghlNumber, env) : '';
-  if (!repName || !validEmail(repEmail) || !validE164(ghlNumber) ||
-      (notifySlack && !validSlackUserId(slackUserId)) ||
-      (notifySms && !ghlNotificationWebhook) ||
-      (notifyEmail && (!validEmail(env.SALES_VOICE_FROM_EMAIL) || cleanText(env.SENDGRID_API_KEY, 500).length <= 20)) ||
-      (notifySlack && cleanText(env.SLACK_SALES_WON_BOT_TOKEN, 500).length <= 20) ||
-      ![notifyEmail, notifySlack, notifySms].some(Boolean)) return null;
+  if (!notifyEmail || !notifySlack || !notifySms ||
+      !repName || !validEmail(repEmail) || !validE164(ghlNumber) ||
+      !validSlackUserId(slackUserId) || !ghlNotificationWebhook ||
+      !validEmail(env.SALES_VOICE_FROM_EMAIL) || cleanText(env.SENDGRID_API_KEY, 500).length <= 20 ||
+      cleanText(env.SLACK_SALES_WON_BOT_TOKEN, 500).length <= 20) return null;
   return Object.freeze({
     routeKey: cleanText(assignment.id, 80).toLowerCase(),
     tokenHash: digest,
@@ -331,6 +330,7 @@ function createSalesVoiceHandoff(options = {}) {
 
   async function send(input, route) {
     if (!routeModeEnabled || !route) return { status: 'unavailable' };
+    if (route.notifyEmail === false || route.notifySlack === false || route.notifySms === false) return { status: 'unavailable' };
     const reference = hash(`${route.routeKey}:${JSON.stringify(input)}`).slice(0, 32);
     try {
       if (!await reserve('sales_voice_handoff_global', 'all', 3600000, 100) ||

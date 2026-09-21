@@ -123,7 +123,7 @@ test('stable company-line token follows the current active assignment and return
   });
 });
 
-test('database notification flags permit only the enabled fixed delivery channels', async () => {
+test('a route fails closed unless email, Slack, and GHL text are all enabled', async () => {
   const calls = [];
   const emailOnlyRoute = {
     ...parseRouteConfig(env)[0],
@@ -141,8 +141,8 @@ test('database notification flags permit only the enabled fixed delivery channel
       return { ok: true, status: 202, json: async () => ({}) };
     },
   });
-  assert.equal((await service.send(message, emailOnlyRoute)).status, 'accepted');
-  assert.deepEqual(calls, ['https://api.sendgrid.com/v3/mail/send']);
+  assert.equal((await service.send(message, emailOnlyRoute)).status, 'unavailable');
+  assert.deepEqual(calls, []);
 });
 
 test('fans an approved message out to fixed email, Slack DM, and GHL workflow', async () => {

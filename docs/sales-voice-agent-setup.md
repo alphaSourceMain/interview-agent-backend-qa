@@ -4,16 +4,16 @@ QA implementation plan. Keep the four rep routes disabled until every recipient 
 
 ## Call path
 
-Each purchased GHL number belongs to one representative:
+The control plane has exactly four permanent company line slots:
 
-- Michael Afesi: `+1 720-790-4187`
-- Christopher Turean: `+1 719-881-8074`
-- Epifanio Sierra: `+1 719-259-2989`
-- Daniel Broyles: `+1 719-249-5855`
+- Line 1: `+1 720-790-4187`
+- Line 2: `+1 719-881-8074`
+- Line 3: `+1 719-259-2989`
+- Line 4: `+1 719-249-5855`
 
-Each number is a permanent company line slot. Its GHL workflows, GHL mobile custom value, Grok agent, Grok phone number, and Grok bearer token are configured once and stay with the company number when personnel change. The dashboard changes the representative assigned to the slot.
+Each slot keeps its GHL workflows, mobile and GHL-user custom values, Grok agent, Grok phone number, and Grok bearer token when personnel change. The dashboard changes the representative assigned to the slot.
 
-The fixed GHL call workflow connects to that line's managed mobile custom value with Call Connect and a roughly 20-second timeout, then connects to the line's fixed Grok number. This prevents the representative's carrier voicemail from silently taking the call. A separate fixed GHL notification workflow sends the caller-approved SMS message to the same managed mobile value.
+The fixed GHL call workflow first uses **Assign To User** in Dynamic mode with the line's managed GHL-user-ID value. **Connect Call** then rings the assigned user's configured mobile for 20 seconds with voicemail detection enabled before connecting to the line's fixed Grok number. Apply routing verifies the selected GHL user, updates that user's phone to the dashboard mobile, and writes both managed values. A separate fixed GHL notification workflow sends the caller-approved SMS message to the same managed mobile value.
 
 The Grok agent states that the named representative is unavailable, collects the caller's confirmed name, company, callback phone, email, and a short message, then asks whether the caller wants the message sent. It does not mention tools, providers, APIs, channels, or delivery mechanics. It sends at most once and only after explicit approval.
 
@@ -23,7 +23,7 @@ The Grok agent states that the named representative is unavailable, collects the
 
 The global-admin **Sales Team & Call Routing** page is the operational source of truth for representative identity, the active GHL-number assignment, the Grok agent and fallback number, the approved agent context, transfer rules, and notification preferences. Active database assignments supersede the original representative-specific environment route table. The original table remains a rollback-compatible path during migration.
 
-**Save draft** writes only the service-role draft table. It cannot change an active recipient or phone assignment. **Save & apply changes** validates the visible form, then uses one database transaction to activate the identity, assignment, prompt version, sales-dashboard mapping, audit event, and provider-status jobs. Changing assignment fields closes the previous assignment and creates a new historical row. Deactivation is also transactional and can be reversed to a draft from the admin page.
+**Save draft** writes only the service-role draft table. It cannot change an active recipient or phone assignment. **Apply routing** validates the visible form, stages and confirms provider changes, then uses one database transaction to activate the identity, assignment, prompt version, sales-dashboard mapping, audit event, and provider-status jobs. Replacing an occupied slot requires the exact incumbent member ID. The transaction deactivates the former routing and sales-dashboard mapping while preserving the former account, attribution, sales, commissions, assignments, and audit history. A failed provider or database step restores the prior live route.
 
 Each company line has a distinct stable bearer token. Only its SHA-256 digest is stored. Rotating it invalidates the old token immediately and returns the replacement once to the global admin for both fixed Grok tools. Normal personnel changes do not rotate the token or require a Grok edit. Never place the plaintext token in source, database metadata, logs, screenshots, or release evidence.
 
@@ -54,19 +54,19 @@ Provider redirects are rejected. Slack renders every caller-provided field as pl
   - `ghl_number`
   - `ghl_notification_webhook`
 - `SALES_VOICE_GHL_WEBHOOKS_JSON`: object mapping each company-owned GHL number in E.164 format to that number's fixed `leadconnectorhq.com` notification-workflow webhook. This capability URL remains server-side.
-- `GHL_PRIVATE_INTEGRATION_TOKEN`: a location-scoped private integration with `locations/customValues.readonly` and `locations/customValues.write`. Apply uses it only to update the selected line's preconfigured mobile custom value.
+- `GHL_PRIVATE_INTEGRATION_TOKEN`: a location-scoped private integration with `locations/customValues.readonly`, `locations/customValues.write`, `users.readonly`, and `users.write`. Apply verifies the exact GHL user and Workspace email, updates the user's phone, and updates the selected line's preconfigured mobile and GHL-user-ID values.
 - `SALES_VOICE_DB_ROUTES_ENABLED`: must be exactly `true` before an active database assignment can authenticate. This is separate from `SALES_VOICE_HANDOFF_ENABLED` so adding the admin schema cannot silently enable a previously empty environment route table.
-- `SALES_TEAM_PROVIDER_SYNC_ENABLED=true`: separately enables the Slack membership check and the GHL managed-mobile write. Keep it off until the private integration and fixed line workflows are verified in QA.
+- `SALES_TEAM_PROVIDER_SYNC_ENABLED=true`: separately enables the Slack membership check and the GHL managed routing writes. Keep it off until the private integration and fixed line workflows are verified in QA.
 
 Keep the feature disabled unless all route objects validate. Never put bearer tokens in source, agent prompts, URLs, documentation, or logs.
 
 ## Remaining setup inputs
 
-Before hiring, finish the four company line slots: provision one Grok number per existing agent, install the generic prompt from `buildSalesVoiceBootstrapPrompt()`, add the fixed context and message tools, publish and verify each agent, create the GHL mobile custom value and two fixed workflows per line, and record those safe provider identifiers on `sales_phone_numbers`. Record the completed Grok QA call reference before marking the agent verified. Changing an agent, phone, workflow, or custom-value identifier automatically returns that provider to pending.
+Before hiring, finish the four company line slots: provision one Grok number per existing agent, install the generic prompt from `buildSalesVoiceBootstrapPrompt()`, add the fixed context and message tools, publish and verify each agent, create the GHL mobile and GHL-user-ID custom values and two fixed workflows per line, and record those safe provider identifiers on `sales_phone_numbers`. Record the completed Grok QA call reference before marking the agent verified. Changing an agent, phone, workflow, or custom-value identifier automatically returns that provider to pending.
 
-For each representative, create the Workspace account, Slack member, GHL user, and sales-dashboard user. Then enter the name, Workspace address, mobile, Slack member ID, GHL user ID, sales-dashboard user ID, and chosen company line on the admin page. **Save & apply changes** verifies the Slack member, updates the GHL line's mobile value, activates the sales-dashboard identity, and uses the already-published Grok agent's live context. Normal onboarding and turnover require no Grok or GHL editing.
+For each representative, create the Workspace account, Slack member, GHL user, and sales-dashboard user. Then enter the name, Workspace address, mobile, Slack member ID, GHL user ID, sales-dashboard user ID, and chosen company line on the admin page. **Apply routing** verifies the Slack member, verifies that the GHL user's email matches Workspace, updates GHL mobile forwarding and both line routing values, activates the sales-dashboard identity, and uses the already-published Grok agent's live context. Normal onboarding and turnover require no Grok or GHL editing.
 
-Deactivation removes the active database recipient and clears the managed GHL mobile value. The fixed GHL call workflow must treat an empty mobile value as “skip the human leg” and route directly to its fixed Grok fallback, so a former representative can never receive later calls.
+Deactivation removes the active database recipient and clears both managed GHL line values. The fixed GHL call workflow must treat an empty user value as “skip the human leg” and route directly to its fixed Grok fallback, so a former representative can never receive later calls.
 
 The four Grok Voice drafts were created on September 21, 2026. Until line setup is completed, they remain unpublished and must not be reported as ready:
 
@@ -75,11 +75,11 @@ The four Grok Voice drafts were created on September 21, 2026. Until line setup 
 - Epifanio Sierra: `agent_b32kYrh6mSVlrSK3`
 - Daniel Broyles: `agent_QzE6yzA9ZHC6P0wN`
 
-**Save draft** never changes live routing. **Save & apply changes** rejects a line assigned to someone else, verifies Slack and the prepared Grok line, confirms the selected line's GHL mobile, and clears a previous line when the representative moves. It activates the database recipient only after every enabled check passes. A failed database apply restores every affected GHL line and reports an explicit operator action if any restore is not confirmed. Provider status remains failed or action-required when any check fails, and **Sync providers** retries those checks against the applied line without changing the saved person.
+**Save draft** never changes live routing. **Apply routing** shows the current occupant and requires an explicit replacement of that exact person, verifies Slack and the prepared Grok line, confirms the GHL user, phone, and both managed line values, and clears a previous line when the representative moves. It activates the database recipient only after every check passes. A failed database apply restores every affected GHL route and reports an explicit operator action if any restore is not confirmed. Provider status remains failed or action-required when any check fails, and **Sync providers** retries those checks against the applied line without changing the saved person.
 
 Preparing or rotating a line token is allowed only when the line is free or assigned to the selected representative. Rotation updates the active compatibility assignment in the same transaction, invalidates the old bearer, and returns Grok setup to pending until the new token is installed and a new QA call is recorded.
 
-Slack, GHL SMS, and email delivery follow the current applied voice configuration independently. Disabled channels are not called and are not required for route resolution. Slack is `synced` only after `users.info` confirms the exact active member. GHL is `synced` only after its API confirms the managed mobile value. Grok is `synced` only after the reusable line setup is marked verified.
+Slack DM, GHL SMS, and Workspace email are mandatory for every active salesperson. Database route resolution fails closed unless all three are enabled and configured. Slack is `synced` only after `users.info` confirms the exact active member. GHL is `synced` only after its API confirms the exact user/email match, user phone, managed mobile value, and managed GHL-user-ID value. Grok is `synced` only after the reusable line setup is marked verified.
 
 Provisioning the four Grok phone numbers, creating and verifying the fixed GHL workflows/custom values, creating the GHL private integration, and adding the sales-agent Workspace alias are one-time QA setup actions. They must pass the release review and end-to-end line tests before the provider flags are enabled.
 

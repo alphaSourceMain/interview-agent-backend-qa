@@ -44,7 +44,9 @@ test('validates exact caller-approved fields', () => {
   assert.deepEqual(validateSalesVoiceMessage(message), message);
   assert.equal(validateSalesVoiceMessage({ ...message, confirmed: false }), null);
   assert.equal(validateSalesVoiceMessage({ ...message, callback_phone: '720-555-1212' }), null);
+  assert.equal(validateSalesVoiceMessage({ ...message, contact_email: 'not-an-email' }), null);
   assert.equal(validateSalesVoiceMessage({ ...message, password: 'nope' }), null);
+  assert.equal(validateSalesVoiceMessage({ ...message, to: 'other@example.com' }), null);
   assert.equal(validateSalesVoiceMessage({ ...message, message: 'Use code 123456' }), null);
 });
 
@@ -54,6 +56,10 @@ test('requires complete fixed routes and matches bearer token without a caller-s
   assert.equal(routeForAuthorization(`Bearer ${TOKEN}`, env).routeKey, 'michael-afesi');
   assert.equal(routeForAuthorization(`Bearer ${'z'.repeat(48)}`, env), null);
   assert.equal(parseRouteConfig({ ...env, SALES_VOICE_HANDOFF_ROUTES_JSON: JSON.stringify([{ ...route, ghl_notification_webhook: 'https://example.com/hook' }]) }).length, 0);
+  assert.equal(parseRouteConfig({ ...env, SALES_VOICE_HANDOFF_ROUTES_JSON: JSON.stringify([{ ...route, rep_email: undefined }]) }).length, 0);
+  assert.equal(parseRouteConfig({ ...env, SALES_VOICE_HANDOFF_ROUTES_JSON: JSON.stringify([{ ...route }, { ...route, token_sha256: 'f'.repeat(64) }]) }).length, 0);
+  assert.equal(parseRouteConfig({ ...env, SALES_VOICE_HANDOFF_ROUTES_JSON: JSON.stringify([{ ...route }, { ...route, route_key: 'second-route', token_sha256: 'f'.repeat(64) }]) }).length, 0);
+  assert.equal(salesVoiceHandoffEnabled({ ...env, SALES_VOICE_HANDOFF_ENABLED: 'false' }), false);
 });
 
 test('fans an approved message out to fixed email, Slack DM, and GHL workflow', async () => {
@@ -77,7 +83,55 @@ test('fans an approved message out to fixed email, Slack DM, and GHL workflow', 
   assert.equal(calls[1].body.channel, 'U123456789');
   assert.equal(calls[2].body.representative, 'Michael Afesi');
   assert.equal(calls[2].body.assigned_number, '+17207904187');
+  assert.equal(calls[0].authorization, `Bearer ${env.SENDGRID_API_KEY}`);
+  assert.equal(calls[0].body.content[0].type, 'text/plain');
+  assert.equal(calls[1].body.mrkdwn, false);
+  assert.equal(calls[1].body.blocks.every((block) => !block.text || block.text.type === 'plain_text'), true);
   assert.doesNotMatch(JSON.stringify(calls), new RegExp(TOKEN));
+});
+
+test('duplicate approved message is reserved once and never calls providers again', async () => {
+  const counts = new Map();
+  let providerCalls = 0;
+  const service = createSalesVoiceHandoff({
+    env,
+    rateLimit: async ({ routeName, subjectKey, maxCount }) => {
+      const key = `${routeName}:${subjectKey}`;
+      const count = (counts.get(key) || 0) + 1;
+      counts.set(key, count);
+      return { allowed: count <= maxCount };
+    },
+    fetch: async (url) => {
+      providerCalls += 1;
+      if (url.includes('sendgrid')) return { ok: true, status: 202, json: async () => ({}) };
+      if (url.includes('slack')) return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+  });
+  const matchedRoute = parseRouteConfig(env)[0];
+  assert.equal((await service.send(message, matchedRoute)).status, 'accepted');
+  assert.equal((await service.send(message, matchedRoute)).status, 'already_attempted');
+  assert.equal(providerCalls, 3);
+});
+
+test('Slack caller fields are plain text and provider redirects are rejected', async () => {
+  const calls = [];
+  const markedUp = { ...message, caller_name: 'Jordan *Lee*', company_name: '<@U123456789> & Co', message: '_Please_ <!channel> call me.' };
+  const service = createSalesVoiceHandoff({
+    env,
+    rateLimit: async () => ({ allowed: true }),
+    fetch: async (url, options) => {
+      calls.push({ url, options, body: JSON.parse(options.body) });
+      if (url.includes('sendgrid')) return { ok: true, status: 202, json: async () => ({}) };
+      if (url.includes('slack')) return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+  });
+  assert.equal((await service.send(validateSalesVoiceMessage(markedUp), parseRouteConfig(env)[0])).status, 'accepted');
+  assert.equal(calls.every((call) => call.options.redirect === 'error'), true);
+  const slack = calls.find((call) => call.url.includes('slack')).body;
+  assert.equal(slack.mrkdwn, false);
+  assert.equal(slack.blocks.flatMap((block) => [block.text, ...(block.fields || [])]).filter(Boolean).every((entry) => entry.type === 'plain_text'), true);
 });
 
 test('reports partial success without retrying accepted channels', async () => {
@@ -94,6 +148,15 @@ test('reports partial success without retrying accepted channels', async () => {
   const result = await service.send(message, parseRouteConfig(env)[0]);
   assert.equal(result.status, 'partial');
   assert.equal(count, 3);
+});
+
+test('reports failure when every fixed delivery channel rejects the message', async () => {
+  const service = createSalesVoiceHandoff({
+    env,
+    rateLimit: async () => ({ allowed: true }),
+    fetch: async () => ({ ok: false, status: 500, json: async () => ({ ok: false }) })
+  });
+  assert.equal((await service.send(message, parseRouteConfig(env)[0])).status, 'failed');
 });
 
 test('agent prompt keeps implementation details out of speech and requires consent', () => {
@@ -128,8 +191,26 @@ test('phone endpoint identifies a fixed route from its token and rejects browser
     assert.equal((await send(message)).status, 401);
     assert.equal((await send(message, { Authorization: authorization, Origin: 'https://evil.example' })).status, 401);
     assert.equal((await send({ ...message, confirmed: false }, { Authorization: authorization })).status, 400);
+    const malformed = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: authorization }, body: '{' });
+    assert.equal(malformed.status, 400);
+    assert.equal((await fetch(url, { method: 'GET', headers: { Authorization: authorization } })).status, 405);
+    assert.equal((await fetch(`${url}/other`, { method: 'GET', headers: { Authorization: authorization } })).status, 404);
     assert.equal((await send(message, { Authorization: authorization })).status, 200);
     assert.deepEqual(sent, [{ input: message, routeKey: 'michael-afesi' }]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('disabled route returns unavailable before delivery', async () => {
+  const app = express();
+  const disabledService = { enabled: () => false, send: async () => assert.fail('must not send') };
+  app.use('/voice-handoff', createSalesVoiceHandoffRouter({ env: { ...env, SALES_VOICE_HANDOFF_ENABLED: 'false' }, service: disabledService }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/voice-handoff`, { method: 'POST' });
+    assert.equal(response.status, 503);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

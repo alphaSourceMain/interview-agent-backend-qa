@@ -27,6 +27,8 @@ An approved message fans out to:
 
 The GHL workflow URL is restricted to HTTPS on a `leadconnectorhq.com` host. The service does not accept arbitrary callback URLs, recipient addresses, Slack IDs, or phone numbers from the agent. A 24-hour reservation suppresses duplicate sends of the same route and approved message. Only hashes and counters are written by this endpoint; message content is not logged or stored by alphaScreen.
 
+Provider redirects are rejected. Slack renders every caller-provided field as plain text. Route keys, token hashes, emails, Slack member IDs, assigned GHL numbers, and workflow URLs must each be unique across the route table or the whole feature fails closed.
+
 ## Required configuration
 
 - `SALES_VOICE_HANDOFF_ENABLED=true`

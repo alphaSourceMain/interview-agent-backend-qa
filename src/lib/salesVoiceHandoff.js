@@ -22,11 +22,11 @@ const SALES_VOICE_TOOL = Object.freeze({
 });
 
 function cleanText(value, max = 500) {
-  return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
-}
-
-function escapeSlackText(value, max = 500) {
-  return cleanText(value, max).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(value || '')
+    .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
 }
 
 function hash(value) {
@@ -89,7 +89,14 @@ function parseRouteConfig(env = process.env) {
   }
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 20) return [];
   const routes = [];
-  const tokenHashes = new Set();
+  const uniqueValues = {
+    tokenHash: new Set(),
+    routeKey: new Set(),
+    repEmail: new Set(),
+    slackUserId: new Set(),
+    ghlNumber: new Set(),
+    ghlNotificationWebhook: new Set()
+  };
   for (const entry of raw) {
     const tokenHash = cleanText(entry?.token_sha256, 64).toLowerCase();
     const routeKey = cleanText(entry?.route_key, 80).toLowerCase();
@@ -99,9 +106,11 @@ function parseRouteConfig(env = process.env) {
     const ghlNumber = cleanText(entry?.ghl_number, 16);
     const ghlNotificationWebhook = safeGhlWebhook(entry?.ghl_notification_webhook);
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(routeKey) || !/^[a-f0-9]{64}$/.test(tokenHash) ||
-        tokenHashes.has(tokenHash) || !repName || !validEmail(repEmail) || !validSlackUserId(slackUserId) ||
+        !repName || !validEmail(repEmail) || !validSlackUserId(slackUserId) ||
         !validE164(ghlNumber) || !ghlNotificationWebhook) return [];
-    tokenHashes.add(tokenHash);
+    const candidate = { tokenHash, routeKey, repEmail, slackUserId, ghlNumber, ghlNotificationWebhook };
+    if (Object.entries(candidate).some(([key, value]) => uniqueValues[key].has(value))) return [];
+    Object.entries(candidate).forEach(([key, value]) => uniqueValues[key].add(value));
     routes.push(Object.freeze({ routeKey, tokenHash, repName, repEmail, slackUserId, ghlNumber, ghlNotificationWebhook }));
   }
   return routes;
@@ -119,7 +128,11 @@ function routeForAuthorization(authorization, env = process.env) {
   const match = /^Bearer ([^\s]{32,256})$/.exec(String(authorization || ''));
   if (!match) return null;
   const digest = hash(match[1]);
-  return parseRouteConfig(env).find((route) => crypto.timingSafeEqual(Buffer.from(route.tokenHash, 'hex'), Buffer.from(digest, 'hex'))) || null;
+  let matched = null;
+  for (const route of parseRouteConfig(env)) {
+    if (crypto.timingSafeEqual(Buffer.from(route.tokenHash, 'hex'), Buffer.from(digest, 'hex'))) matched = route;
+  }
+  return matched;
 }
 
 function humanMessage(input, route) {
@@ -133,9 +146,21 @@ function emailBody(input, route) {
 function slackMessage(input, route) {
   return {
     text: `New caller message for ${route.repName}: ${input.company_name}`,
+    mrkdwn: false,
+    unfurl_links: false,
+    unfurl_media: false,
     blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text: `📞 *New caller message*\n*${escapeSlackText(input.caller_name, 120)}* from *${escapeSlackText(input.company_name, 160)}* called your alphaScreen line.` } },
-      { type: 'section', text: { type: 'mrkdwn', text: `*Message*\n${escapeSlackText(input.message, 1000)}\n\n*Callback* ${input.callback_phone}\n*Email* ${escapeSlackText(input.contact_email, 254)}` } }
+      { type: 'header', text: { type: 'plain_text', text: '📞 New caller message', emoji: true } },
+      {
+        type: 'section',
+        fields: [
+          { type: 'plain_text', text: `Caller\n${input.caller_name}`, emoji: true },
+          { type: 'plain_text', text: `Company\n${input.company_name}`, emoji: true },
+          { type: 'plain_text', text: `Callback\n${input.callback_phone}`, emoji: true },
+          { type: 'plain_text', text: `Email\n${input.contact_email}`, emoji: true }
+        ]
+      },
+      { type: 'section', text: { type: 'plain_text', text: `Message\n${input.message}`, emoji: true } }
     ]
   };
 }
@@ -143,6 +168,7 @@ function slackMessage(input, route) {
 async function postJson(url, body, headers, fetchImpl, timeoutMs = 8000) {
   const response = await fetchImpl(url, {
     method: 'POST',
+    redirect: 'error',
     signal: AbortSignal.timeout(timeoutMs),
     headers: { 'Content-Type': 'application/json; charset=utf-8', ...headers },
     body: JSON.stringify(body)
@@ -168,7 +194,7 @@ function createSalesVoiceHandoff(options = {}) {
 
   async function send(input, route) {
     if (!salesVoiceHandoffEnabled(env) || !route) return { status: 'unavailable' };
-    const reference = hash(`${route.routeKey}:${JSON.stringify(input)}`).slice(0, 12);
+    const reference = hash(`${route.routeKey}:${JSON.stringify(input)}`).slice(0, 32);
     try {
       if (!await reserve('sales_voice_handoff_global', 'all', 3600000, 100) ||
           !await reserve('sales_voice_handoff_route', route.routeKey, 3600000, 30)) return { status: 'rate_limited', reference };
@@ -238,9 +264,15 @@ function createSalesVoiceHandoffRouter(options = {}) {
   router.post('/', express.json({ limit: '4kb', strict: true }), async (req, res) => {
     const input = validateSalesVoiceMessage(req.body);
     if (!input) return res.status(400).json({ status: 'invalid_request' });
-    const result = await service.send(input, req.salesVoiceRoute);
-    return res.status(['accepted', 'partial', 'already_attempted'].includes(result.status) ? 200 : 503).json(result);
+    try {
+      const result = await service.send(input, req.salesVoiceRoute);
+      return res.status(['accepted', 'partial', 'already_attempted'].includes(result.status) ? 200 : 503).json(result);
+    } catch {
+      return res.status(503).json({ status: 'unavailable' });
+    }
   });
+  router.all('/', (_req, res) => res.status(405).json({ status: 'method_not_allowed' }));
+  router.use((_req, res) => res.status(404).json({ status: 'not_found' }));
   router.use((_error, _req, res, _next) => res.status(400).json({ status: 'invalid_request' }));
   return router;
 }

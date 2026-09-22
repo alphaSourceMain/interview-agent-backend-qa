@@ -30,8 +30,7 @@ create table if not exists public.sales_voice_route_events (
 );
 
 create index if not exists sales_voice_route_events_lookup_idx
-  on public.sales_voice_route_events (caller_phone_e164, created_at desc)
-  where expires_at > created_at;
+  on public.sales_voice_route_events (caller_phone_e164, created_at desc);
 
 create table if not exists public.sales_voice_call_contexts (
   id uuid primary key default gen_random_uuid(),
@@ -54,7 +53,7 @@ alter table public.sales_voice_route_events enable row level security;
 alter table public.sales_voice_call_contexts enable row level security;
 revoke all on table public.sales_voice_route_events from public, anon, authenticated;
 revoke all on table public.sales_voice_call_contexts from public, anon, authenticated;
-grant select, insert, delete on table public.sales_voice_route_events to service_role;
+grant select, insert, update, delete on table public.sales_voice_route_events to service_role;
 grant select, insert, update, delete on table public.sales_voice_call_contexts to service_role;
 
 create or replace function public.record_sales_voice_route(
@@ -81,7 +80,25 @@ begin
     raise exception 'sales_voice_line_unassigned';
   end if;
   delete from public.sales_voice_call_contexts where expires_at <= now();
-  delete from public.sales_voice_route_events where expires_at <= now();
+  delete from public.sales_voice_route_events as route
+  where route.expires_at <= now()
+    and not exists (
+      select 1 from public.sales_voice_call_contexts as context
+      where context.route_event_id = route.id and context.expires_at > now()
+    );
+  select route.id into v_event_id
+  from public.sales_voice_route_events as route
+  where route.phone_number_id = p_phone_number_id
+    and route.caller_phone_e164 = p_caller_phone_e164
+    and route.expires_at > now()
+    and not exists (
+      select 1 from public.sales_voice_call_contexts as context
+      where context.route_event_id = route.id
+    )
+  order by route.created_at desc
+  limit 1
+  for update;
+  if found then return v_event_id; end if;
   insert into public.sales_voice_route_events (phone_number_id, caller_phone_e164)
   values (p_phone_number_id, p_caller_phone_e164)
   returning id into v_event_id;

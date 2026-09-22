@@ -467,6 +467,9 @@ function createSalesVoiceHandoffRouter(options = {}) {
         p_caller_phone_e164: cleanText(req.body.caller_phone, 16),
         p_token_sha256: hash(routingReference),
       });
+      if (contextResult.error && /sales_voice_route_ambiguous/i.test(String(contextResult.error.message || contextResult.error.details || ''))) {
+        return res.status(409).json({ status: 'route_ambiguous' });
+      }
       const assignmentId = Array.isArray(contextResult.data) ? contextResult.data[0]?.assignment_id : contextResult.data?.assignment_id;
       if (contextResult.error || !assignmentId) return res.status(404).json({ status: 'route_not_found' });
       const route = await routeForAssignmentDb(assignmentId, db, env, line.tokenHash);

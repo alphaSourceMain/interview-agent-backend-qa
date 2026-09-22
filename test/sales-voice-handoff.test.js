@@ -240,6 +240,7 @@ test('shared Grok entrypoint records a line, creates one context, and sends only
   };
   let contextHash = '';
   let claimed = false;
+  let contextFailure = null;
   const db = {
     from(table) {
       const filters = [];
@@ -247,6 +248,7 @@ test('shared Grok entrypoint records a line, creates one context, and sends only
     },
     async rpc(name, args) {
       if (name === 'record_sales_voice_route') return { data: 'event-1', error: null };
+      if (name === 'create_sales_voice_call_context' && contextFailure) return { data: null, error: contextFailure };
       if (name === 'create_sales_voice_call_context') { contextHash = args.p_token_sha256; claimed = false; return { data: [{ assignment_id: 'assignment-shared' }], error: null }; }
       if (name === 'claim_sales_voice_call_context' && !claimed && args.p_token_sha256 === contextHash) { claimed = true; return { data: [{ assignment_id: 'assignment-shared', caller_phone_e164: '+17205551212' }], error: null }; }
       return { data: [], error: null };
@@ -286,6 +288,10 @@ test('shared Grok entrypoint records a line, creates one context, and sends only
     const mismatchedPhone = { ...message, callback_phone: '+17205559999', routing_reference: secondContext.routing_reference };
     assert.equal((await fetch(base, { method: 'POST', headers, body: JSON.stringify(mismatchedPhone) })).status, 409);
     assert.equal(sends.length, 1);
+    contextFailure = { message: 'sales_voice_route_ambiguous' };
+    const ambiguous = await fetch(`${base}/context`, { method: 'POST', headers, body: JSON.stringify({ caller_phone: '+17205551212' }) });
+    assert.equal(ambiguous.status, 409);
+    assert.deepEqual(await ambiguous.json(), { status: 'route_ambiguous' });
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

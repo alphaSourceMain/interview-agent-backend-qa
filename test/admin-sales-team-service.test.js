@@ -130,7 +130,7 @@ function makeDb({ applyError = null, incumbent = null, concurrentWinner = null }
 
 function providerFake() {
   const state = {
-    user: { id: 'ghl-user-1', email: member.workspace_email, phone: '+13035550000', active: true, roles: { locationIds: ['location-1'] } },
+    user: { id: 'ghl-user-1', email: member.workspace_email, phone: '+13035550000', active: true, roles: { type: 'account', role: 'user', locationIds: ['location-1'] } },
     values: {
       'mobile-value-1': { id: 'mobile-value-1', name: phone.ghl_mobile_custom_value_name, value: '+13035550001' },
       'user-value-1': { id: 'user-value-1', name: phone.ghl_user_custom_value_name, value: 'old-user' },
@@ -141,7 +141,7 @@ function providerFake() {
     if (url.includes('slack.com')) return { ok: true, status: 200, json: async () => ({ ok: true, user: { id: member.slack_user_id, deleted: false } }) };
     if (/\/users\//.test(url)) {
       const userId = url.split('/').pop();
-      if (userId !== state.user.id) state.user = { id: userId, email: 'winner@alphasourceai.com', phone: '+13035550002', active: true, roles: { locationIds: ['location-1'] } };
+      if (userId !== state.user.id) state.user = { id: userId, email: 'winner@alphasourceai.com', phone: '+13035550002', active: true, roles: { type: 'account', role: 'user', locationIds: ['location-1'] } };
       if (options.method === 'GET') return { ok: true, status: 200, json: async () => ({ user: { ...state.user } }) };
       state.user.phone = JSON.parse(options.body).phone;
       state.writes.push({ type: 'user', userId, phone: state.user.phone });

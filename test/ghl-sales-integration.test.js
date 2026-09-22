@@ -96,10 +96,11 @@ test('ready-stage import authoritatively fetches GHL records and maps exactly on
       calls.push(url);
       if (url.endsWith('/opportunities/opp_qa')) return response({ opportunity: { id: 'opp_qa', locationId: 'location_qa', pipelineId: 'pipeline_qa', pipelineStageId: 'stage_agreement_checkout', status: 'open', contactId: 'contact_qa', assignedTo: 'owner_qa', name: 'QA Opportunity' } });
       if (url.endsWith('/contacts/contact_qa')) return response({ contact: { id: 'contact_qa', companyName: 'QA Dental', firstName: 'Quinn', lastName: 'Tester', email: 'QUINN@example.com', phone: '+17205550100', title: 'Owner' } });
+      if (url.endsWith('/users/owner_qa')) return response({ user: { id: 'owner_qa', roles: { type: 'account', role: 'user', locationIds: ['location_qa'] } } });
       throw new Error(`unexpected URL ${url}`);
     },
   });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(result.binding.sales_rep_user_id, '11111111-1111-4111-8111-111111111111');
   assert.equal(result.binding.contact_email, 'quinn@example.com');
   assert.equal(result.binding.status, 'ready');
@@ -118,15 +119,43 @@ test('replayed import cannot rewrite immutable salesperson attribution after an 
   });
   const result = await importReadyGhlOpportunity('opp_qa', {
     db, env,
-    fetchImpl: async (url) => url.endsWith('/opportunities/opp_qa')
-      ? response({ opportunity: { id: 'opp_qa', locationId: 'location_qa', pipelineId: 'pipeline_qa', pipelineStageId: 'stage_agreement_checkout', status: 'open', contactId: 'contact_qa', assignedTo: 'owner_new', name: 'Renamed Opportunity' } })
-      : response({ contact: { id: 'contact_qa', companyName: 'Renamed Dental' } }),
+    fetchImpl: async (url) => {
+      if (url.endsWith('/opportunities/opp_qa')) return response({ opportunity: { id: 'opp_qa', locationId: 'location_qa', pipelineId: 'pipeline_qa', pipelineStageId: 'stage_agreement_checkout', status: 'open', contactId: 'contact_qa', assignedTo: 'owner_new', name: 'Renamed Opportunity' } });
+      if (url.endsWith('/contacts/contact_qa')) return response({ contact: { id: 'contact_qa', companyName: 'Renamed Dental' } });
+      if (url.endsWith('/users/owner_new')) return response({ user: { id: 'owner_new', roles: { type: 'account', role: 'user', locationIds: ['location_qa'] } } });
+      throw new Error(`unexpected URL ${url}`);
+    },
   });
   assert.equal(result.binding.provider_owner_user_id, 'owner_qa');
   assert.equal(result.binding.sales_rep_user_id, '11111111-1111-4111-8111-111111111111');
   assert.equal(result.binding.purchase_intent_id, '55555555-5555-4555-8555-555555555555');
   assert.equal(result.binding.opportunity_name, 'Renamed Opportunity');
 });
+
+for (const [label, roles] of [
+  ['Agency User', { type: 'agency', role: 'user', locationIds: ['location_qa'] }],
+  ['Account Admin', { type: 'account', role: 'admin', locationIds: ['location_qa'] }],
+  ['another location', { type: 'account', role: 'user', locationIds: ['location_other'] }],
+  ['multiple locations', { type: 'account', role: 'user', locationIds: ['location_qa', 'location_other'] }],
+  ['missing roles', undefined],
+]) {
+  test(`ready-stage import holds ${label} for manual review`, async () => {
+    const db = inboundDb();
+    await assert.rejects(importReadyGhlOpportunity('opp_qa', {
+      db, env,
+      fetchImpl: async (url) => {
+        if (url.endsWith('/opportunities/opp_qa')) return response({ opportunity: { id: 'opp_qa', locationId: 'location_qa', pipelineId: 'pipeline_qa', pipelineStageId: 'stage_agreement_checkout', status: 'open', contactId: 'contact_qa', assignedTo: 'owner_qa' } });
+        if (url.endsWith('/contacts/contact_qa')) return response({ contact: { id: 'contact_qa' } });
+        if (url.endsWith('/users/owner_qa')) return response({ user: { id: 'owner_qa', roles } });
+        throw new Error(`unexpected URL ${url}`);
+      },
+    }), (error) => error.code === 'ghl_owner_access_scope_invalid' && error.manualReview === true);
+    assert.equal(db.tables.ghl_sales_deal_bindings.length, 1);
+    assert.equal(db.tables.ghl_sales_deal_bindings[0].status, 'exception');
+    assert.equal(db.tables.ghl_sales_deal_bindings[0].sales_rep_user_id, null);
+    assert.equal(db.tables.ghl_sales_deal_bindings[0].manual_review_required, true);
+  });
+}
 
 test('outbound Won update is idempotent and writes a stable alphaScreen activation note', async () => {
   const calls = [];

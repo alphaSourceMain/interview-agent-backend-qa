@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { supabaseAdmin } = require('./supabaseClient');
+const { isScopedGhlSalesUser } = require('./ghlSalesUserScope');
 
 const GHL_API_BASE = 'https://services.leadconnectorhq.com';
 const GHL_API_VERSION = 'v3';
@@ -156,6 +157,22 @@ async function fetchGhlContact(contactId, options = {}) {
     });
   }
   return contact;
+}
+
+async function assertGhlSalesOwnerScope(userId, options = {}) {
+  const id = requireId(userId, 'owner_user_id');
+  const body = await ghlRequest(`/users/${encodeURIComponent(id)}`, options);
+  const user = body?.user || body;
+  if (clean(user?.id, 160) !== id || user?.deleted === true || user?.active === false) {
+    throw integrationError('ghl_owner_verification_failed', 'GHL could not verify an active opportunity owner.', {
+      status: 409, retryable: false, manualReview: true,
+    });
+  }
+  if (!isScopedGhlSalesUser(user, options.config.locationId)) {
+    throw integrationError('ghl_owner_access_scope_invalid', 'The GHL owner must be an Account User assigned only to the configured location.', {
+      status: 409, retryable: false, manualReview: true,
+    });
+  }
 }
 
 function assertOpportunityBoundary(opportunity, config, options = {}) {
@@ -359,6 +376,7 @@ async function importReadyGhlOpportunity(opportunityId, options = {}) {
   let mapping = null;
   let mappingError = null;
   try {
+    await assertGhlSalesOwnerScope(ownerId, requestOptions);
     mapping = await resolveActiveSalesRep(db, ownerId);
   } catch (error) {
     mappingError = error;

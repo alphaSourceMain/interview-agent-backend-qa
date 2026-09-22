@@ -40,10 +40,11 @@ function ghlFake({
   failRestore = false,
   mismatchFirstUserWrite = false,
   email = record.member.workspace_email,
+  roles = { type: 'account', role: 'user', locationIds: ['location-1'] },
   mobileValueName = record.phone.ghl_mobile_custom_value_name,
 } = {}) {
   const state = {
-    user: { id: 'ghl-user-1', email, phone: '+13035550000', active: true, roles: { locationIds: ['location-1'] } },
+    user: { id: 'ghl-user-1', email, phone: '+13035550000', active: true, roles },
     values: {
       'mobile-value-1': { id: 'mobile-value-1', name: mobileValueName, value: '+13035550001' },
       'user-value-1': { id: 'user-value-1', name: 'alphaScreen Line 1 GHL User ID', value: 'old-user' },
@@ -102,6 +103,21 @@ test('GHL apply fails before writes when the GHL user email does not match Works
   assert.equal(result.errorCode, 'ghl_user_verification_failed');
   assert.deepEqual(state.writes, []);
 });
+
+for (const [label, roles] of [
+  ['Agency User', { type: 'agency', role: 'user', locationIds: ['location-1'] }],
+  ['Account Admin', { type: 'account', role: 'admin', locationIds: ['location-1'] }],
+  ['multiple locations', { type: 'account', role: 'user', locationIds: ['location-1', 'location-2'] }],
+  ['missing role scope', null],
+]) {
+  test(`GHL routing rejects ${label} before any provider write`, async () => {
+    const { state, fetchImpl } = ghlFake({ roles });
+    const result = await syncGhl(record, env, fetchImpl);
+    assert.equal(result.status, 'failed');
+    assert.equal(result.errorCode, 'ghl_user_access_scope_invalid');
+    assert.deepEqual(state.writes, []);
+  });
+}
 
 test('GHL apply restores user phone and managed values when a later write fails', async () => {
   const { state, fetchImpl } = ghlFake({ failUserValueWrite: true });

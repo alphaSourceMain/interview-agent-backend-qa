@@ -1,5 +1,7 @@
 'use strict';
 
+const { isScopedGhlSalesUser } = require('./ghlSalesUserScope');
+
 function clean(value, max = 500) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max);
 }
@@ -101,12 +103,11 @@ async function readGhlUser(config, userId, expectedEmail, fetchImpl) {
   }, fetchImpl);
   const user = ghlUserFrom(result.body);
   const email = clean(user?.email, 254).toLowerCase();
-  const locationIds = Array.isArray(user?.roles?.locationIds) ? user.roles.locationIds : (Array.isArray(user?.locationIds) ? user.locationIds : null);
   if (!result.ok || user?.id !== userId || user?.deleted === true || user?.active === false || email !== expectedEmail) {
     throw Object.assign(new Error('GHL user verification failed'), { providerCode: 'ghl_user_verification_failed' });
   }
-  if (locationIds && !locationIds.includes(config.locationId)) {
-    throw Object.assign(new Error('GHL user does not have access to this location'), { providerCode: 'ghl_user_location_mismatch' });
+  if (!isScopedGhlSalesUser(user, config.locationId)) {
+    throw Object.assign(new Error('GHL user must be a location-only Account User'), { providerCode: 'ghl_user_access_scope_invalid' });
   }
   return { id: userId, phone: normalizeUsPhone(user?.phone), email };
 }

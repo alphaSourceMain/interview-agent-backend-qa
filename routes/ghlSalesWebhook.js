@@ -82,11 +82,15 @@ async function reserveReceipt(db, values) {
       last_received_at: new Date().toISOString(),
       last_error_code: null,
       last_error_detail: null,
+      completed_at: null,
     })
     .eq('id', existing.id)
+    .eq('status', existing.status)
+    .eq('last_received_at', existing.last_received_at)
     .select('*')
-    .single();
+    .maybeSingle();
   if (retryError) throw Object.assign(new Error('GHL receipt retry failed'), { code: 'ghl_receipt_retry_failed' });
+  if (!retried) return reserveReceipt(db, values);
   return { receipt: retried, replay: false };
 }
 
@@ -152,12 +156,13 @@ function createGhlSalesWebhookRouter(options = {}) {
       const reservation = await reserveReceipt(db, { ...identifiers, bodyDigest });
       receipt = reservation.receipt;
       if (reservation.replay) {
-        return res.status(reservation.processing ? 202 : 200).json({
-          ok: true,
-          replayed: true,
-          status: reservation.processing ? 'processing' : 'completed',
-          binding_id: receipt.binding_id || null,
-        });
+        if (reservation.processing) {
+          return res.status(503).json({
+            error: 'ghl_receipt_processing',
+            replayed: true,
+          });
+        }
+        return res.status(200).json({ ok: true, replayed: true, status: 'completed', binding_id: receipt.binding_id || null });
       }
 
       const imported = await importer(identifiers.opportunityId, { db, env, fetchImpl: options.fetchImpl });

@@ -15,6 +15,42 @@ const {
   syncSalesTeamMember,
 } = require('../src/lib/adminSalesTeamService');
 
+async function resetFailedGhlDelivery(db, delivery) {
+  const now = new Date().toISOString();
+  const { data: reset, error: resetError } = await db.from('sales_integration_deliveries').update({
+    status: 'retry',
+    attempt_count: 0,
+    next_attempt_at: now,
+    locked_at: null,
+    lock_token: null,
+    last_error: null,
+    manual_review_required: false,
+    updated_at: now,
+  })
+    .eq('id', delivery.id)
+    .eq('integration', 'ghl')
+    .eq('status', 'failed')
+    .select('id')
+    .maybeSingle();
+  if (resetError) throw Object.assign(new Error('GHL delivery retry failed'), { cause: resetError });
+  if (!reset) {
+    throw Object.assign(new Error('This GHL delivery is no longer failed.'), {
+      status: 409,
+      code: 'ghl_delivery_retry_not_available',
+      detail: 'This GHL delivery is already pending or processing.',
+    });
+  }
+  const { error: bindingError } = await db.from('ghl_sales_deal_bindings').update({
+    status: 'won_pending',
+    last_error_code: null,
+    last_error_detail: null,
+    manual_review_required: false,
+    updated_at: now,
+  }).eq('purchase_intent_id', delivery.purchase_intent_id);
+  if (bindingError) throw Object.assign(new Error('GHL binding retry failed'), { cause: bindingError });
+  return reset;
+}
+
 function createAdminSalesTeamRouter({ db } = {}) {
   const router = express.Router();
   router.use((_req, res, next) => {
@@ -159,25 +195,7 @@ function createAdminSalesTeamRouter({ db } = {}) {
       if (delivery.status !== 'failed') {
         throw Object.assign(new Error('This GHL delivery is already pending or processing.'), { status: 409, code: 'ghl_delivery_retry_not_available', detail: 'This GHL delivery is already pending or processing.' });
       }
-      const now = new Date().toISOString();
-      const { error: resetError } = await db.from('sales_integration_deliveries').update({
-        status: 'retry',
-        next_attempt_at: now,
-        locked_at: null,
-        lock_token: null,
-        last_error: null,
-        manual_review_required: false,
-        updated_at: now,
-      }).eq('id', delivery.id).eq('integration', 'ghl');
-      if (resetError) throw Object.assign(new Error('GHL delivery retry failed'), { cause: resetError });
-      const { error: bindingError } = await db.from('ghl_sales_deal_bindings').update({
-        status: 'won_pending',
-        last_error_code: null,
-        last_error_detail: null,
-        manual_review_required: false,
-        updated_at: now,
-      }).eq('purchase_intent_id', delivery.purchase_intent_id);
-      if (bindingError) throw Object.assign(new Error('GHL binding retry failed'), { cause: bindingError });
+      await resetFailedGhlDelivery(db, delivery);
       await recordGhlSyncEvent(db, {
         purchaseIntentId: delivery.purchase_intent_id,
         direction: 'admin',
@@ -195,4 +213,4 @@ function createAdminSalesTeamRouter({ db } = {}) {
   return router;
 }
 
-module.exports = { createAdminSalesTeamRouter };
+module.exports = { createAdminSalesTeamRouter, resetFailedGhlDelivery };

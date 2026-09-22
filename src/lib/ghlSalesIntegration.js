@@ -274,9 +274,9 @@ async function upsertGhlBinding(db, fields) {
         opportunity_source: fields.opportunity_source,
         provider_updated_at: fields.provider_updated_at,
         updated_at: fields.updated_at,
-        status: existing.status === 'won' ? 'won' : 'linked',
       })
       .eq('id', existing.id)
+      .eq('purchase_intent_id', existing.purchase_intent_id)
       .select('*')
       .single();
     if (error) throw integrationError('ghl_binding_update_failed', 'The linked GHL sales import could not be refreshed.');
@@ -286,10 +286,25 @@ async function upsertGhlBinding(db, fields) {
     const { data, error } = await db.from('ghl_sales_deal_bindings')
       .update(fields)
       .eq('id', existing.id)
+      .is('purchase_intent_id', null)
+      .in('status', ['ready', 'exception'])
       .select('*')
-      .single();
+      .maybeSingle();
     if (error) throw integrationError('ghl_binding_update_failed', 'The GHL sales import could not be refreshed.');
-    return { binding: data, created: false };
+    if (data) return { binding: data, created: false };
+
+    const { data: current, error: rereadError } = await db
+      .from('ghl_sales_deal_bindings')
+      .select('id,purchase_intent_id,status,sales_rep_user_id')
+      .eq('id', existing.id)
+      .maybeSingle();
+    if (rereadError || !current) throw integrationError('ghl_binding_update_failed', 'The GHL sales import could not be refreshed.');
+    if (current.purchase_intent_id) return upsertGhlBinding(db, fields);
+    throw integrationError('ghl_binding_not_refreshable', 'The GHL sales import is no longer refreshable.', {
+      status: 409,
+      retryable: false,
+      manualReview: true,
+    });
   }
   const { data, error } = await db.from('ghl_sales_deal_bindings')
     .insert(fields)
@@ -494,6 +509,7 @@ module.exports = {
   requireId,
   resolveActiveSalesRep,
   timingSafeSecret,
+  upsertGhlBinding,
   verifyGhlEd25519Signature,
   webhookBodyDigest,
 };

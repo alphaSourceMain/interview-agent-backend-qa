@@ -307,15 +307,9 @@ async function reconcileSalesWonDeliveries(options = {}) {
     dmRows = Array.isArray(data) ? data : [];
   }
 
-  const { data: ghlRows, error: ghlError } = await db
-    .from('public_purchase_intents')
-    .select('id')
-    .eq('channel', 'sales_assisted')
-    .eq('status', 'completed')
-    .not('activated_at', 'is', null)
-    .not('ghl_opportunity_id', 'is', null)
-    .order('activated_at', { ascending: true })
-    .limit(limit);
+  const { data: ghlRows, error: ghlError } = await db.rpc('list_missing_ghl_sales_won_intents', {
+    p_limit: limit,
+  });
   if (ghlError) throw new Error(ghlError.message || 'GHL sales reconciliation lookup failed');
 
   const candidateIds = [...new Set([

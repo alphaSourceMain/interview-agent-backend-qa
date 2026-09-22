@@ -180,3 +180,34 @@ revoke all on function public.claim_ghl_sales_binding(uuid, uuid, uuid, timestam
   from public, anon, authenticated;
 grant execute on function public.claim_ghl_sales_binding(uuid, uuid, uuid, timestamptz)
   to service_role;
+
+create or replace function public.list_missing_ghl_sales_won_intents(
+  p_limit integer default 100
+)
+returns table (id uuid)
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select intent.id
+  from public.public_purchase_intents as intent
+  where intent.channel = 'sales_assisted'
+    and intent.status = 'completed'
+    and intent.activated_at is not null
+    and intent.ghl_opportunity_id is not null
+    and not exists (
+      select 1
+      from public.sales_integration_deliveries as delivery
+      where delivery.purchase_intent_id = intent.id
+        and delivery.integration = 'ghl'
+        and delivery.event_type = 'sales_won'
+    )
+  order by intent.activated_at asc
+  limit greatest(1, least(coalesce(p_limit, 100), 100));
+$$;
+
+revoke all on function public.list_missing_ghl_sales_won_intents(integer)
+  from public, anon, authenticated;
+grant execute on function public.list_missing_ghl_sales_won_intents(integer)
+  to service_role;

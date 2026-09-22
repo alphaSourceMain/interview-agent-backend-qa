@@ -195,6 +195,8 @@ test('shared voice migration keeps routing server-only and single-use', () => {
   assert.match(sql, /create or replace function public\.create_sales_voice_call_context/);
   assert.match(sql, /create or replace function public\.claim_sales_voice_call_context/);
   assert.match(sql, /returns table \(assignment_id uuid, caller_phone_e164 text\)/i);
+  assert.equal((sql.match(/pg_catalog\.pg_advisory_xact_lock\(pg_catalog\.hashtextextended\(p_caller_phone_e164, 0\)\)/g) || []).length, 2);
+  assert.match(sql, /if v_event_count > 1 then raise exception 'sales_voice_route_ambiguous'/i);
   assert.match(sql, /and context\.claimed_at is null/);
   assert.match(sql, /revoke all on table public\.sales_voice_route_events from public, anon, authenticated/);
   assert.match(sql, /grant execute on function public\.claim_sales_voice_call_context\(text\) to service_role/);

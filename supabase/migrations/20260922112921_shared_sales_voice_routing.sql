@@ -72,6 +72,7 @@ begin
   if p_caller_phone_e164 !~ '^\+1[2-9][0-9]{9}$' then
     raise exception 'sales_voice_caller_phone_invalid';
   end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(p_caller_phone_e164, 0));
   if not exists (
     select 1
     from public.sales_phone_assignments
@@ -99,6 +100,7 @@ set search_path = ''
 as $$
 declare
   v_event public.sales_voice_route_events%rowtype;
+  v_event_count integer;
   v_assignment_id uuid;
 begin
   if p_caller_phone_e164 !~ '^\+1[2-9][0-9]{9}$' then
@@ -107,6 +109,17 @@ begin
   if p_token_sha256 !~ '^[a-f0-9]{64}$' then
     raise exception 'sales_voice_context_token_invalid';
   end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(p_caller_phone_e164, 0));
+  select count(*) into v_event_count
+  from public.sales_voice_route_events as route
+  where route.caller_phone_e164 = p_caller_phone_e164
+    and route.expires_at > now()
+    and not exists (
+      select 1 from public.sales_voice_call_contexts as context
+      where context.route_event_id = route.id
+    );
+  if v_event_count = 0 then raise exception 'sales_voice_route_not_found'; end if;
+  if v_event_count > 1 then raise exception 'sales_voice_route_ambiguous'; end if;
   select route.* into v_event
   from public.sales_voice_route_events as route
   where route.caller_phone_e164 = p_caller_phone_e164
@@ -115,9 +128,7 @@ begin
       select 1 from public.sales_voice_call_contexts as context
       where context.route_event_id = route.id
     )
-  order by route.created_at desc
-  limit 1
-  for update skip locked;
+  for update;
   if not found then raise exception 'sales_voice_route_not_found'; end if;
 
   select assignment.id into v_assignment_id

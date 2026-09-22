@@ -123,6 +123,36 @@ test('stable company-line token follows the current active assignment and return
   });
 });
 
+test('database routing takes precedence over an obsolete environment route for the same line token', async () => {
+  const digest = crypto.createHash('sha256').update(TOKEN).digest('hex');
+  const tables = {
+    sales_phone_assignments: [{ id: 'assignment-current', team_member_id: 'member-current', phone_number_id: 'phone-1', status: 'active', transfer_enabled: false }],
+    sales_team_members: [{ id: 'member-current', display_name: 'Current Representative', workspace_email: 'current@example.com', slack_user_id: 'U987654321', status: 'active' }],
+    sales_phone_numbers: [{ id: 'phone-1', e164: '+17207904187', handoff_token_sha256: digest, active: true }],
+    sales_voice_configs: [{ assignment_id: 'assignment-current', notify_email: true, notify_slack: true, notify_sms: true, status: 'applied', is_current: true }],
+  };
+  const db = { from(table) { const filters = []; return { select() { return this; }, eq(column, value) { filters.push([column, value]); return this; }, async maybeSingle() { return { data: tables[table].find((row) => filters.every(([column, value]) => row[column] === value)) || null, error: null }; } }; } };
+  const app = express();
+  app.use('/voice-handoff', createSalesVoiceHandoffRouter({
+    db,
+    env: {
+      ...env,
+      SALES_VOICE_DB_ROUTES_ENABLED: 'true',
+      SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ '+17207904187': 'https://services.leadconnectorhq.com/hooks/current' }),
+    },
+    service: { enabled: () => true, send: async () => ({ status: 'accepted' }) },
+  }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/voice-handoff/context`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).representative_name, 'Current Representative');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('a route fails closed unless email, Slack, and GHL text are all enabled', async () => {
   const calls = [];
   const emailOnlyRoute = {
@@ -294,6 +324,48 @@ test('phone endpoint identifies a fixed route from its token and rejects browser
     assert.equal((await fetch(`${url}/other`, { method: 'GET', headers: { Authorization: authorization } })).status, 404);
     assert.equal((await send(message, { Authorization: authorization })).status, 200);
     assert.deepEqual(sent, [{ input: message, routeKey: 'michael-afesi' }]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('phone endpoint reports partial delivery as unavailable instead of confirming success', async () => {
+  const app = express();
+  app.use('/voice-handoff', createSalesVoiceHandoffRouter({
+    env,
+    service: { enabled: () => true, send: async () => ({ status: 'partial', reference: 'partial-reference' }) },
+  }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/voice-handoff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify(message),
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).status, 'partial');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('phone endpoint does not treat an unverified prior attempt as a confirmed send', async () => {
+  const app = express();
+  app.use('/voice-handoff', createSalesVoiceHandoffRouter({
+    env,
+    service: { enabled: () => true, send: async () => ({ status: 'already_attempted', reference: 'prior-reference' }) },
+  }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/voice-handoff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify(message),
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).status, 'already_attempted');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

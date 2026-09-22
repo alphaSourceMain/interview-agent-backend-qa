@@ -35,14 +35,20 @@ const record = {
   },
 };
 
-function ghlFake({ failUserValueWrite = false, email = record.member.workspace_email } = {}) {
+function ghlFake({
+  failUserValueWrite = false,
+  failRestore = false,
+  mismatchFirstUserWrite = false,
+  email = record.member.workspace_email,
+  mobileValueName = record.phone.ghl_mobile_custom_value_name,
+} = {}) {
   const state = {
     user: { id: 'ghl-user-1', email, phone: '+13035550000', active: true, roles: { locationIds: ['location-1'] } },
     values: {
-      'mobile-value-1': { id: 'mobile-value-1', name: 'alphaScreen Line 1 Mobile', value: '+13035550001' },
+      'mobile-value-1': { id: 'mobile-value-1', name: mobileValueName, value: '+13035550001' },
       'user-value-1': { id: 'user-value-1', name: 'alphaScreen Line 1 GHL User ID', value: 'old-user' },
     },
-    writes: [],
+    writes: [], userWriteCount: 0,
   };
   const fetchImpl = async (url, options) => {
     const method = options.method;
@@ -51,7 +57,12 @@ function ghlFake({ failUserValueWrite = false, email = record.member.workspace_e
       if (method === 'GET') return { ok: true, status: 200, json: async () => ({ user: { ...state.user } }) };
       const body = JSON.parse(options.body);
       state.writes.push(['user', body.phone]);
+      state.userWriteCount += 1;
       state.user.phone = body.phone;
+      if (failRestore && body.phone === '+13035550000') return { ok: false, status: 503, json: async () => ({}) };
+      if (mismatchFirstUserWrite && state.userWriteCount === 1) {
+        return { ok: true, status: 200, json: async () => ({ user: { ...state.user, phone: '+13035559999' } }) };
+      }
       return { ok: true, status: 200, json: async () => ({ user: { ...state.user } }) };
     }
     const id = url.split('/').pop();
@@ -103,6 +114,39 @@ test('GHL apply restores user phone and managed values when a later write fails'
   assert.equal(state.user.phone, '+13035550000');
   assert.equal(state.values['mobile-value-1'].value, '+13035550001');
   assert.equal(state.values['user-value-1'].value, 'old-user');
+});
+
+test('GHL apply restores the prior route when a successful write has an unconfirmed response', async () => {
+  const { state, fetchImpl } = ghlFake({ mismatchFirstUserWrite: true });
+  const result = await applyGhlRouting(record, {
+    mobile: record.member.mobile_phone_e164,
+    ghlUserId: record.member.ghl_user_id,
+    workspaceEmail: record.member.workspace_email,
+  }, env, fetchImpl);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.errorCode, 'ghl_user_phone_write_200');
+  assert.equal(state.user.phone, '+13035550000');
+  assert.equal(state.values['mobile-value-1'].value, '+13035550001');
+  assert.equal(state.values['user-value-1'].value, 'old-user');
+});
+
+test('GHL apply reports an explicit operator error when restoration cannot be confirmed', async () => {
+  const { fetchImpl } = ghlFake({ mismatchFirstUserWrite: true, failRestore: true });
+  const result = await applyGhlRouting(record, {
+    mobile: record.member.mobile_phone_e164,
+    ghlUserId: record.member.ghl_user_id,
+    workspaceEmail: record.member.workspace_email,
+  }, env, fetchImpl);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.errorCode, 'ghl_restore_failed');
+});
+
+test('GHL apply refuses a renamed managed value before any provider write', async () => {
+  const { state, fetchImpl } = ghlFake({ mobileValueName: 'Unexpected value name' });
+  const result = await syncGhl(record, env, fetchImpl);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.errorCode, 'ghl_custom_value_name_mismatch');
+  assert.deepEqual(state.writes, []);
 });
 
 test('deactivation clears both line routing values without deleting or disabling the GHL user', async () => {

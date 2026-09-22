@@ -395,14 +395,15 @@ function createSalesVoiceHandoffRouter(options = {}) {
     res.setHeader('Cache-Control', 'no-store');
     if (!service.enabled()) return res.status(503).json({ status: 'unavailable' });
     if (req.headers.origin) return res.status(401).json({ status: 'unauthorized' });
-    let route = routeForAuthorization(req.headers.authorization, env);
-    if (!route && db && salesVoiceDatabaseRoutesEnabled(env)) {
+    let route = null;
+    if (db && salesVoiceDatabaseRoutesEnabled(env)) {
       try {
         route = await routeForAuthorizationDb(req.headers.authorization, db, env);
       } catch {
         return res.status(503).json({ status: 'unavailable' });
       }
     }
+    if (!route) route = routeForAuthorization(req.headers.authorization, env);
     if (!route) return res.status(401).json({ status: 'unauthorized' });
     req.salesVoiceRoute = route;
     next();
@@ -412,7 +413,7 @@ function createSalesVoiceHandoffRouter(options = {}) {
     if (!input) return res.status(400).json({ status: 'invalid_request' });
     try {
       const result = await service.send(input, req.salesVoiceRoute);
-      return res.status(['accepted', 'partial', 'already_attempted'].includes(result.status) ? 200 : 503).json(result);
+      return res.status(result.status === 'accepted' ? 200 : 503).json(result);
     } catch {
       return res.status(503).json({ status: 'unavailable' });
     }
@@ -429,7 +430,7 @@ function buildSalesVoiceAgentPrompt(repName, options = {}) {
   const name = cleanText(repName, 120);
   if (!name) throw new Error('Representative name is required');
   const opening = cleanText(options.opening, 500) || `Hi, you've reached ${name}'s alphaScreen line. ${name} is unavailable right now, but I can take a message and make sure it reaches them.`;
-  return `You are the alphaSource sales assistant answering ${name}'s alphaScreen sales line when ${name} is unavailable.\n\nOpen with: "${opening}"\n\nYour job is to collect a concise callback request, not to conduct a sales call. Ask one question at a time for the caller's full name, company name, callback phone, email, and reason for calling. Confirm the phone and email. If any name, company, or email spelling is unclear, ask the caller to spell it; never guess. Do not request payment details, passwords, authentication codes, candidate records, resumes, interview content, or other sensitive information. Do not promise a response time.\n\nRead back the contact details and a short natural-language message. Then ask: "Would you like me to send that message to ${name}?" Only after an explicit yes may you use the configured message action with confirmed=true. If the caller declines, do not send anything. Send at most once per call.\n\nNever say tool or function names, API, endpoint, parameters, providers, or delivery mechanics. Say only that you can send a message to ${name}. After an accepted or partial result, say: "Your message has been sent to ${name}." For any other result, say you could not confirm the message was sent and suggest calling back later. Do not retry.`;
+  return `You are the alphaSource sales assistant answering ${name}'s alphaScreen sales line when ${name} is unavailable.\n\nOpen with: "${opening}"\n\nYour job is to collect a concise callback request, not to conduct a sales call. Ask one question at a time for the caller's full name, company name, callback phone, email, and reason for calling. Confirm the phone and email. If any name, company, or email spelling is unclear, ask the caller to spell it; never guess. Do not request payment details, passwords, authentication codes, candidate records, resumes, interview content, or other sensitive information. Do not promise a response time.\n\nRead back the contact details and a short natural-language message. Then ask: "Would you like me to send that message to ${name}?" Only after an explicit yes may you use the configured message action with confirmed=true. If the caller declines, do not send anything. Send at most once per call.\n\nNever say tool or function names, API, endpoint, parameters, providers, or delivery mechanics. Say only that you can send a message to ${name}. Only after an accepted result say: "Your message has been sent to ${name}." For a partial or any other result, say you could not confirm the message reached every channel and suggest calling back later. Do not retry.`;
 }
 
 function buildSalesVoiceBootstrapPrompt() {
@@ -443,7 +444,7 @@ For a message, ask one question at a time for the caller's full name, company na
 
 Read back the contact details and a short natural-language message. Ask whether the caller wants that message sent to the named representative. Only after an explicit yes may you use the configured message action with confirmed=true. If the caller declines, do not send anything. Send at most once per call.
 
-Never say action, tool, or function names, API, endpoint, parameters, providers, or delivery mechanics. Say only that you can send a message to the named representative. After an accepted or partial result, say the message has been sent. For any other result, say you could not confirm it was sent and suggest calling back later. Do not retry.`;
+Never say action, tool, or function names, API, endpoint, parameters, providers, or delivery mechanics. Say only that you can send a message to the named representative. Only after an accepted result say the message has been sent. For a partial or any other result, say you could not confirm the message reached every channel and suggest calling back later. Do not retry.`;
 }
 
 module.exports = {

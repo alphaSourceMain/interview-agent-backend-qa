@@ -1,14 +1,17 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const {
   applySalesTeamMember,
   buildManagedVoicePrompt,
+  deactivateSalesTeamMember,
   normalizeDraft,
   readinessFor,
+  rotateSalesVoiceToken,
   saveSalesLineSetup,
   validateTransferDestinations,
 } = require('../src/lib/adminSalesTeamService');
@@ -109,6 +112,17 @@ function makeDb({ applyError = null, incumbent = null, concurrentWinner = null }
         tables.sales_team_config_drafts = [];
       }
       if (name === 'save_sales_voice_line_setup') Object.assign(tables.sales_phone_numbers[0], args.p_setup);
+      if (name === 'deactivate_sales_team_member') {
+        const targetMember = tables.sales_team_members.find((row) => row.id === args.p_member_id);
+        if (targetMember) targetMember.status = 'inactive';
+        for (const row of tables.sales_phone_assignments) {
+          if (row.team_member_id === args.p_member_id && row.status === 'active') row.status = 'inactive';
+        }
+      }
+      if (name === 'rotate_sales_voice_line_token') {
+        const targetPhone = tables.sales_phone_numbers.find((row) => row.id === args.p_phone_number_id);
+        Object.assign(targetPhone, { handoff_token_sha256: args.p_handoff_token_sha256, handoff_token_rotated_at: '2026-09-21T02:00:00Z', xai_setup_status: 'pending' });
+      }
       return { data: null, error: null };
     },
   };
@@ -159,7 +173,9 @@ test('completion migration adds fixed GHL user routing and service-role-only ato
   assert.match(sql, /raise exception 'sales_phone_replacement_stale'/);
   assert.match(sql, /update public\.sales_team_members[\s\S]*status = 'inactive'/);
   assert.match(sql, /update public\.sales_reps set active = false/);
+  assert.match(sql, /set ghl_setup_status = 'pending'[\s\S]*ghl_user_custom_value_id is null/);
   assert.match(sql, /revoke all on function public\.apply_sales_team_configuration_v2[\s\S]*from public, anon, authenticated/);
+  assert.match(sql, /revoke execute on function public\.apply_sales_team_configuration\([\s\S]*from service_role/);
   assert.match(sql, /grant execute on function public\.apply_sales_team_configuration_v2[\s\S]*to service_role/);
   assert.doesNotMatch(sql, /grant [^;]* to (?:anon|authenticated)/);
 });
@@ -250,4 +266,24 @@ test('line setup returns to pending when either managed GHL routing value change
   const saved = await saveSalesLineSetup({ db, phoneId: phone.id, body: { ...phone, ghl_setup_status: 'verified', xai_setup_status: 'verified' } });
   assert.equal(saved.ghl_setup_status, 'verified');
   assert.equal(saved.ghl_user_custom_value_id, 'user-value-1');
+});
+
+test('deactivation clears the managed GHL recipient and keeps the provider account intact', async () => {
+  const db = makeDb();
+  const provider = providerFake();
+  await applySalesTeamMember({ db, memberId: member.id, env: applyEnv, fetchImpl: provider.fetchImpl });
+  const result = await deactivateSalesTeamMember({ db, memberId: member.id, env: applyEnv, fetchImpl: provider.fetchImpl });
+  assert.equal(result.member.status, 'inactive');
+  assert.equal(provider.state.values['mobile-value-1'].value, '');
+  assert.equal(provider.state.values['user-value-1'].value, '');
+  assert.equal(provider.state.user.active, true);
+});
+
+test('line token rotation stores only the digest and returns the new bearer once', async () => {
+  const db = makeDb();
+  const result = await rotateSalesVoiceToken({ db, memberId: member.id, phoneId: phone.id });
+  assert.match(result.token, /^[A-Za-z0-9_-]{48}$/);
+  assert.equal(db.tables.sales_phone_numbers[0].handoff_token_sha256, crypto.createHash('sha256').update(result.token).digest('hex'));
+  assert.equal(db.tables.sales_phone_numbers[0].xai_setup_status, 'pending');
+  assert.equal(JSON.stringify(db.tables).includes(result.token), false);
 });

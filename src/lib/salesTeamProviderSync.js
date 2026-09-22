@@ -72,6 +72,7 @@ function customValueFrom(body) { return body?.customValue || body?.custom_value 
 function ghlUserFrom(body) { return body?.user || body; }
 function normalizeUsPhone(value) {
   const digits = clean(value, 32).replace(/\D/g, '');
+  if (digits.length === 10 && /^[2-9]/.test(digits)) return `+1${digits}`;
   return digits.length === 11 && digits.startsWith('1') ? `+${digits}` : clean(value, 32);
 }
 
@@ -148,22 +149,26 @@ async function applyGhlRouting(record, target, env, fetchImpl = global.fetch) {
     return providerFailure('ghl_recipient_invalid', 'A valid mobile, GHL user, and matching Workspace email are required.', 'action_required');
   }
   const previous = {};
-  const completed = [];
+  let writeAttempted = false;
   try {
     previous.user = await readGhlUser(config, userId, expectedEmail, fetchImpl);
     [previous.mobileValue, previous.userValue] = await Promise.all([
       readCustomValue(config, config.mobileValueId, fetchImpl),
       readCustomValue(config, config.userValueId, fetchImpl),
     ]);
+    if (previous.mobileValue.name !== config.mobileValueName || previous.userValue.name !== config.userValueName) {
+      throw Object.assign(new Error('GHL custom value name mismatch'), { providerCode: 'ghl_custom_value_name_mismatch' });
+    }
+    writeAttempted = true;
     await writeGhlUserPhone(config, userId, mobile, fetchImpl);
-    completed.push('user');
-    await writeCustomValue(config, { id: config.mobileValueId, name: config.mobileValueName, value: mobile }, fetchImpl);
-    completed.push('mobile');
-    await writeCustomValue(config, { id: config.userValueId, name: config.userValueName, value: userId }, fetchImpl);
-    completed.push('userValue');
+    await writeCustomValue(config, { id: config.mobileValueId, name: previous.mobileValue.name, value: mobile }, fetchImpl);
+    await writeCustomValue(config, { id: config.userValueId, name: previous.userValue.name, value: userId }, fetchImpl);
     return { status: 'synced', reference: `${config.mobileValueId}:${config.userValueId}`, previous };
   } catch (error) {
-    if (completed.length) await restoreGhlRouting({ record, previous }, env, fetchImpl);
+    if (writeAttempted) {
+      const restored = await restoreGhlRouting({ record, previous }, env, fetchImpl);
+      if (restored.status !== 'synced') return providerFailure('ghl_restore_failed', 'GHL did not confirm the requested routing change or restore every prior value. Review this line before retrying.');
+    }
     return providerFailure(error?.providerCode || 'ghl_sync_unavailable', 'GHL did not confirm the representative, mobile forwarding, and line routing updates.');
   }
 }
@@ -173,19 +178,24 @@ async function clearGhlRouting(record, env, fetchImpl = global.fetch) {
   if (ready.error) return ready.error;
   const { config } = ready;
   const previous = {};
-  const completed = [];
+  let writeAttempted = false;
   try {
     [previous.mobileValue, previous.userValue] = await Promise.all([
       readCustomValue(config, config.mobileValueId, fetchImpl),
       readCustomValue(config, config.userValueId, fetchImpl),
     ]);
-    await writeCustomValue(config, { id: config.mobileValueId, name: config.mobileValueName, value: '' }, fetchImpl);
-    completed.push('mobile');
-    await writeCustomValue(config, { id: config.userValueId, name: config.userValueName, value: '' }, fetchImpl);
-    completed.push('userValue');
+    if (previous.mobileValue.name !== config.mobileValueName || previous.userValue.name !== config.userValueName) {
+      throw Object.assign(new Error('GHL custom value name mismatch'), { providerCode: 'ghl_custom_value_name_mismatch' });
+    }
+    writeAttempted = true;
+    await writeCustomValue(config, { id: config.mobileValueId, name: previous.mobileValue.name, value: '' }, fetchImpl);
+    await writeCustomValue(config, { id: config.userValueId, name: previous.userValue.name, value: '' }, fetchImpl);
     return { status: 'synced', reference: `${config.mobileValueId}:${config.userValueId}`, previous };
   } catch (error) {
-    if (completed.length) await restoreGhlRouting({ record, previous }, env, fetchImpl);
+    if (writeAttempted) {
+      const restored = await restoreGhlRouting({ record, previous }, env, fetchImpl);
+      if (restored.status !== 'synced') return providerFailure('ghl_restore_failed', 'GHL did not confirm the line clear or restore every prior value. Review this line before retrying.');
+    }
     return providerFailure(error?.providerCode || 'ghl_clear_unavailable', 'GHL did not clear both managed line routing values.');
   }
 }

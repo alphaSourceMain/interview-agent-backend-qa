@@ -29,6 +29,19 @@ from (values
 where phone.id = seed.id
   and (phone.label is distinct from seed.line_label or phone.ghl_user_custom_value_name is distinct from seed.custom_value_name);
 
+-- A line cannot remain verified until its new per-line GHL user value exists.
+update public.sales_phone_numbers
+set ghl_setup_status = 'pending',
+    updated_at = now()
+where id in (
+  '21000000-0000-4000-8000-000000000001'::uuid,
+  '21000000-0000-4000-8000-000000000002'::uuid,
+  '21000000-0000-4000-8000-000000000003'::uuid,
+  '21000000-0000-4000-8000-000000000004'::uuid
+)
+and ghl_user_custom_value_id is null
+and ghl_setup_status is distinct from 'pending';
+
 create or replace function public.save_sales_voice_line_setup(
   p_phone_number_id uuid,
   p_actor_user_id uuid,
@@ -317,5 +330,6 @@ $$;
 
 revoke all on function public.save_sales_voice_line_setup(uuid, uuid, jsonb) from public, anon, authenticated;
 revoke all on function public.apply_sales_team_configuration_v2(uuid, uuid, uuid, uuid, jsonb, jsonb, jsonb, text, text, boolean, timestamptz, text) from public, anon, authenticated;
+revoke execute on function public.apply_sales_team_configuration(uuid, uuid, uuid, jsonb, jsonb, jsonb, text, text, boolean, timestamptz, text) from service_role;
 grant execute on function public.save_sales_voice_line_setup(uuid, uuid, jsonb) to service_role;
 grant execute on function public.apply_sales_team_configuration_v2(uuid, uuid, uuid, uuid, jsonb, jsonb, jsonb, text, text, boolean, timestamptz, text) to service_role;

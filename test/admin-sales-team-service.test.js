@@ -158,6 +158,7 @@ function providerFake() {
 
 const applyEnv = {
   SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true',
+  GHL_LOCATION_ID: 'location-1',
   SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ [phone.e164]: 'https://example.leadconnectorhq.com/hooks/line-1' }),
   GHL_PRIVATE_INTEGRATION_TOKEN: 'pit-' + 'g'.repeat(40),
   SLACK_SALES_WON_BOT_TOKEN: 'xoxb-' + 's'.repeat(40),
@@ -314,13 +315,22 @@ test('a concurrent database winner is reconciled into GHL instead of being overw
 
 test('line setup returns to pending when either managed GHL routing value changes', async () => {
   const db = makeDb();
-  const pending = await saveSalesLineSetup({ db, phoneId: phone.id, body: { ...phone, ghl_user_custom_value_id: '', ghl_setup_status: 'verified' } });
+  const env = { GHL_LOCATION_ID: 'location-1' };
+  const pending = await saveSalesLineSetup({ db, phoneId: phone.id, body: { ...phone, ghl_user_custom_value_id: '', ghl_setup_status: 'verified' }, env });
   assert.equal(pending.ghl_setup_status, 'pending');
   assert.equal(readinessFor({ member, assignment, config, phone: pending }).ready, false);
   db.tables.sales_phone_numbers[0] = { ...phone };
-  const saved = await saveSalesLineSetup({ db, phoneId: phone.id, body: { ...phone, ghl_setup_status: 'verified', xai_setup_status: 'verified' } });
+  const saved = await saveSalesLineSetup({ db, phoneId: phone.id, body: { ...phone, ghl_setup_status: 'verified', xai_setup_status: 'verified' }, env });
   assert.equal(saved.ghl_setup_status, 'verified');
   assert.equal(saved.ghl_user_custom_value_id, 'user-value-1');
+});
+
+test('line setup rejects an admin-entered GHL location outside the sales location', async () => {
+  const db = makeDb();
+  await assert.rejects(saveSalesLineSetup({
+    db, phoneId: phone.id, body: { ...phone, ghl_location_id: 'location-2' },
+    env: { GHL_LOCATION_ID: 'location-1' }
+  }), (error) => error.code === 'ghl_sales_location_mismatch');
 });
 
 test('deactivation clears the managed GHL recipient and keeps the provider account intact', async () => {

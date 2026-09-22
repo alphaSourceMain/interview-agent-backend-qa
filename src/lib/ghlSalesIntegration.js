@@ -200,7 +200,7 @@ function assertOpportunityBoundary(opportunity, config, options = {}) {
       retryable: false,
     });
   }
-  if (options.rejectClosed && status && status !== 'open') {
+  if (options.rejectClosed && status !== 'open') {
     throw integrationError('ghl_opportunity_not_open', 'The GHL opportunity is already closed.', {
       status: 409,
       retryable: false,
@@ -394,6 +394,47 @@ async function importReadyGhlOpportunity(opportunityId, options = {}) {
   return { ...result, opportunity, contact };
 }
 
+async function verifyReadyGhlBinding(binding, options = {}) {
+  const db = options.db || supabaseAdmin;
+  const env = options.env || process.env;
+  const config = ghlSalesConfiguration(env);
+  if (!config.configured) {
+    throw integrationError('ghl_sales_import_not_configured', 'The GHL sales import is not configured.', {
+      status: 503, retryable: false, manualReview: true,
+    });
+  }
+  if (!binding?.id || clean(binding.location_id, 160) !== config.locationId ||
+      clean(binding.pipeline_id, 160) !== config.pipelineId ||
+      clean(binding.ready_stage_id, 160) !== config.readyStageId ||
+      binding.status !== 'ready' || binding.purchase_intent_id || binding.manual_review_required) {
+    throw integrationError('ghl_binding_not_ready', 'The GHL sales draft is no longer ready.', {
+      status: 409, retryable: false, manualReview: true,
+    });
+  }
+  const requestOptions = { env, fetchImpl: options.fetchImpl, config };
+  const opportunity = await fetchGhlOpportunity(binding.opportunity_id, requestOptions);
+  assertOpportunityBoundary(opportunity, config, { requireReadyStage: true, rejectClosed: true });
+  if (clean(opportunity?.contactId || opportunity?.contact_id, 160) !== clean(binding.contact_id, 160)) {
+    throw integrationError('ghl_contact_changed', 'The GHL opportunity contact changed after import.', {
+      status: 409, retryable: false, manualReview: true,
+    });
+  }
+  const ownerId = requireId(opportunity?.assignedTo || opportunity?.assigned_to, 'owner_user_id');
+  if (ownerId !== clean(binding.provider_owner_user_id, 160)) {
+    throw integrationError('ghl_owner_changed', 'The GHL opportunity owner changed after import.', {
+      status: 409, retryable: false, manualReview: true,
+    });
+  }
+  await assertGhlSalesOwnerScope(ownerId, requestOptions);
+  const mapping = await resolveActiveSalesRep(db, ownerId);
+  if (mapping.member.id !== binding.sales_team_member_id || mapping.rep.user_id !== binding.sales_rep_user_id) {
+    throw integrationError('ghl_owner_mapping_changed', 'The assigned salesperson changed after import.', {
+      status: 409, retryable: false, manualReview: true,
+    });
+  }
+  return opportunity;
+}
+
 function buildGhlWinNote({ delivery, intent, binding, agreement }) {
   const discountCents = Math.max(0, Number(intent?.promotion_discount_cents || 0));
   const lines = [
@@ -467,6 +508,7 @@ async function markGhlOpportunityWon(delivery, context, options = {}) {
     });
   }
   if (clean(opportunity?.status, 40).toLowerCase() !== 'won') {
+    assertOpportunityBoundary(opportunity, config, { requireReadyStage: true, rejectClosed: true });
     const result = await ghlRequest(`/opportunities/${encodeURIComponent(binding.opportunity_id)}/status`, {
       ...requestOptions,
       method: 'PUT',
@@ -529,5 +571,6 @@ module.exports = {
   timingSafeSecret,
   upsertGhlBinding,
   verifyGhlEd25519Signature,
+  verifyReadyGhlBinding,
   webhookBodyDigest,
 };

@@ -56,6 +56,10 @@ function ghlConfiguration(record, env) {
   const phone = record.phone || {};
   if (phone.ghl_setup_status !== 'verified') return { error: providerFailure('ghl_line_setup_unverified', 'Finish and verify the reusable GHL call and notification workflows for this line.', 'action_required') };
   if (env.SALES_TEAM_PROVIDER_SYNC_ENABLED !== 'true') return { error: providerFailure('provider_sync_disabled', 'Provider synchronization is disabled.', 'action_required') };
+  const salesLocationId = clean(env.GHL_LOCATION_ID || env.GHL_SALES_LOCATION_ID, 160);
+  if (!salesLocationId || clean(phone.ghl_location_id, 160) !== salesLocationId) {
+    return { error: providerFailure('ghl_sales_location_mismatch', 'The sales line must use the configured alphaScreen sales location.', 'action_required') };
+  }
   const config = {
     token: clean(env.GHL_PRIVATE_INTEGRATION_TOKEN, 1000),
     locationId: clean(phone.ghl_location_id, 160),

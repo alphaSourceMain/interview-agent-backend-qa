@@ -7,6 +7,7 @@ const { applyGhlRouting, clearGhlRouting, syncGhl, verifySlack, verifyXai } = re
 const env = {
   SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true',
   GHL_PRIVATE_INTEGRATION_TOKEN: 'pit-' + 'x'.repeat(40),
+  GHL_LOCATION_ID: 'location-1',
   SLACK_SALES_WON_BOT_TOKEN: 'xoxb-' + 'x'.repeat(40),
 };
 
@@ -94,6 +95,14 @@ test('GHL apply verifies the user and atomically updates mobile forwarding plus 
   assert.equal(state.values['mobile-value-1'].value, '+17205551212');
   assert.equal(state.values['user-value-1'].value, 'ghl-user-1');
   assert.equal(result.previous.user.phone, '+13035550000');
+});
+
+test('GHL routing rejects a line in another location before any provider write', async () => {
+  const { state, fetchImpl } = ghlFake();
+  const result = await syncGhl({ ...record, phone: { ...record.phone, ghl_location_id: 'location-2' } }, env, fetchImpl);
+  assert.equal(result.status, 'action_required');
+  assert.equal(result.errorCode, 'ghl_sales_location_mismatch');
+  assert.deepEqual(state.writes, []);
 });
 
 test('GHL apply fails before writes when the GHL user email does not match Workspace', async () => {

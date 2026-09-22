@@ -17,6 +17,7 @@ const { promotionEligibilityError, replacementCheckoutDisposition } = require('.
 const {
   shouldApplyGenericSubscriptionUpdate,
   claimAgreementPurchaseActivation,
+  isInitialAgreementCheckoutInvoice,
   markAgreementCheckoutPaid
 } = require('../routes/webhookStripe')
 const { buildExecutedMembershipAgreementHtml } = require('../routes/membershipAgreementsPublic')
@@ -117,6 +118,13 @@ test('payment activation atomically claims an open sales intent', async () => {
   assert.ok(db.state.intent.activation_claimed_at)
 })
 
+test('only the initial subscription invoice may activate an agreement checkout', () => {
+  assert.equal(isInitialAgreementCheckoutInvoice('invoice.payment_succeeded', 'agreement_checkout', 'agreement-1', 'subscription_create'), true)
+  assert.equal(isInitialAgreementCheckoutInvoice('invoice.payment_succeeded', 'agreement_checkout', 'agreement-1', 'subscription_cycle'), false)
+  assert.equal(isInitialAgreementCheckoutInvoice('invoice.payment_succeeded', 'agreement_checkout', 'agreement-1', ''), false)
+  assert.equal(isInitialAgreementCheckoutInvoice('invoice.payment_failed', 'agreement_checkout', 'agreement-1', 'subscription_create'), false)
+})
+
 test('payment activation loses to a concurrent cancellation without reactivating it', async () => {
   const db = activationClaimDb({
     id: 'intent-2',
@@ -208,7 +216,7 @@ test('signed agreement render uses the stored deadline in Denver regardless of h
 test('agreement checkout webhooks do not fall through to generic client activation', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhookStripe.js'), 'utf8')
   assert.match(source, /if \(!isPaidAgreementCheckout\) \{[\s\S]*buildClientSubscriptionUpdatesFromStripe/i)
-  assert.match(source, /const isAgreementCheckoutInvoice =[\s\S]*metadataSource === 'agreement_checkout'/i)
+  assert.match(source, /const isAgreementCheckoutInvoice = isInitialAgreementCheckoutInvoice\([\s\S]*metadataSource,[\s\S]*eventObject\?\.billing_reason/i)
   assert.match(source, /customerId && !isManagedSubscriptionInvoice && !isAgreementCheckoutInvoice/i)
 })
 

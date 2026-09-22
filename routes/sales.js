@@ -4,6 +4,7 @@ const express = require('express')
 const crypto = require('crypto')
 const Stripe = require('stripe')
 const { supabaseAdmin } = require('../src/lib/supabaseClient')
+const { verifyReadyGhlBinding } = require('../src/lib/ghlSalesIntegration')
 const { htmlToPdf } = require('../utils/pdfRenderer')
 const { buildMembershipAgreementHtml } = require('../utils/renderMembershipAgreement')
 const {
@@ -159,6 +160,8 @@ function createSalesRouter(options = {}) {
   const buildSignUrl = options.buildSignUrl || buildMembershipAgreementSignUrl
   const getStripe = options.getStripe || stripeClient
   const rateLimit = options.rateLimit || checkAndIncrementRateLimit
+  const ghlFetchImpl = options.ghlFetchImpl || global.fetch
+  const ghlEnv = options.ghlEnv || process.env
 
   async function enforceSalesRateLimit(req, res, action) {
     const maxCount = SALES_RATE_LIMITS[action]
@@ -444,6 +447,7 @@ function createSalesRouter(options = {}) {
     if (binding.status !== 'ready' || binding.manual_review_required) {
       throw makeSalesError(409, 'ghl_import_not_ready', 'This GHL sales draft requires administrator review before it can be completed.')
     }
+    await verifyReadyGhlBinding(binding, { db, env: ghlEnv, fetchImpl: ghlFetchImpl })
     draft.ghl_contact_id = binding.contact_id
     draft.ghl_opportunity_id = binding.opportunity_id
     return draft
@@ -681,6 +685,16 @@ function createSalesRouter(options = {}) {
       }
       if (existingIntent) {
         throw makeSalesError(409, 'existing_signup_conflict', 'This buyer already has an account or an in-progress purchase. Ask an administrator to review it.')
+      }
+
+      // Preview and creation are separate requests. Re-check GHL immediately
+      // before the atomic database claim so a moved/closed lead cannot become
+      // a prefilled agreement on the strength of an old imported snapshot.
+      if (draft.ghl_import_id) {
+        await verifyReadyGhlBinding(
+          await loadOwnedGhlImport(draft.ghl_import_id, req.salesRep.user_id),
+          { db, env: ghlEnv, fetchImpl: ghlFetchImpl }
+        )
       }
 
       const intentId = crypto.randomUUID()

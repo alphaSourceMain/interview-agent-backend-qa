@@ -297,7 +297,7 @@ async function activateCase(plan, cadence, extra = {}) {
     authAdmin: extra.authAdmin || makeAuthAdmin(extra.users || []),
     agreementId: AGREEMENT_ID,
     checkoutSessionId: 'cs_test_public',
-    paidAt: '2026-06-23T12:00:00.000Z',
+    paidAt: extra.paidAt || '2026-06-23T12:00:00.000Z',
     subscription: makeSubscription(cadence),
     requireParentClient: async () => ({ ok: true }),
     ensureRecovery: async () => {
@@ -425,6 +425,18 @@ test('sales-assisted activation starts the membership on successful payment', as
   assert.equal(db.membershipAgreements[0].initial_term_start, '2026-06-23')
   assert.equal(db.membershipAgreements[0].initial_renewal_date, '2027-06-23')
   assert.equal(db.purchaseIntents[0].activated_at, '2026-06-23T12:00:00.000Z')
+})
+
+test('a later paid event cannot move the original sales close into another payroll period', async () => {
+  const db = makeDb('basic', 'monthly', { source: 'sales_assisted', termStartBasis: 'successful_payment' })
+  const first = await activateCase('basic', 'monthly', { db })
+  assert.equal(first.result.ok, true)
+  const repeated = await activateCase('basic', 'monthly', { db, paidAt: '2026-07-23T12:00:00.000Z' })
+  assert.equal(repeated.result.ok, true)
+  assert.equal(db.membershipAgreements[0].checkout_paid_at, '2026-06-23T12:00:00.000Z')
+  assert.equal(db.purchaseIntents[0].activated_at, '2026-06-23T12:00:00.000Z')
+  assert.equal(db.membershipAgreements[0].initial_term_start, '2026-06-23')
+  assert.equal(db.membershipAgreements[0].initial_renewal_date, '2027-06-23')
 })
 
 test('new sales-assisted activation preserves concrete agreement dates', async () => {

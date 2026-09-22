@@ -324,6 +324,13 @@ async function markAgreementCheckoutPaid(agreementId, options = {}) {
   }
 }
 
+function isInitialAgreementCheckoutInvoice(eventType, metadataSource, agreementId, billingReason) {
+  return eventType === 'invoice.payment_succeeded' &&
+    metadataSource === 'agreement_checkout' &&
+    Boolean(agreementId) &&
+    String(billingReason || '').trim().toLowerCase() === 'subscription_create';
+}
+
 async function claimAgreementPurchaseActivation(agreementId, checkoutSessionId, db = supabaseAdmin) {
   const normalizedAgreementId = String(agreementId || '').trim();
   if (!normalizedAgreementId) return { proceed: false, result: { ok: false, status: 'agreement_missing' } };
@@ -814,13 +821,16 @@ router.post('/', async (req, res) => {
       const metadataAgreementId = String(metadata?.agreement_id || '').trim();
       const metadataPlanTier = String(metadata?.plan_tier || '').trim().toLowerCase();
       const metadataBillingInterval = String(metadata?.billing_interval || '').trim().toLowerCase();
-      const isAgreementCheckoutInvoice =
-        event.type === 'invoice.payment_succeeded' &&
-        metadataSource === 'agreement_checkout' &&
-        !!metadataAgreementId;
+      const isAgreementCheckoutInvoice = isInitialAgreementCheckoutInvoice(
+        event.type,
+        metadataSource,
+        metadataAgreementId,
+        eventObject?.billing_reason
+      );
       const isManagedSubscriptionInvoice =
         event.type === 'invoice.payment_succeeded' &&
         MANAGED_SUBSCRIPTION_CHECKOUT_SOURCES.has(metadataSource) &&
+        metadataSource !== 'agreement_checkout' &&
         !isAgreementCheckoutInvoice &&
         !!metadataClientId &&
         ['basic', 'pro', 'enterprise'].includes(metadataPlanTier) &&
@@ -920,5 +930,6 @@ router.post('/', async (req, res) => {
 module.exports = router;
 module.exports.shouldApplyGenericSubscriptionUpdate = shouldApplyGenericSubscriptionUpdate;
 module.exports.markAgreementCheckoutPaid = markAgreementCheckoutPaid;
+module.exports.isInitialAgreementCheckoutInvoice = isInitialAgreementCheckoutInvoice;
 module.exports.claimAgreementPurchaseActivation = claimAgreementPurchaseActivation;
 module.exports.releaseAgreementPurchaseActivationClaim = releaseAgreementPurchaseActivationClaim;

@@ -20,6 +20,7 @@ const {
   importReadyGhlOpportunity,
   markGhlOpportunityWon,
   timingSafeSecret,
+  verifyReadyGhlBinding,
   verifyGhlEd25519Signature,
 } = require('../src/lib/ghlSalesIntegration');
 const { authenticateWebhook, webhookIdentifiers } = require('../routes/ghlSalesWebhook');
@@ -84,6 +85,28 @@ test('GHL configuration and boundary checks fail closed to the configured QA loc
   });
   assert.throws(() => assertOpportunityBoundary({ ...opportunity, locationId: 'location_prod' }, config), (error) => error.code === 'ghl_location_mismatch' && error.manualReview === true);
   assert.throws(() => assertOpportunityBoundary({ ...opportunity, pipelineStageId: 'stage_other' }, config, { requireReadyStage: true }), (error) => error.code === 'ghl_ready_stage_mismatch');
+  assert.throws(() => assertOpportunityBoundary({ ...opportunity, status: '' }, config, { rejectClosed: true }), (error) => error.code === 'ghl_opportunity_not_open');
+});
+
+test('prefilled deal creation rechecks the live ready-stage opportunity and active owner mapping', async () => {
+  const binding = {
+    id: 'binding_qa', location_id: 'location_qa', pipeline_id: 'pipeline_qa', ready_stage_id: 'stage_agreement_checkout',
+    opportunity_id: 'opp_qa', contact_id: 'contact_qa', provider_owner_user_id: 'owner_qa',
+    sales_team_member_id: 'member_qa', sales_rep_user_id: '11111111-1111-4111-8111-111111111111',
+    status: 'ready', purchase_intent_id: null, manual_review_required: false,
+  };
+  const db = inboundDb();
+  const opportunity = { id: 'opp_qa', locationId: 'location_qa', pipelineId: 'pipeline_qa', pipelineStageId: 'stage_agreement_checkout', status: 'open', contactId: 'contact_qa', assignedTo: 'owner_qa' };
+  const fetchFor = (current) => async (url) => {
+    if (url.endsWith('/opportunities/opp_qa')) return response({ opportunity: current });
+    if (url.endsWith('/users/owner_qa')) return response({ user: { id: 'owner_qa', roles: { type: 'account', role: 'user', locationIds: ['location_qa'] } } });
+    throw new Error(`unexpected URL ${url}`);
+  };
+  await verifyReadyGhlBinding(binding, { db, env, fetchImpl: fetchFor(opportunity) });
+  await assert.rejects(verifyReadyGhlBinding(binding, { db, env, fetchImpl: fetchFor({ ...opportunity, pipelineStageId: 'stage_other' }) }), (error) => error.code === 'ghl_ready_stage_mismatch');
+  await assert.rejects(verifyReadyGhlBinding(binding, { db, env, fetchImpl: fetchFor({ ...opportunity, status: 'lost' }) }), (error) => error.code === 'ghl_opportunity_not_open');
+  db.tables.sales_team_members[0].sales_rep_user_id = 'rep_changed';
+  await assert.rejects(verifyReadyGhlBinding(binding, { db, env, fetchImpl: fetchFor(opportunity) }), (error) => error.code === 'sales_rep_inactive');
 });
 
 test('ready-stage import authoritatively fetches GHL records and maps exactly one active salesperson', async () => {
@@ -184,6 +207,23 @@ test('outbound Won update is idempotent and writes a stable alphaScreen activati
   assert.match(calls[3].body.body, /alphaScreen activation synchronized/);
   assert.match(calls[3].body.body, /cs_test_qa/);
   assert.doesNotMatch(calls[3].body.body, /Bearer|pit-/);
+});
+
+test('outbound Won refuses to overwrite an opportunity moved or closed after import', async () => {
+  const binding = { id: 'binding_qa', location_id: 'location_qa', opportunity_id: 'opp_qa', contact_id: 'contact_qa', provider_owner_user_id: 'owner_qa' };
+  for (const change of [{ status: 'lost' }, { pipelineStageId: 'stage_other' }]) {
+    const calls = [];
+    await assert.rejects(markGhlOpportunityWon({ id: 'delivery_qa' }, {
+      intent: { ghl_opportunity_id: 'opp_qa' }, binding, agreement: {}
+    }, {
+      env,
+      fetchImpl: async (url, request) => {
+        calls.push(request.method);
+        return response({ opportunity: { id: 'opp_qa', locationId: 'location_qa', pipelineId: 'pipeline_qa', pipelineStageId: 'stage_agreement_checkout', status: 'open', contactId: 'contact_qa', assignedTo: 'owner_qa', ...change } });
+      },
+    }), (error) => ['ghl_opportunity_not_open', 'ghl_ready_stage_mismatch'].includes(error.code));
+    assert.deepEqual(calls, ['GET']);
+  }
 });
 
 test('duplicate Won delivery performs no provider mutation when status and idempotency note already exist', async () => {

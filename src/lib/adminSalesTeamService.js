@@ -543,7 +543,7 @@ async function syncSalesTeamMember({ db, memberId, env = process.env, fetchImpl 
   return { item: await loadMemberRecord({ db, memberId }), provider_sync };
 }
 
-async function saveSalesLineSetup({ db, phoneId, body, actorId }) {
+async function saveSalesLineSetup({ db, phoneId, body, actorId, env = process.env }) {
   if (!FIXED_SALES_LINE_IDS.includes(phoneId)) throw serviceError(404, 'sales_phone_number_not_found', 'Company sales line not found.');
   const phoneResult = await db.from('sales_phone_numbers').select(PHONE_SELECT).eq('id', phoneId).eq('active', true).maybeSingle();
   if (phoneResult.error) throw Object.assign(new Error('Sales line lookup failed'), { cause: phoneResult.error });
@@ -562,6 +562,10 @@ async function saveSalesLineSetup({ db, phoneId, body, actorId }) {
     ghl_setup_status: setupStatus(body.ghl_setup_status, 'ghl_setup_status'),
     xai_verification_reference: nullableText(body.xai_verification_reference, 160),
   };
+  const salesLocationId = text(env.GHL_LOCATION_ID || env.GHL_SALES_LOCATION_ID, 160);
+  if (setup.ghl_location_id && (!salesLocationId || setup.ghl_location_id !== salesLocationId)) {
+    throw serviceError(409, 'ghl_sales_location_mismatch', 'The GHL sales line must use the configured alphaScreen sales location.');
+  }
   const xaiIdentifiersChanged = setup.xai_agent_id !== phoneResult.data.xai_agent_id || setup.xai_phone_number_e164 !== phoneResult.data.xai_phone_number_e164;
   const ghlIdentifiersChanged = ['ghl_location_id', 'ghl_routing_workflow_id', 'ghl_notification_workflow_id', 'ghl_mobile_custom_value_id', 'ghl_mobile_custom_value_name', 'ghl_user_custom_value_id', 'ghl_user_custom_value_name']
     .some((field) => setup[field] !== phoneResult.data[field]);

@@ -209,9 +209,9 @@ async function syncGhl(record, env, fetchImpl) {
 }
 
 async function verifyXai(record) {
-  const phone = record.phone || {};
+  const phone = record.shared_voice_phone || record.phone || {};
   if (phone.xai_setup_status !== 'verified' || !phone.xai_agent_id || !phone.xai_phone_number_e164 || !phone.handoff_token_rotated_at || !phone.xai_verified_at || !phone.xai_verification_reference) {
-    return providerFailure('xai_line_setup_unverified', 'Finish and verify the reusable Grok agent, number, context tool, and message tool for this line.', 'action_required');
+    return providerFailure('xai_shared_entrypoint_unverified', 'Finish and verify the shared Grok agent, number, context tool, and message tool.', 'action_required');
   }
   return { status: 'synced', reference: clean(phone.xai_agent_id, 160) };
 }

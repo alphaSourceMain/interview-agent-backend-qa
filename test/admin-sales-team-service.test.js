@@ -185,6 +185,22 @@ test('completion migration adds fixed GHL user routing and service-role-only ato
   assert.doesNotMatch(sql, /grant [^;]* to (?:anon|authenticated)/);
 });
 
+test('shared voice migration keeps routing server-only and single-use', () => {
+  const sql = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20260922112921_shared_sales_voice_routing.sql'), 'utf8').toLowerCase();
+  assert.match(sql, /shared_voice_entrypoint boolean not null default false/);
+  assert.match(sql, /create unique index if not exists sales_phone_numbers_single_shared_voice_entrypoint_uidx/);
+  assert.match(sql, /create table if not exists public\.sales_voice_route_events/);
+  assert.match(sql, /create table if not exists public\.sales_voice_call_contexts/);
+  assert.match(sql, /create or replace function public\.record_sales_voice_route/);
+  assert.match(sql, /create or replace function public\.create_sales_voice_call_context/);
+  assert.match(sql, /create or replace function public\.claim_sales_voice_call_context/);
+  assert.match(sql, /returns table \(assignment_id uuid, caller_phone_e164 text\)/i);
+  assert.match(sql, /and context\.claimed_at is null/);
+  assert.match(sql, /revoke all on table public\.sales_voice_route_events from public, anon, authenticated/);
+  assert.match(sql, /grant execute on function public\.claim_sales_voice_call_context\(text\) to service_role/);
+  assert.doesNotMatch(sql, /grant [^;]* to (?:anon|authenticated)/);
+});
+
 test('draft normalization locks Call Connect and all three caller-message channels', () => {
   const draft = normalizeDraft({ ...member, ...assignment, ...config, ring_seconds: 10 });
   assert.equal(draft.assignment.call_connect_required, true);

@@ -21,7 +21,7 @@ const FIXED_SALES_LINE_IDS = Object.freeze([
   '21000000-0000-4000-8000-000000000004',
 ]);
 const MEMBER_SELECT = 'id,sales_rep_user_id,display_name,workspace_email,mobile_phone_e164,ghl_user_id,slack_user_id,status,active_from,inactive_at,created_at,updated_at';
-const PHONE_SELECT = 'id,e164,provider,provider_phone_number_id,label,a2p_status,active,xai_agent_id,xai_phone_number_e164,ghl_location_id,ghl_routing_workflow_id,ghl_notification_workflow_id,ghl_mobile_custom_value_id,ghl_mobile_custom_value_name,ghl_user_custom_value_id,ghl_user_custom_value_name,xai_setup_status,ghl_setup_status,xai_verified_at,xai_verification_reference,handoff_token_rotated_at,created_at,updated_at';
+const PHONE_SELECT = 'id,e164,provider,provider_phone_number_id,label,a2p_status,active,shared_voice_entrypoint,xai_agent_id,xai_phone_number_e164,ghl_location_id,ghl_routing_workflow_id,ghl_notification_workflow_id,ghl_mobile_custom_value_id,ghl_mobile_custom_value_name,ghl_user_custom_value_id,ghl_user_custom_value_name,xai_setup_status,ghl_setup_status,xai_verified_at,xai_verification_reference,handoff_token_rotated_at,created_at,updated_at';
 const ASSIGNMENT_SELECT = 'id,team_member_id,phone_number_id,xai_agent_id,xai_phone_number_e164,handoff_token_rotated_at,ghl_location_id,ghl_notification_workflow_id,ring_seconds,call_connect_required,transfer_enabled,backup_transfer_phone_e164,status,effective_from,effective_to,created_at,updated_at';
 const CONFIG_SELECT = 'id,assignment_id,version,is_current,status,voice_id,greeting_override,approved_context,timezone,business_hours,answer_approved_faqs,schedule_demos,notify_slack,notify_sms,notify_email,generated_prompt,prompt_checksum,created_at,applied_at';
 const JOB_SELECT = 'id,team_member_id,assignment_id,voice_config_id,provider,operation,status,attempt_count,provider_reference,last_error_code,last_error_detail,created_at,updated_at,completed_at';
@@ -202,6 +202,7 @@ function validateTransferDestinations(draft, phone) {
 function readinessFor(record) {
   const missing = [];
   const { member, assignment, config, phone } = record;
+  const sharedVoicePhone = record.shared_voice_phone || phone;
   if (config?.notify_slack !== true || config?.notify_sms !== true || config?.notify_email !== true) missing.push('Slack, GHL text, and Workspace email');
   if (!member.workspace_email) missing.push('Workspace email');
   if (!member.mobile_phone_e164) missing.push('Mobile number');
@@ -209,10 +210,11 @@ function readinessFor(record) {
   if (!member.ghl_user_id) missing.push('GHL user');
   if (!member.slack_user_id && config?.notify_slack !== false) missing.push('Slack member');
   if (!phone?.id) missing.push('GHL phone number');
-  if (!phone?.xai_agent_id) missing.push('Grok Voice agent');
-  if (!phone?.xai_phone_number_e164) missing.push('Grok Voice phone number');
+  if (!sharedVoicePhone?.xai_agent_id) missing.push('Shared Grok Voice agent');
+  if (!sharedVoicePhone?.xai_phone_number_e164) missing.push('Shared Grok Voice phone number');
   if (!phone?.handoff_token_rotated_at) missing.push('Prepared line token');
-  if (phone?.xai_setup_status !== 'verified') missing.push('Verified Grok Voice line');
+  if (!sharedVoicePhone?.handoff_token_rotated_at) missing.push('Prepared shared Grok token');
+  if (sharedVoicePhone?.xai_setup_status !== 'verified') missing.push('Verified shared Grok Voice entrypoint');
   if (!phone?.ghl_location_id) missing.push('GHL location');
   if (!phone?.ghl_routing_workflow_id) missing.push('GHL call workflow');
   if (!phone?.ghl_mobile_custom_value_id) missing.push('GHL mobile routing value');
@@ -220,7 +222,7 @@ function readinessFor(record) {
   if (!phone?.ghl_notification_workflow_id && config?.notify_sms !== false) missing.push('GHL notification workflow');
   if (phone?.ghl_setup_status !== 'verified') missing.push('Verified GHL line');
   if (assignment?.transfer_enabled && !assignment?.backup_transfer_phone_e164) missing.push('Backup transfer number');
-  if (assignment?.backup_transfer_phone_e164 && [member.mobile_phone_e164, phone?.e164, assignment.xai_phone_number_e164].includes(assignment.backup_transfer_phone_e164)) {
+  if (assignment?.backup_transfer_phone_e164 && [member.mobile_phone_e164, phone?.e164, sharedVoicePhone?.xai_phone_number_e164].includes(assignment.backup_transfer_phone_e164)) {
     missing.push('Separate backup transfer number');
   }
   return { ready: missing.length === 0, missing };
@@ -246,6 +248,7 @@ async function loadAdminSalesTeam({ db }) {
   ]);
   const phoneRank = new Map(FIXED_SALES_LINE_IDS.map((id, index) => [id, index]));
   const phones = allPhones.filter((phone) => phoneRank.has(phone.id)).sort((a, b) => phoneRank.get(a.id) - phoneRank.get(b.id));
+  const sharedVoicePhone = phones.find((phone) => phone.shared_voice_entrypoint === true) || null;
   const phoneById = new Map(phones.map((item) => [item.id, item]));
   const assignmentsByMember = new Map();
   const activeAssignmentsByMember = new Map();
@@ -276,7 +279,7 @@ async function loadAdminSalesTeam({ db }) {
       prompt_checksum: pendingDraft.prompt_checksum,
     } : appliedConfig;
     const phone = assignment ? phoneById.get(assignment.phone_number_id) || null : null;
-    const record = { member: desiredMember, assignment, phone, config };
+    const record = { member: desiredMember, assignment, phone, shared_voice_phone: sharedVoicePhone, config };
     return {
       ...record,
       applied_member: member,
@@ -288,7 +291,7 @@ async function loadAdminSalesTeam({ db }) {
       sync_jobs: jobsByMember.get(member.id) || [],
     };
   });
-  return { items, phone_numbers: phones, providers: PROVIDERS, agent_bootstrap_prompt: buildSalesVoiceBootstrapPrompt() };
+  return { items, phone_numbers: phones, shared_voice_phone: sharedVoicePhone, providers: PROVIDERS, agent_bootstrap_prompt: buildSalesVoiceBootstrapPrompt() };
 }
 
 async function loadMemberRecord({ db, memberId }) {
@@ -314,8 +317,11 @@ async function saveSalesTeamMember({ db, memberId, body, actorId }) {
     if (phoneResult.error) throw Object.assign(new Error('Phone number lookup failed'), { cause: phoneResult.error });
     if (!phoneResult.data) throw serviceError(400, 'phone_number_unavailable', 'Select an active company GHL phone number.', { phone_number_id: 'unavailable' });
     selectedPhone = phoneResult.data;
-    draft.assignment.xai_agent_id = selectedPhone.xai_agent_id;
-    draft.assignment.xai_phone_number_e164 = selectedPhone.xai_phone_number_e164;
+    const sharedVoiceResult = await db.from('sales_phone_numbers').select(PHONE_SELECT).eq('shared_voice_entrypoint', true).eq('active', true).maybeSingle();
+    if (sharedVoiceResult.error) throw Object.assign(new Error('Shared Grok Voice lookup failed'), { cause: sharedVoiceResult.error });
+    if (!sharedVoiceResult.data) throw serviceError(409, 'shared_voice_entrypoint_required', 'Configure the shared Grok Voice entrypoint before saving a salesperson.');
+    draft.assignment.xai_agent_id = sharedVoiceResult.data.xai_agent_id;
+    draft.assignment.xai_phone_number_e164 = sharedVoiceResult.data.xai_phone_number_e164;
     draft.assignment.ghl_location_id = selectedPhone.ghl_location_id;
     draft.assignment.ghl_notification_workflow_id = selectedPhone.ghl_notification_workflow_id;
   }

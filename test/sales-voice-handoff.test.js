@@ -5,6 +5,8 @@ const test = require('node:test');
 const crypto = require('node:crypto');
 const express = require('express');
 const {
+  SALES_VOICE_CONTEXT_TOOL,
+  SALES_VOICE_TOOL,
   buildSalesVoiceBootstrapPrompt,
   buildSalesVoiceAgentPrompt,
   createSalesVoiceHandoff,
@@ -53,6 +55,11 @@ test('validates exact caller-approved fields', () => {
   assert.equal(validateSalesVoiceMessage({ ...message, password: 'nope' }), null);
   assert.equal(validateSalesVoiceMessage({ ...message, to: 'other@example.com' }), null);
   assert.equal(validateSalesVoiceMessage({ ...message, message: 'Use code 123456' }), null);
+  const shared = { ...message, routing_reference: 'r'.repeat(48) };
+  assert.deepEqual(validateSalesVoiceMessage(shared), shared);
+  assert.equal(validateSalesVoiceMessage({ ...shared, routing_reference: 'spoken routing reference' }), null);
+  assert.deepEqual(SALES_VOICE_CONTEXT_TOOL.parameters.required, ['caller_phone']);
+  assert.ok(SALES_VOICE_TOOL.parameters.required.includes('routing_reference'));
 });
 
 test('requires complete fixed routes and matches bearer token without a caller-selected recipient', () => {
@@ -220,6 +227,70 @@ test('the compatibility environment route remains available only when the token 
   }
 });
 
+test('shared Grok entrypoint records a line, creates one context, and sends only to that assignment', async () => {
+  const digest = crypto.createHash('sha256').update(TOKEN).digest('hex');
+  const tables = {
+    sales_phone_assignments: [{ id: 'assignment-shared', team_member_id: 'member-shared', phone_number_id: 'phone-2', status: 'active', transfer_enabled: false }],
+    sales_team_members: [{ id: 'member-shared', display_name: 'Christopher Turean', workspace_email: 'christopher@example.com', slack_user_id: 'U987654321', status: 'active' }],
+    sales_phone_numbers: [
+      { id: 'phone-shared', e164: '+17125300281', handoff_token_sha256: digest, active: true, shared_voice_entrypoint: true },
+      { id: 'phone-2', e164: '+17198818074', active: true, shared_voice_entrypoint: false },
+    ],
+    sales_voice_configs: [{ assignment_id: 'assignment-shared', notify_email: true, notify_slack: true, notify_sms: true, greeting_override: 'You reached Christopher’s alphaScreen line.', approved_context: 'Essential and Pro.', timezone: 'America/Denver', business_hours: {}, answer_approved_faqs: true, schedule_demos: true, status: 'applied', is_current: true }],
+  };
+  let contextHash = '';
+  let claimed = false;
+  const db = {
+    from(table) {
+      const filters = [];
+      return { select() { return this; }, eq(column, value) { filters.push([column, value]); return this; }, async maybeSingle() { return { data: tables[table].find((row) => filters.every(([column, value]) => row[column] === value)) || null, error: null }; } };
+    },
+    async rpc(name, args) {
+      if (name === 'record_sales_voice_route') return { data: 'event-1', error: null };
+      if (name === 'create_sales_voice_call_context') { contextHash = args.p_token_sha256; claimed = false; return { data: [{ assignment_id: 'assignment-shared' }], error: null }; }
+      if (name === 'claim_sales_voice_call_context' && !claimed && args.p_token_sha256 === contextHash) { claimed = true; return { data: [{ assignment_id: 'assignment-shared', caller_phone_e164: '+17205551212' }], error: null }; }
+      return { data: [], error: null };
+    },
+  };
+  const sends = [];
+  const app = express();
+  app.use('/voice-handoff', createSalesVoiceHandoffRouter({
+    db,
+    env: {
+      ...env,
+      SALES_VOICE_DB_ROUTES_ENABLED: 'true',
+      SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ '+17198818074': 'https://services.leadconnectorhq.com/hooks/line-2' }),
+    },
+    service: { enabled: () => true, send: async (input, resolved) => { sends.push({ input, resolved }); return { status: 'accepted' }; } },
+  }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const base = `http://127.0.0.1:${server.address().port}/voice-handoff`;
+    const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` };
+    const registered = await fetch(`${base}/route`, { method: 'POST', headers, body: JSON.stringify({ caller_phone: '+17205551212' }) });
+    assert.equal(registered.status, 200);
+    const contextResponse = await fetch(`${base}/context`, { method: 'POST', headers, body: JSON.stringify({ caller_phone: '+17205551212' }) });
+    assert.equal(contextResponse.status, 200);
+    const context = await contextResponse.json();
+    assert.equal(context.representative_name, 'Christopher Turean');
+    assert.match(context.routing_reference, /^[A-Za-z0-9_-]{48}$/);
+    const approved = { ...message, routing_reference: context.routing_reference };
+    assert.equal((await fetch(base, { method: 'POST', headers, body: JSON.stringify(approved) })).status, 200);
+    assert.equal(sends[0].resolved.repName, 'Christopher Turean');
+    assert.equal(Object.hasOwn(sends[0].input, 'routing_reference'), false);
+    assert.equal((await fetch(base, { method: 'POST', headers, body: JSON.stringify(approved) })).status, 409);
+    assert.equal(sends.length, 1);
+    const secondContextResponse = await fetch(`${base}/context`, { method: 'POST', headers, body: JSON.stringify({ caller_phone: '+17205551212' }) });
+    const secondContext = await secondContextResponse.json();
+    const mismatchedPhone = { ...message, callback_phone: '+17205559999', routing_reference: secondContext.routing_reference };
+    assert.equal((await fetch(base, { method: 'POST', headers, body: JSON.stringify(mismatchedPhone) })).status, 409);
+    assert.equal(sends.length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('a route fails closed unless email, Slack, and GHL text are all enabled', async () => {
   const calls = [];
   const emailOnlyRoute = {
@@ -349,7 +420,8 @@ test('agent prompt keeps implementation details out of speech and requires conse
 
 test('reusable Grok bootstrap prompt loads current line context and keeps tool names out of speech', () => {
   const prompt = buildSalesVoiceBootstrapPrompt();
-  assert.match(prompt, /Before speaking, use the configured context action once/);
+  assert.match(prompt, /Then use the configured context action once/);
+  assert.match(prompt, /routing_reference exactly/);
   assert.match(prompt, /representative_name/);
   assert.match(prompt, /Never say action, tool, or function names/);
   assert.match(prompt, /explicit yes/);

@@ -165,3 +165,10 @@ test('provider checks fail closed until reusable line setup and all notification
   assert.equal((await verifySlack({ ...record, config: { ...record.config, notify_slack: false } }, env, async () => assert.fail('must not call Slack'))).status, 'action_required');
   assert.equal((await syncGhl(record, { ...env, SALES_TEAM_PROVIDER_SYNC_ENABLED: 'false' }, async () => assert.fail('must not call GHL'))).status, 'action_required');
 });
+
+test('Grok readiness comes from the shared entrypoint instead of the selected GHL line', async () => {
+  const pendingLine = { ...record.phone, xai_setup_status: 'pending', xai_agent_id: null, xai_phone_number_e164: null };
+  const result = await verifyXai({ ...record, phone: pendingLine, shared_voice_phone: record.phone });
+  assert.equal(result.status, 'synced');
+  assert.equal(result.reference, 'agent_example');
+});

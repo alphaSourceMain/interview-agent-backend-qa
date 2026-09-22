@@ -26,6 +26,8 @@ const ASSIGNMENT_SELECT = 'id,team_member_id,phone_number_id,xai_agent_id,xai_ph
 const CONFIG_SELECT = 'id,assignment_id,version,is_current,status,voice_id,greeting_override,approved_context,timezone,business_hours,answer_approved_faqs,schedule_demos,notify_slack,notify_sms,notify_email,generated_prompt,prompt_checksum,created_at,applied_at';
 const JOB_SELECT = 'id,team_member_id,assignment_id,voice_config_id,provider,operation,status,attempt_count,provider_reference,last_error_code,last_error_detail,created_at,updated_at,completed_at';
 const DRAFT_SELECT = 'team_member_id,payload,generated_prompt,prompt_checksum,created_at,updated_at';
+const GHL_BINDING_SELECT = 'id,contact_id,opportunity_id,pipeline_id,provider_owner_user_id,sales_team_member_id,sales_rep_user_id,purchase_intent_id,status,company_name,contact_first_name,contact_last_name,contact_email,opportunity_name,imported_at,linked_at,won_at,last_sync_at,last_error_code,last_error_detail,manual_review_required,updated_at';
+const GHL_DELIVERY_SELECT = 'id,event_type,event_key,purchase_intent_id,status,attempt_count,max_attempts,next_attempt_at,delivered_at,external_message_id,external_channel_id,last_error,manual_review_required,created_at,updated_at';
 
 function serviceError(status, code, detail, fields) {
   return Object.assign(new Error(detail), { status, code, detail, fields });
@@ -238,13 +240,15 @@ async function query(db, table, select, mutate) {
 
 async function loadAdminSalesTeam({ db }) {
   if (!db) throw new Error('Database is not configured');
-  const [members, allPhones, assignments, configs, jobs, drafts] = await Promise.all([
+  const [members, allPhones, assignments, configs, jobs, drafts, ghlBindings, ghlDeliveries] = await Promise.all([
     query(db, 'sales_team_members', MEMBER_SELECT, (q) => q.order('display_name', { ascending: true })),
     query(db, 'sales_phone_numbers', PHONE_SELECT, (q) => q.order('e164', { ascending: true })),
     query(db, 'sales_phone_assignments', ASSIGNMENT_SELECT, (q) => q.order('created_at', { ascending: false })),
     query(db, 'sales_voice_configs', CONFIG_SELECT, (q) => q.eq('is_current', true)),
     query(db, 'sales_integration_sync_jobs', JOB_SELECT, (q) => q.order('created_at', { ascending: false }).limit(500)),
     query(db, 'sales_team_config_drafts', DRAFT_SELECT, (q) => q.order('updated_at', { ascending: false })),
+    query(db, 'ghl_sales_deal_bindings', GHL_BINDING_SELECT, (q) => q.order('updated_at', { ascending: false }).limit(250)),
+    query(db, 'sales_integration_deliveries', GHL_DELIVERY_SELECT, (q) => q.eq('integration', 'ghl').order('updated_at', { ascending: false }).limit(250)),
   ]);
   const phoneRank = new Map(FIXED_SALES_LINE_IDS.map((id, index) => [id, index]));
   const phones = allPhones.filter((phone) => phoneRank.has(phone.id)).sort((a, b) => phoneRank.get(a.id) - phoneRank.get(b.id));
@@ -291,7 +295,19 @@ async function loadAdminSalesTeam({ db }) {
       sync_jobs: jobsByMember.get(member.id) || [],
     };
   });
-  return { items, phone_numbers: phones, shared_voice_phone: sharedVoicePhone, providers: PROVIDERS, agent_bootstrap_prompt: buildSalesVoiceBootstrapPrompt() };
+  const deliveryByIntent = new Map(ghlDeliveries.map((delivery) => [delivery.purchase_intent_id, delivery]));
+  const ghlSalesSync = ghlBindings.map((binding) => ({
+    ...binding,
+    delivery: deliveryByIntent.get(binding.purchase_intent_id) || null,
+  }));
+  return {
+    items,
+    phone_numbers: phones,
+    shared_voice_phone: sharedVoicePhone,
+    providers: PROVIDERS,
+    agent_bootstrap_prompt: buildSalesVoiceBootstrapPrompt(),
+    ghl_sales_sync: ghlSalesSync,
+  };
 }
 
 async function loadMemberRecord({ db, memberId }) {

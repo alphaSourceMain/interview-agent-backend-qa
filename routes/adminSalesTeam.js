@@ -1,6 +1,8 @@
 'use strict';
 
 const express = require('express');
+const { reconcileSalesWonDeliveries } = require('../src/lib/salesIntegrations');
+const { recordGhlSyncEvent } = require('../src/lib/ghlSalesIntegration');
 const {
   applySalesTeamMember,
   deactivateSalesTeamMember,
@@ -112,6 +114,79 @@ function createAdminSalesTeamRouter({ db } = {}) {
     try {
       const phone = await saveSalesLineSetup({ db, phoneId: req.params.phoneId, body: req.body || {}, actorId: req.user?.id || null });
       return res.json({ ok: true, phone });
+    } catch (error) {
+      return respondError(req, res, error);
+    }
+  });
+
+  router.post('/ghl-sales-sync/reconcile', async (req, res) => {
+    try {
+      const summary = await reconcileSalesWonDeliveries({ db, limit: 100, logger: console });
+      await recordGhlSyncEvent(db, {
+        direction: 'admin',
+        eventType: 'reconcile_requested',
+        idempotencyKey: `admin:reconcile:${req.request_id || Date.now()}`,
+        status: 'completed',
+        safeMetadata: {
+          actor_user_id: req.user?.id || null,
+          scanned: summary.scanned,
+          enqueued: summary.enqueued,
+          failed: summary.failed,
+        },
+      });
+      return res.json({ ok: true, summary });
+    } catch (error) {
+      return respondError(req, res, error);
+    }
+  });
+
+  router.post('/ghl-sales-sync/:deliveryId/retry', async (req, res) => {
+    try {
+      const deliveryId = String(req.params.deliveryId || '').trim();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deliveryId)) {
+        throw Object.assign(new Error('Choose a valid GHL delivery.'), { status: 400, code: 'ghl_delivery_id_invalid', detail: 'Choose a valid GHL delivery.' });
+      }
+      const { data: delivery, error: lookupError } = await db.from('sales_integration_deliveries')
+        .select('id,purchase_intent_id,status')
+        .eq('id', deliveryId)
+        .eq('integration', 'ghl')
+        .maybeSingle();
+      if (lookupError) throw Object.assign(new Error('GHL delivery lookup failed'), { cause: lookupError });
+      if (!delivery) throw Object.assign(new Error('GHL delivery not found.'), { status: 404, code: 'ghl_delivery_not_found', detail: 'GHL delivery not found.' });
+      if (delivery.status === 'delivered') {
+        throw Object.assign(new Error('This GHL delivery already completed.'), { status: 409, code: 'ghl_delivery_already_completed', detail: 'This GHL delivery already completed.' });
+      }
+      if (delivery.status !== 'failed') {
+        throw Object.assign(new Error('This GHL delivery is already pending or processing.'), { status: 409, code: 'ghl_delivery_retry_not_available', detail: 'This GHL delivery is already pending or processing.' });
+      }
+      const now = new Date().toISOString();
+      const { error: resetError } = await db.from('sales_integration_deliveries').update({
+        status: 'retry',
+        next_attempt_at: now,
+        locked_at: null,
+        lock_token: null,
+        last_error: null,
+        manual_review_required: false,
+        updated_at: now,
+      }).eq('id', delivery.id).eq('integration', 'ghl');
+      if (resetError) throw Object.assign(new Error('GHL delivery retry failed'), { cause: resetError });
+      const { error: bindingError } = await db.from('ghl_sales_deal_bindings').update({
+        status: 'won_pending',
+        last_error_code: null,
+        last_error_detail: null,
+        manual_review_required: false,
+        updated_at: now,
+      }).eq('purchase_intent_id', delivery.purchase_intent_id);
+      if (bindingError) throw Object.assign(new Error('GHL binding retry failed'), { cause: bindingError });
+      await recordGhlSyncEvent(db, {
+        purchaseIntentId: delivery.purchase_intent_id,
+        direction: 'admin',
+        eventType: 'delivery_retry_requested',
+        idempotencyKey: `admin:retry:${delivery.id}:${req.request_id || Date.now()}`,
+        status: 'completed',
+        safeMetadata: { delivery_id: delivery.id, actor_user_id: req.user?.id || null },
+      });
+      return res.json({ ok: true, delivery_id: delivery.id });
     } catch (error) {
       return respondError(req, res, error);
     }

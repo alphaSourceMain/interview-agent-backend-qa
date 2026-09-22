@@ -2,10 +2,13 @@
 
 const crypto = require('node:crypto');
 const { supabaseAdmin } = require('./supabaseClient');
+const { ghlSalesConfiguration, markGhlOpportunityWon, recordGhlSyncEvent } = require('./ghlSalesIntegration');
 
 const SALES_WON_EVENT_TYPE = 'sales_won';
 const SALES_WON_REP_DM_EVENT_TYPE = 'sales_won_rep_dm';
 const SLACK_INTEGRATION = 'slack';
+const GHL_INTEGRATION = 'ghl';
+const GHL_SALES_WON_EVENT_TYPE = 'sales_won';
 const DEFAULT_BATCH_SIZE = 10;
 const MAX_RECONCILE_ROWS = 100;
 const RETRY_DELAYS_SECONDS = [60, 300, 900, 3600, 10800, 21600, 21600, 21600];
@@ -117,11 +120,37 @@ function validSlackUserId(value) {
 async function loadSalesWonIntent(db, purchaseIntentId) {
   const { data, error } = await db
     .from('public_purchase_intents')
-    .select('id,status,channel,activated_at,client_id,company_legal_name,company_dba,selected_plan_key,selected_billing_cadence,created_by_user_id,created_by_email,platform_fee_cents,promotion_discount_cents,initial_payment_cents,sales_won_enqueued_at,sales_rep_slack_enqueued_at')
+    .select('id,status,channel,activated_at,client_id,agreement_id,ghl_contact_id,ghl_opportunity_id,stripe_checkout_session_id,company_legal_name,company_dba,selected_plan_key,selected_billing_cadence,created_by_user_id,created_by_email,platform_fee_cents,promotion_discount_cents,initial_payment_cents,sales_won_enqueued_at,sales_rep_slack_enqueued_at')
     .eq('id', purchaseIntentId)
     .maybeSingle();
   if (error) throw new Error(error.message || 'Sales-won intent lookup failed');
   return data || null;
+}
+
+async function loadGhlSalesContext(db, intent) {
+  if (!intent?.agreement_id || !intent?.ghl_contact_id || !intent?.ghl_opportunity_id) return null;
+  const [{ data: agreement, error: agreementError }, { data: binding, error: bindingError }] = await Promise.all([
+    db.from('membership_agreements')
+      .select('id,status,checkout_status,checkout_session_id,checkout_paid_at,is_current')
+      .eq('id', intent.agreement_id)
+      .maybeSingle(),
+    db.from('ghl_sales_deal_bindings')
+      .select('id,location_id,contact_id,opportunity_id,pipeline_id,ready_stage_id,provider_owner_user_id,sales_team_member_id,sales_rep_user_id,purchase_intent_id,status,manual_review_required')
+      .eq('purchase_intent_id', intent.id)
+      .maybeSingle()
+  ]);
+  if (agreementError) throw new Error(agreementError.message || 'Sales agreement lookup failed');
+  if (bindingError) throw new Error(bindingError.message || 'GHL sales binding lookup failed');
+  return { agreement: agreement || null, binding: binding || null };
+}
+
+function agreementIsSignedAndPaid(agreement) {
+  return Boolean(
+    agreement?.id &&
+    cleanText(agreement.status, 40).toLowerCase() === 'signed' &&
+    cleanText(agreement.checkout_status, 40).toLowerCase() === 'paid' &&
+    cleanText(agreement.checkout_paid_at, 80)
+  );
 }
 
 async function loadSalesRep(db, userId) {
@@ -188,8 +217,31 @@ async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
       next_attempt_at: new Date().toISOString()
     });
   }
+  let ghlContext = null;
+  let ghlStatus = null;
+  if (intent.ghl_contact_id && intent.ghl_opportunity_id) {
+    ghlContext = await loadGhlSalesContext(db, intent);
+    if (!ghlContext?.binding || !agreementIsSignedAndPaid(ghlContext.agreement)) {
+      ghlStatus = !ghlContext?.binding ? 'ghl_binding_missing' : 'agreement_not_signed_and_paid';
+    } else {
+      rows.push({
+        integration: GHL_INTEGRATION,
+        event_type: GHL_SALES_WON_EVENT_TYPE,
+        event_key: `ghl_sales_won:${intent.id}`,
+        purchase_intent_id: intent.id,
+        payload: {
+          schema_version: 1,
+          binding_id: ghlContext.binding.id,
+          opportunity_id: ghlContext.binding.opportunity_id,
+          contact_id: ghlContext.binding.contact_id
+        },
+        status: 'pending',
+        next_attempt_at: new Date().toISOString()
+      });
+    }
+  }
 
-  const result = { enqueued: false, status: 'already_enqueued', team: false, rep_dm: false };
+  const result = { enqueued: false, status: ghlStatus || 'already_enqueued', team: false, rep_dm: false, ghl: false };
   for (const row of rows) {
     const { data, error } = await db.from('sales_integration_deliveries').insert(row).select('id,status').maybeSingle();
     const duplicate = error && (cleanText(error.code, 40) === '23505' || /duplicate/i.test(cleanText(error.message, 500)));
@@ -197,8 +249,9 @@ async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
     if (!error) {
       result.enqueued = true;
       result.status = data?.status || 'pending';
-      if (row.event_type === SALES_WON_EVENT_TYPE) result.team = true;
+      if (row.integration === SLACK_INTEGRATION && row.event_type === SALES_WON_EVENT_TYPE) result.team = true;
       if (row.event_type === SALES_WON_REP_DM_EVENT_TYPE) result.rep_dm = true;
+      if (row.integration === GHL_INTEGRATION) result.ghl = true;
     }
   }
 
@@ -254,12 +307,24 @@ async function reconcileSalesWonDeliveries(options = {}) {
     dmRows = Array.isArray(data) ? data : [];
   }
 
+  const { data: ghlRows, error: ghlError } = await db
+    .from('public_purchase_intents')
+    .select('id')
+    .eq('channel', 'sales_assisted')
+    .eq('status', 'completed')
+    .not('activated_at', 'is', null)
+    .not('ghl_opportunity_id', 'is', null)
+    .order('activated_at', { ascending: true })
+    .limit(limit);
+  if (ghlError) throw new Error(ghlError.message || 'GHL sales reconciliation lookup failed');
+
   const candidateIds = [...new Set([
     ...(Array.isArray(teamRows) ? teamRows : []).map((row) => row.id),
-    ...dmRows.map((row) => row.id)
+    ...dmRows.map((row) => row.id),
+    ...(Array.isArray(ghlRows) ? ghlRows : []).map((row) => row.id)
   ].filter(Boolean))];
 
-  const summary = { scanned: 0, enqueued: 0, existing: 0, pending_activation: 0, failed: 0 };
+  const summary = { scanned: 0, enqueued: 0, existing: 0, pending_activation: 0, pending_agreement_or_binding: 0, failed: 0 };
   for (const purchaseIntentId of candidateIds) {
     summary.scanned += 1;
     try {
@@ -267,6 +332,7 @@ async function reconcileSalesWonDeliveries(options = {}) {
       if (result.enqueued) summary.enqueued += 1;
       else if (result.status === 'already_enqueued') summary.existing += 1;
       else if (result.status === 'activation_pending') summary.pending_activation += 1;
+      else if (['ghl_binding_missing', 'agreement_not_signed_and_paid'].includes(result.status)) summary.pending_agreement_or_binding += 1;
     } catch (error) {
       summary.failed += 1;
       options.logger?.warn?.('[sales-integrations] reconciliation_enqueue_failed', {
@@ -362,39 +428,171 @@ async function updateClaimedDelivery(db, delivery, payload) {
   if (error) throw new Error(error.message || 'Sales integration delivery update failed');
 }
 
+async function processGhlSalesWonDelivery(db, delivery, options = {}) {
+  const intent = await loadSalesWonIntent(db, delivery.purchase_intent_id);
+  if (
+    !intent?.id ||
+    cleanText(intent.channel, 40).toLowerCase() !== 'sales_assisted' ||
+    cleanText(intent.status, 40).toLowerCase() !== 'completed' ||
+    !cleanText(intent.activated_at, 80)
+  ) {
+    const error = new Error('The alphaScreen sale is no longer eligible for a GHL Won update.');
+    error.code = 'ghl_sale_not_eligible';
+    error.retryable = false;
+    error.manualReview = true;
+    throw error;
+  }
+  if (!(await clientIsActivated(db, intent.client_id))) {
+    const error = new Error('The alphaScreen client is not active.');
+    error.code = 'ghl_client_not_active';
+    error.retryable = false;
+    error.manualReview = true;
+    throw error;
+  }
+  const context = await loadGhlSalesContext(db, intent);
+  if (!agreementIsSignedAndPaid(context?.agreement)) {
+    const error = new Error('The alphaScreen agreement is not both signed and paid.');
+    error.code = 'ghl_agreement_not_signed_and_paid';
+    error.retryable = false;
+    error.manualReview = true;
+    throw error;
+  }
+  if (
+    !context?.binding?.id ||
+    context.binding.id !== delivery.payload?.binding_id ||
+    context.binding.purchase_intent_id !== intent.id ||
+    context.binding.manual_review_required
+  ) {
+    const error = new Error('The GHL mapping requires administrator review.');
+    error.code = 'ghl_binding_invalid';
+    error.retryable = false;
+    error.manualReview = true;
+    throw error;
+  }
+
+  const startedAt = new Date().toISOString();
+  const { error: pendingError } = await db.from('ghl_sales_deal_bindings').update({
+    status: context.binding.status === 'won' ? 'won' : 'won_pending',
+    last_error_code: null,
+    last_error_detail: null,
+    updated_at: startedAt
+  }).eq('id', context.binding.id).eq('purchase_intent_id', intent.id);
+  if (pendingError) throw new Error(pendingError.message || 'GHL binding status update failed');
+  await recordGhlSyncEvent(db, {
+    bindingId: context.binding.id,
+    purchaseIntentId: intent.id,
+    direction: 'outbound',
+    eventType: 'opportunity_won_attempt',
+    idempotencyKey: `outbound:${delivery.id}:attempt:${delivery.attempt_count}`,
+    status: 'received',
+    safeMetadata: { delivery_id: delivery.id, attempt_count: Number(delivery.attempt_count || 0) }
+  });
+  const result = await markGhlOpportunityWon(delivery, { intent, ...context }, options);
+  const completedAt = new Date().toISOString();
+  const { error: bindingError } = await db.from('ghl_sales_deal_bindings').update({
+    status: 'won',
+    won_at: completedAt,
+    last_sync_at: completedAt,
+    last_error_code: null,
+    last_error_detail: null,
+    manual_review_required: false,
+    updated_at: completedAt
+  }).eq('id', context.binding.id).eq('purchase_intent_id', intent.id);
+  if (bindingError) throw new Error(bindingError.message || 'GHL binding completion update failed');
+  await recordGhlSyncEvent(db, {
+    bindingId: context.binding.id,
+    purchaseIntentId: intent.id,
+    direction: 'outbound',
+    eventType: 'opportunity_won',
+    idempotencyKey: `outbound:${delivery.id}:completed`,
+    status: 'completed',
+    safeMetadata: { delivery_id: delivery.id, note_created: result.noteCreated === true }
+  });
+  return {
+    external_message_id: result.noteId || null,
+    external_channel_id: result.opportunityId
+  };
+}
+
+async function markGhlDeliveryFailure(db, delivery, error) {
+  const bindingId = cleanText(delivery?.payload?.binding_id, 80);
+  if (!bindingId) return;
+  const manualReview = error?.manualReview === true || error?.retryable === false;
+  const now = new Date().toISOString();
+  const { error: updateError } = await db.from('ghl_sales_deal_bindings').update({
+    status: manualReview ? 'exception' : 'won_pending',
+    last_sync_at: now,
+    last_error_code: cleanText(error?.code || 'ghl_delivery_failed', 80),
+    last_error_detail: cleanText(error?.message || 'GHL delivery failed', 500),
+    manual_review_required: manualReview,
+    updated_at: now
+  }).eq('id', bindingId).eq('purchase_intent_id', delivery.purchase_intent_id);
+  if (updateError) throw new Error(updateError.message || 'GHL binding failure update failed');
+  await recordGhlSyncEvent(db, {
+    bindingId,
+    purchaseIntentId: delivery.purchase_intent_id,
+    direction: 'outbound',
+    eventType: 'opportunity_won',
+    idempotencyKey: `outbound:${delivery.id}:failure:${delivery.attempt_count}`,
+    status: manualReview ? 'manual_review' : 'retrying',
+    safeMetadata: { delivery_id: delivery.id, attempt_count: Number(delivery.attempt_count || 0) },
+    errorCode: cleanText(error?.code || 'ghl_delivery_failed', 80),
+    errorDetail: cleanText(error?.message || 'GHL delivery failed', 500)
+  });
+}
+
 async function processSalesIntegrationDeliveries(options = {}) {
   const db = options.db || supabaseAdmin;
   const logger = options.logger || console;
   const env = options.env || process.env;
-  const config = slackConfiguration(env);
   const reconciliation = await reconcileSalesWonDeliveries({ db, logger, limit: options.reconcileLimit });
-  if (!config.configured) {
-    return { ok: true, configured: false, reconciliation, claimed: 0, delivered: 0, retrying: 0, failed: 0 };
-  }
+  const slackConfig = slackConfiguration(env);
+  const ghlConfig = ghlSalesConfiguration(env);
+  const ghlConfigured = ghlConfig.configured && ghlConfig.syncEnabled;
 
   const batchSize = Math.max(1, Math.min(Number(options.limit || DEFAULT_BATCH_SIZE), 50));
   const lockToken = crypto.randomUUID();
   const nowIso = new Date().toISOString();
-  const { data, error } = await db.rpc('claim_sales_integration_deliveries', {
-    p_limit: batchSize,
-    p_lock_token: lockToken,
-    p_now: nowIso,
-    p_integration: SLACK_INTEGRATION
-  });
-  if (error) throw new Error(error.message || 'Sales integration deliveries could not be claimed');
+  const claimed = [];
+  for (const integration of [
+    ...(slackConfig.configured ? [SLACK_INTEGRATION] : []),
+    ...(ghlConfigured ? [GHL_INTEGRATION] : []),
+  ]) {
+    const { data, error } = await db.rpc('claim_sales_integration_deliveries', {
+      p_limit: batchSize,
+      p_lock_token: lockToken,
+      p_now: nowIso,
+      p_integration: integration
+    });
+    if (error) throw new Error(error.message || `${integration} sales integration deliveries could not be claimed`);
+    claimed.push(...(Array.isArray(data) ? data : []));
+  }
 
   const summary = {
     ok: true,
-    configured: true,
+    configured: {
+      slack: slackConfig.configured,
+      ghl: ghlConfigured
+    },
     reconciliation,
-    claimed: Array.isArray(data) ? data.length : 0,
+    claimed: claimed.length,
     delivered: 0,
     retrying: 0,
     failed: 0
   };
-  for (const delivery of Array.isArray(data) ? data : []) {
+  for (const delivery of claimed) {
     try {
-      const result = await postSlackMessage(delivery, { env, fetchImpl: options.fetchImpl, timeoutMs: options.timeoutMs });
+      let result;
+      if (delivery.integration === SLACK_INTEGRATION) {
+        result = await postSlackMessage(delivery, { env, fetchImpl: options.fetchImpl, timeoutMs: options.timeoutMs });
+      } else if (delivery.integration === GHL_INTEGRATION && delivery.event_type === GHL_SALES_WON_EVENT_TYPE) {
+        result = await processGhlSalesWonDelivery(db, delivery, { env, fetchImpl: options.fetchImpl, timeoutMs: options.timeoutMs });
+      } else {
+        const unsupported = new Error('Unsupported sales integration delivery.');
+        unsupported.code = 'sales_integration_unsupported';
+        unsupported.retryable = false;
+        throw unsupported;
+      }
       await updateClaimedDelivery(db, delivery, {
         status: 'delivered',
         delivered_at: new Date().toISOString(),
@@ -409,17 +607,35 @@ async function processSalesIntegrationDeliveries(options = {}) {
       const exhausted = Number(delivery.attempt_count || 0) >= Number(delivery.max_attempts || 0);
       const retryable = deliveryError?.retryable !== false && !exhausted;
       const delaySeconds = retryDelaySeconds(delivery.attempt_count, deliveryError);
+      if (delivery.integration === GHL_INTEGRATION) {
+        try {
+          await markGhlDeliveryFailure(db, delivery, {
+            ...deliveryError,
+            code: deliveryError?.code,
+            message: deliveryError?.message,
+            retryable,
+            manualReview: deliveryError?.manualReview === true || !retryable
+          });
+        } catch (failureUpdateError) {
+          logger.error?.('[sales-integrations] ghl_failure_audit_failed', {
+            delivery_id: delivery.id,
+            error: cleanText(failureUpdateError?.message, 160)
+          });
+        }
+      }
       await updateClaimedDelivery(db, delivery, {
         status: retryable ? 'retry' : 'failed',
         next_attempt_at: new Date(Date.now() + delaySeconds * 1000).toISOString(),
         locked_at: null,
         lock_token: null,
-        last_error: cleanText(deliveryError?.code || deliveryError?.message || 'delivery_failed', 500)
+        last_error: cleanText(deliveryError?.code || deliveryError?.message || 'delivery_failed', 500),
+        manual_review_required: delivery.integration === GHL_INTEGRATION && !retryable
       });
       if (retryable) summary.retrying += 1;
       else summary.failed += 1;
-      logger.warn?.('[sales-integrations] slack_delivery_failed', {
+      logger.warn?.('[sales-integrations] delivery_failed', {
         delivery_id: delivery.id,
+        integration: delivery.integration,
         attempt_count: delivery.attempt_count,
         retryable,
         error: cleanText(deliveryError?.code || deliveryError?.message, 160)
@@ -430,12 +646,17 @@ async function processSalesIntegrationDeliveries(options = {}) {
 }
 
 module.exports = {
+  GHL_INTEGRATION,
+  GHL_SALES_WON_EVENT_TYPE,
   SALES_WON_EVENT_TYPE,
   SALES_WON_REP_DM_EVENT_TYPE,
   buildSalesWonPayload,
   buildSlackSalesWonMessage,
   buildSlackSalesRepMessage,
   enqueueSalesWonDelivery,
+  agreementIsSignedAndPaid,
+  loadGhlSalesContext,
+  processGhlSalesWonDelivery,
   reconcileSalesWonDeliveries,
   postSlackMessage,
   processSalesIntegrationDeliveries,

@@ -51,6 +51,7 @@ function normalizeSalesDraft(input = {}) {
     buyer_title: trimText(input.buyer_title, 120),
     candidate_assistance_name: trimText(input.candidate_assistance_name, 160),
     candidate_assistance_email: trimText(input.candidate_assistance_email, 254).toLowerCase(),
+    ghl_import_id: trimText(input.ghl_import_id, 64),
     ghl_contact_id: trimText(input.ghl_contact_id, 160),
     ghl_opportunity_id: trimText(input.ghl_opportunity_id, 160),
     sales_note: trimText(input.sales_note, 1200),

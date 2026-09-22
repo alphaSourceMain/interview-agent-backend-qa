@@ -86,15 +86,6 @@ function bool(value, fallback) {
   return typeof value === 'boolean' ? value : fallback;
 }
 
-function int(value, fallback, min, max) {
-  const parsed = Number(value);
-  if (value == null || value === '') return fallback;
-  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
-    throw serviceError(400, 'ring_seconds_invalid', `Ring time must be between ${min} and ${max} seconds.`, { ring_seconds: 'invalid' });
-  }
-  return parsed;
-}
-
 function setupStatus(value, field) {
   const normalized = text(value || 'pending', 16).toLowerCase();
   if (!['pending', 'verified', 'failed'].includes(normalized)) {
@@ -172,7 +163,7 @@ function normalizeDraft(body = {}, current = {}) {
     xai_phone_number_e164: e164(body.xai_phone_number_e164 ?? current.assignment?.xai_phone_number_e164, 'xai_phone_number'),
     ghl_location_id: nullableText(body.ghl_location_id ?? current.assignment?.ghl_location_id, 160),
     ghl_notification_workflow_id: nullableText(body.ghl_notification_workflow_id ?? current.assignment?.ghl_notification_workflow_id, 160),
-    ring_seconds: int(body.ring_seconds ?? current.assignment?.ring_seconds, 20, 10, 25),
+    ring_seconds: 20,
     call_connect_required: true,
     transfer_enabled: bool(body.transfer_enabled, current.assignment?.transfer_enabled === true),
     backup_transfer_phone_e164: null,
@@ -211,6 +202,7 @@ function validateTransferDestinations(draft, phone) {
 function readinessFor(record) {
   const missing = [];
   const { member, assignment, config, phone } = record;
+  if (config?.notify_slack !== true || config?.notify_sms !== true || config?.notify_email !== true) missing.push('Slack, GHL text, and Workspace email');
   if (!member.workspace_email) missing.push('Workspace email');
   if (!member.mobile_phone_e164) missing.push('Mobile number');
   if (!member.sales_rep_user_id) missing.push('Sales dashboard user');
@@ -397,26 +389,33 @@ async function activeMemberForLine(db, phoneId) {
 async function reconcileGhlChangesAfterDatabaseFailure(db, changes, env, fetchImpl) {
   const unresolved = [];
   for (const change of [...changes].reverse()) {
-    let result;
+    let restored;
+    let reapplied = { status: 'synced' };
     try {
+      restored = await restoreGhlRouting(change, env, fetchImpl);
       const activeMember = await activeMemberForLine(db, change.record.phone.id);
-      result = activeMember
-        ? await applyGhlRouting(change.record, {
+      if (activeMember) {
+        reapplied = await applyGhlRouting(change.record, {
           mobile: activeMember.mobile_phone_e164,
           ghlUserId: activeMember.ghl_user_id,
           workspaceEmail: activeMember.workspace_email,
-        }, env, fetchImpl)
-        : await restoreGhlRouting(change, env, fetchImpl);
+        }, env, fetchImpl);
+      }
     } catch {
-      result = { status: 'failed' };
+      restored = { status: 'failed' };
+      reapplied = { status: 'failed' };
     }
-    if (result.status !== 'synced') unresolved.push(change.record.phone?.e164 || 'unknown line');
+    if (restored.status !== 'synced' || reapplied.status !== 'synced') unresolved.push(change.record.phone?.e164 || 'unknown line');
   }
   return unresolved;
 }
 
 async function applySalesTeamMember({ db, memberId, replaceTeamMemberId = null, actorId, env = process.env, fetchImpl = global.fetch }) {
   const record = await loadMemberRecord({ db, memberId });
+  const pendingConfig = record.pending_draft?.payload?.config;
+  if (pendingConfig && (pendingConfig.notify_slack !== true || pendingConfig.notify_sms !== true || pendingConfig.notify_email !== true)) {
+    throw serviceError(409, 'sales_notification_channels_required', 'Slack, GHL text, and Workspace email notifications must all be enabled before routing can be applied.', { notifications: 'required' });
+  }
   const readiness = readinessFor(record);
   if (!readiness.ready) {
     throw serviceError(409, 'sales_team_configuration_incomplete', 'Complete the required setup before applying these changes.', { missing: readiness.missing });
@@ -499,6 +498,8 @@ async function applySalesTeamMember({ db, memberId, replaceTeamMemberId = null, 
     if (/sales_voice_line_token_stale/i.test(detail)) throw serviceError(409, 'sales_voice_line_token_stale', 'The company line token changed during this request. Verify the updated Grok line and apply again.');
     if (/sales_team_member_inactive/i.test(detail)) throw serviceError(409, 'sales_team_member_inactive', 'Reactivate this salesperson before applying their configuration.');
     if (/sales_phone_replacement_stale/i.test(detail)) throw serviceError(409, 'sales_phone_replacement_stale', 'The line assignment changed. Refresh and review the current salesperson before applying routing.');
+    if (/sales_notification_channels_required/i.test(detail)) throw serviceError(409, 'sales_notification_channels_required', 'Slack, GHL text, and Workspace email notifications must all be enabled before routing can be applied.', { notifications: 'required' });
+    if (/sales_rep_not_found/i.test(detail)) throw serviceError(409, 'sales_rep_not_found', 'Create the sales-dashboard user before applying routing.', { sales_rep_user_id: 'not_found' });
     if (result.error.code === '23505') throw serviceError(409, 'sales_team_assignment_conflict', 'That salesperson, GHL number, or Grok agent is already active on another assignment.');
     throw Object.assign(new Error('Sales team configuration apply failed'), { cause: result.error });
   }

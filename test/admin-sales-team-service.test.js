@@ -135,6 +135,7 @@ function providerFake() {
       'mobile-value-1': { id: 'mobile-value-1', name: phone.ghl_mobile_custom_value_name, value: '+13035550001' },
       'user-value-1': { id: 'user-value-1', name: phone.ghl_user_custom_value_name, value: 'old-user' },
     },
+    writes: [],
   };
   const fetchImpl = async (url, options) => {
     if (url.includes('slack.com')) return { ok: true, status: 200, json: async () => ({ ok: true, user: { id: member.slack_user_id, deleted: false } }) };
@@ -143,11 +144,13 @@ function providerFake() {
       if (userId !== state.user.id) state.user = { id: userId, email: 'winner@alphasourceai.com', phone: '+13035550002', active: true, roles: { locationIds: ['location-1'] } };
       if (options.method === 'GET') return { ok: true, status: 200, json: async () => ({ user: { ...state.user } }) };
       state.user.phone = JSON.parse(options.body).phone;
+      state.writes.push({ type: 'user', userId, phone: state.user.phone });
       return { ok: true, status: 200, json: async () => ({ user: { ...state.user } }) };
     }
     const id = url.split('/').pop();
     if (options.method === 'GET') return { ok: true, status: 200, json: async () => ({ customValue: { ...state.values[id] } }) };
     state.values[id] = { id, ...JSON.parse(options.body) };
+    state.writes.push({ type: 'value', id, value: state.values[id].value });
     return { ok: true, status: 200, json: async () => ({ customValue: { ...state.values[id] } }) };
   };
   return { state, fetchImpl };
@@ -173,6 +176,8 @@ test('completion migration adds fixed GHL user routing and service-role-only ato
   assert.match(sql, /raise exception 'sales_phone_replacement_stale'/);
   assert.match(sql, /update public\.sales_team_members[\s\S]*status = 'inactive'/);
   assert.match(sql, /update public\.sales_reps set active = false/);
+  assert.match(sql, /if not found then raise exception 'sales_rep_not_found'/);
+  assert.match(sql, /when handoff_token_sha256 is distinct from p_handoff_token_sha256 then v_now/);
   assert.match(sql, /set ghl_setup_status = 'pending'[\s\S]*ghl_user_custom_value_id is null/);
   assert.match(sql, /revoke all on function public\.apply_sales_team_configuration_v2[\s\S]*from public, anon, authenticated/);
   assert.match(sql, /revoke execute on function public\.apply_sales_team_configuration\([\s\S]*from service_role/);
@@ -181,8 +186,9 @@ test('completion migration adds fixed GHL user routing and service-role-only ato
 });
 
 test('draft normalization locks Call Connect and all three caller-message channels', () => {
-  const draft = normalizeDraft({ ...member, ...assignment, ...config });
+  const draft = normalizeDraft({ ...member, ...assignment, ...config, ring_seconds: 10 });
   assert.equal(draft.assignment.call_connect_required, true);
+  assert.equal(draft.assignment.ring_seconds, 20);
   assert.deepEqual([draft.config.notify_slack, draft.config.notify_sms, draft.config.notify_email], [true, true, true]);
   assert.throws(() => normalizeDraft({ ...member, ...assignment, ...config, notify_slack: false }), /notifications are required/i);
   assert.throws(() => normalizeDraft({ ...member, ...assignment, ...config, mobile_phone_e164: '720-555-1212' }), /\+1XXXXXXXXXX/);
@@ -195,6 +201,8 @@ test('readiness requires all rep identities and both reusable GHL routing values
   assert.equal(missing.ready, false);
   assert.ok(missing.missing.includes('Slack member'));
   assert.ok(missing.missing.includes('GHL user routing value'));
+  const notifications = readinessFor({ member, assignment, config: { ...config, notify_sms: false }, phone });
+  assert.ok(notifications.missing.includes('Slack, GHL text, and Workspace email'));
 });
 
 test('generated Grok prompt uses the rep name and never exposes delivery mechanics', () => {
@@ -246,6 +254,30 @@ test('database rejection restores the prior GHL route and user phone', async () 
   assert.equal(db.tables.sales_team_members[0].status, 'draft');
 });
 
+test('legacy notification-off drafts are rejected before any provider write', async () => {
+  const db = makeDb();
+  db.tables.sales_team_config_drafts[0].payload.config.notify_sms = false;
+  let providerCalls = 0;
+  await assert.rejects(
+    applySalesTeamMember({ db, memberId: member.id, env: applyEnv, fetchImpl: async () => { providerCalls += 1; throw new Error('must not call'); } }),
+    (error) => error.status === 409 && error.code === 'sales_notification_channels_required'
+  );
+  assert.equal(providerCalls, 0);
+  assert.equal(db.calls.length, 0);
+});
+
+test('transaction notification guard maps to a recoverable conflict after restoring GHL', async () => {
+  const db = makeDb({ applyError: { message: 'sales_notification_channels_required' } });
+  const provider = providerFake();
+  await assert.rejects(
+    applySalesTeamMember({ db, memberId: member.id, env: applyEnv, fetchImpl: provider.fetchImpl }),
+    (error) => error.status === 409 && error.code === 'sales_notification_channels_required'
+  );
+  assert.equal(provider.state.user.phone, '+13035550000');
+  assert.equal(provider.state.values['mobile-value-1'].value, '+13035550001');
+  assert.equal(provider.state.values['user-value-1'].value, 'old-user');
+});
+
 test('a concurrent database winner is reconciled into GHL instead of being overwritten by stale rollback', async () => {
   const winner = { ...member, id: '22000000-0000-4000-8000-000000000098', sales_rep_user_id: '11111111-1111-4111-8111-111111111198', display_name: 'Winning Rep', workspace_email: 'winner@alphasourceai.com', mobile_phone_e164: '+17205559898', ghl_user_id: 'ghl-user-winner', slack_user_id: 'U989898989' };
   const db = makeDb({ applyError: { code: '23505', message: 'duplicate active line' }, concurrentWinner: winner });
@@ -255,6 +287,7 @@ test('a concurrent database winner is reconciled into GHL instead of being overw
   assert.equal(provider.state.user.phone, winner.mobile_phone_e164);
   assert.equal(provider.state.values['mobile-value-1'].value, winner.mobile_phone_e164);
   assert.equal(provider.state.values['user-value-1'].value, winner.ghl_user_id);
+  assert.ok(provider.state.writes.some((write) => write.type === 'user' && write.userId === member.ghl_user_id && write.phone === '+13035550000'));
 });
 
 test('line setup returns to pending when either managed GHL routing value changes', async () => {

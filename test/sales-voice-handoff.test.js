@@ -153,6 +153,73 @@ test('database routing takes precedence over an obsolete environment route for t
   }
 });
 
+test('a known database line fails closed instead of falling back to an obsolete environment recipient', async () => {
+  const digest = crypto.createHash('sha256').update(TOKEN).digest('hex');
+  const tables = {
+    sales_phone_assignments: [],
+    sales_team_members: [],
+    sales_phone_numbers: [{ id: 'phone-1', e164: '+17207904187', handoff_token_sha256: digest, active: true }],
+    sales_voice_configs: [],
+  };
+  const db = { from(table) { const filters = []; return { select() { return this; }, eq(column, value) { filters.push([column, value]); return this; }, async maybeSingle() { return { data: tables[table].find((row) => filters.every(([column, value]) => row[column] === value)) || null, error: null }; } }; } };
+  let sends = 0;
+  const app = express();
+  app.use('/voice-handoff', createSalesVoiceHandoffRouter({
+    db,
+    env: { ...env, SALES_VOICE_DB_ROUTES_ENABLED: 'true' },
+    service: { enabled: () => true, send: async () => { sends += 1; return { status: 'accepted' }; } },
+  }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/voice-handoff/context`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(response.status, 503);
+    assert.equal(sends, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('a database lookup error fails closed even when the environment contains the same token', async () => {
+  const db = { from() { return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: null, error: { message: 'synthetic database failure' } }; } }; } };
+  let sends = 0;
+  const app = express();
+  app.use('/voice-handoff', createSalesVoiceHandoffRouter({
+    db,
+    env: { ...env, SALES_VOICE_DB_ROUTES_ENABLED: 'true' },
+    service: { enabled: () => true, send: async () => { sends += 1; return { status: 'accepted' }; } },
+  }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/voice-handoff/context`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(response.status, 503);
+    assert.equal(sends, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('the compatibility environment route remains available only when the token is absent from the database', async () => {
+  const tables = { sales_phone_numbers: [], sales_phone_assignments: [] };
+  const db = { from(table) { const filters = []; return { select() { return this; }, eq(column, value) { filters.push([column, value]); return this; }, async maybeSingle() { return { data: tables[table].find((row) => filters.every(([column, value]) => row[column] === value)) || null, error: null }; } }; } };
+  const app = express();
+  app.use('/voice-handoff', createSalesVoiceHandoffRouter({
+    db,
+    env: { ...env, SALES_VOICE_DB_ROUTES_ENABLED: 'true' },
+    service: { enabled: () => true, send: async () => ({ status: 'accepted' }) },
+  }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/voice-handoff/context`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).representative_name, 'Michael Afesi');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('a route fails closed unless email, Slack, and GHL text are all enabled', async () => {
   const calls = [];
   const emailOnlyRoute = {

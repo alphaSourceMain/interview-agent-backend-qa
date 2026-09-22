@@ -177,14 +177,16 @@ async function routeForAuthorizationDb(authorization, db, env = process.env) {
     .eq('handoff_token_sha256', digest)
     .eq('active', true)
     .maybeSingle();
-  if (!lineResult.error && lineResult.data) {
+  if (lineResult.error) throw new Error('Sales voice line lookup failed');
+  if (lineResult.data) {
     phone = lineResult.data;
     const activeResult = await db.from('sales_phone_assignments')
       .select('id,team_member_id,phone_number_id,status,transfer_enabled,backup_transfer_phone_e164')
       .eq('phone_number_id', phone.id)
       .eq('status', 'active')
       .maybeSingle();
-    if (!activeResult.error) assignment = activeResult.data;
+    if (activeResult.error || !activeResult.data) throw new Error('Sales voice line is not assigned');
+    assignment = activeResult.data;
   }
   if (!assignment) {
     const assignmentResult = await db.from('sales_phone_assignments')
@@ -192,7 +194,8 @@ async function routeForAuthorizationDb(authorization, db, env = process.env) {
       .eq('handoff_token_sha256', digest)
       .eq('status', 'active')
       .maybeSingle();
-    if (assignmentResult.error || !assignmentResult.data) return null;
+    if (assignmentResult.error) throw new Error('Sales voice assignment lookup failed');
+    if (!assignmentResult.data) return null;
     assignment = assignmentResult.data;
   }
   const [memberResult, phoneResult] = await Promise.all([
@@ -209,7 +212,7 @@ async function routeForAuthorizationDb(authorization, db, env = process.env) {
   ]);
   const member = memberResult.data;
   phone = phoneResult.data;
-  if (memberResult.error || phoneResult.error || !member || !phone) return null;
+  if (memberResult.error || phoneResult.error || !member || !phone) throw new Error('Sales voice recipient is unavailable');
   const repName = cleanText(member.display_name, 120);
   const repEmail = cleanText(member.workspace_email, 254).toLowerCase();
   const slackUserId = cleanText(member.slack_user_id, 24);
@@ -221,7 +224,7 @@ async function routeForAuthorizationDb(authorization, db, env = process.env) {
     .eq('is_current', true)
     .maybeSingle();
   const config = configResult.data;
-  if (configResult.error || !config) return null;
+  if (configResult.error || !config) throw new Error('Sales voice configuration is unavailable');
   const notifyEmail = config.notify_email === true;
   const notifySlack = config.notify_slack === true;
   const notifySms = config.notify_sms === true;
@@ -230,7 +233,7 @@ async function routeForAuthorizationDb(authorization, db, env = process.env) {
       !repName || !validEmail(repEmail) || !validE164(ghlNumber) ||
       !validSlackUserId(slackUserId) || !ghlNotificationWebhook ||
       !validEmail(env.SALES_VOICE_FROM_EMAIL) || cleanText(env.SENDGRID_API_KEY, 500).length <= 20 ||
-      cleanText(env.SLACK_SALES_WON_BOT_TOKEN, 500).length <= 20) return null;
+      cleanText(env.SLACK_SALES_WON_BOT_TOKEN, 500).length <= 20) throw new Error('Sales voice delivery route is incomplete');
   return Object.freeze({
     routeKey: cleanText(assignment.id, 80).toLowerCase(),
     tokenHash: digest,

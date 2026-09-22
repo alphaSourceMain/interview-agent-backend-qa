@@ -273,7 +273,10 @@ begin
         xai_agent_id = nullif(p_assignment->>'xai_agent_id', ''),
         xai_phone_number_e164 = nullif(p_assignment->>'xai_phone_number_e164', ''),
         handoff_token_sha256 = p_handoff_token_sha256,
-        handoff_token_rotated_at = v_now,
+        handoff_token_rotated_at = case
+          when handoff_token_sha256 is distinct from p_handoff_token_sha256 then v_now
+          else handoff_token_rotated_at
+        end,
         ghl_location_id = nullif(p_assignment->>'ghl_location_id', ''),
         ghl_notification_workflow_id = nullif(p_assignment->>'ghl_notification_workflow_id', ''),
         ring_seconds = (p_assignment->>'ring_seconds')::integer,
@@ -309,6 +312,7 @@ begin
   set email = p_member->>'workspace_email', display_name = p_member->>'display_name',
       slack_user_id = nullif(p_member->>'slack_user_id', ''), active = true, updated_at = v_now
   where user_id = nullif(p_member->>'sales_rep_user_id', '')::uuid;
+  if not found then raise exception 'sales_rep_not_found'; end if;
 
   insert into public.sales_integration_sync_jobs (
     team_member_id, assignment_id, voice_config_id, provider, operation, status,

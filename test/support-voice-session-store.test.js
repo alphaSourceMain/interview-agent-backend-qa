@@ -72,15 +72,22 @@ test('reserve and consume failures immediately mark readiness unhealthy', async 
 });
 
 test('RPC deadline is finite and does not leak the underlying failure', async () => {
+  // The store intentionally unrefs its timeout; keep the isolated Node 20
+  // test process alive long enough to observe the deadline rejection.
+  const keepEventLoopAlive = setTimeout(() => {}, 500);
   const store = createSupportVoiceSessionStore({
     serviceDb: { rpc: () => new Promise(() => {}) },
     rpcTimeoutMs: 15,
     initialHealthy: true,
   });
-  const started = Date.now();
-  await assert.rejects(store.consume({ credentialDigest: DIGEST }), /SUPPORT_VOICE_SESSION_STORE_TIMEOUT/);
-  assert.ok(Date.now() - started < 250);
-  assert.equal(store.isHealthy(), false);
+  try {
+    const started = Date.now();
+    await assert.rejects(store.consume({ credentialDigest: DIGEST }), /SUPPORT_VOICE_SESSION_STORE_TIMEOUT/);
+    assert.ok(Date.now() - started < 250);
+    assert.equal(store.isHealthy(), false);
+  } finally {
+    clearTimeout(keepEventLoopAlive);
+  }
 });
 
 test('malformed RPC success payloads fail closed', async () => {

@@ -192,6 +192,21 @@ set search_path = public, pg_temp
 as $$
   select intent.id
   from public.public_purchase_intents as intent
+  join public.ghl_sales_deal_bindings as binding
+    on binding.purchase_intent_id = intent.id
+   and binding.opportunity_id = intent.ghl_opportunity_id
+   and binding.contact_id = intent.ghl_contact_id
+   and binding.status in ('linked', 'won_pending', 'won')
+   and binding.manual_review_required = false
+  join public.membership_agreements as agreement
+    on agreement.id = intent.agreement_id
+   and agreement.status = 'signed'
+   and agreement.checkout_status = 'paid'
+   and agreement.checkout_paid_at is not null
+  join public.clients as client
+    on client.id = intent.client_id
+   and client.billing_status = 'active'
+   and coalesce(nullif(lower(btrim(client.subscription_status)), ''), 'active') in ('active', 'trialing')
   where intent.channel = 'sales_assisted'
     and intent.status = 'completed'
     and intent.activated_at is not null

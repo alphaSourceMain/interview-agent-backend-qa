@@ -177,6 +177,20 @@ async function clientIsActivated(db, clientId) {
   return Boolean(data?.id && billingStatus === 'active' && (!subscriptionStatus || ['active', 'trialing'].includes(subscriptionStatus)));
 }
 
+async function recordTerminalGhlReconciliationState(db, intent, code) {
+  if (!intent?.id || !intent?.ghl_opportunity_id) return;
+  await recordGhlSyncEvent(db, {
+    purchaseIntentId: intent.id,
+    direction: 'outbound',
+    eventType: 'reconciliation_ineligible',
+    idempotencyKey: `reconcile:${intent.id}:${code}`,
+    status: 'manual_review',
+    safeMetadata: { reason: code },
+    errorCode: code,
+    errorDetail: 'The completed GHL-linked sale did not satisfy the server-side Won reconciliation predicates.',
+  });
+}
+
 async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
   const db = options.db || supabaseAdmin;
   const intent = options.intent || await loadSalesWonIntent(db, purchaseIntentId);
@@ -189,6 +203,7 @@ async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
     return { enqueued: false, status: 'not_eligible' };
   }
   if (!(await clientIsActivated(db, intent.client_id))) {
+    await recordTerminalGhlReconciliationState(db, intent, 'ghl_client_not_active');
     return { enqueued: false, status: 'activation_pending' };
   }
 
@@ -223,6 +238,7 @@ async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
     ghlContext = await loadGhlSalesContext(db, intent);
     if (!ghlContext?.binding || !agreementIsSignedAndPaid(ghlContext.agreement)) {
       ghlStatus = !ghlContext?.binding ? 'ghl_binding_missing' : 'agreement_not_signed_and_paid';
+      await recordTerminalGhlReconciliationState(db, intent, ghlStatus);
     } else {
       rows.push({
         integration: GHL_INTEGRATION,

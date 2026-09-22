@@ -24,6 +24,7 @@ const {
   webhookIdentifiers,
 } = require('../routes/ghlSalesWebhook');
 const {
+  enqueueSalesWonDelivery,
   processGhlSalesWonDelivery,
   reconcileSalesWonDeliveries,
 } = require('../src/lib/salesIntegrations');
@@ -123,7 +124,12 @@ class MemoryDb {
         .filter((row) => row.integration === 'ghl' && row.event_type === 'sales_won')
         .map((row) => row.purchase_intent_id));
       const data = this.tables.public_purchase_intents
-        .filter((row) => row.channel === 'sales_assisted' && row.status === 'completed' && row.activated_at && row.ghl_opportunity_id && !existing.has(row.id))
+        .filter((row) => {
+          const binding = this.tables.ghl_sales_deal_bindings.find((item) => item.purchase_intent_id === row.id && item.opportunity_id === row.ghl_opportunity_id && item.contact_id === row.ghl_contact_id && ['linked', 'won_pending', 'won'].includes(item.status) && !item.manual_review_required);
+          const agreement = this.tables.membership_agreements.find((item) => item.id === row.agreement_id && item.status === 'signed' && item.checkout_status === 'paid' && item.checkout_paid_at);
+          const client = this.tables.clients.find((item) => item.id === row.client_id && item.billing_status === 'active' && (!item.subscription_status || ['active', 'trialing'].includes(item.subscription_status)));
+          return row.channel === 'sales_assisted' && row.status === 'completed' && row.activated_at && row.ghl_opportunity_id && binding && agreement && client && !existing.has(row.id);
+        })
         .sort((left, right) => left.activated_at.localeCompare(right.activated_at))
         .slice(0, args.p_limit)
         .map((row) => ({ id: row.id }));
@@ -264,7 +270,7 @@ test('Won retry re-runs signed-and-paid predicates before any provider write', a
   assert.equal(providerCalls, 0);
 });
 
-test('GHL reconciliation skips 100 existing deliveries and enqueues the newer missing sale', async () => {
+test('GHL reconciliation skips 100 binding-less completed intents and enqueues the newer eligible sale', async () => {
   const intents = Array.from({ length: 101 }, (_, index) => ({
     id: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
     status: 'completed',
@@ -278,17 +284,9 @@ test('GHL reconciliation skips 100 existing deliveries and enqueues the newer mi
     sales_rep_slack_enqueued_at: '2026-09-22T00:00:00.000Z',
   }));
   const missing = intents[100];
-  const existingDeliveries = intents.slice(0, 100).map((intent, index) => ({
-    id: `20000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
-    integration: 'ghl',
-    event_type: 'sales_won',
-    event_key: `ghl_sales_won:${intent.id}`,
-    purchase_intent_id: intent.id,
-    status: 'delivered',
-  }));
   const db = new MemoryDb({
     public_purchase_intents: intents,
-    sales_integration_deliveries: existingDeliveries,
+    sales_integration_deliveries: [],
     sales_reps: [],
     clients: [{ id: missing.client_id, billing_status: 'active', subscription_status: 'active' }],
     membership_agreements: [{ id: missing.agreement_id, status: 'signed', checkout_status: 'paid', checkout_paid_at: '2026-09-22T12:00:00.000Z' }],
@@ -305,6 +303,36 @@ test('GHL reconciliation skips 100 existing deliveries and enqueues the newer mi
   const created = db.tables.sales_integration_deliveries.filter((row) => row.purchase_intent_id === missing.id);
   assert.equal(created.length, 1);
   assert.equal(created[0].event_key, `ghl_sales_won:${missing.id}`);
+});
+
+test('a completed GHL-linked sale that fails invariant checks persists one manual-review marker', async () => {
+  const db = new MemoryDb({
+    public_purchase_intents: [{
+      id: INTENT_ID,
+      status: 'completed',
+      channel: 'sales_assisted',
+      activated_at: '2026-09-22T12:00:00.000Z',
+      client_id: 'client_qa',
+      agreement_id: 'agreement_qa',
+      ghl_contact_id: 'contact_qa',
+      ghl_opportunity_id: 'opp_qa',
+      sales_won_enqueued_at: '2026-09-22T12:00:00.000Z',
+      sales_rep_slack_enqueued_at: '2026-09-22T12:00:00.000Z',
+    }],
+    clients: [{ id: 'client_qa', billing_status: 'active', subscription_status: 'active' }],
+    membership_agreements: [{ id: 'agreement_qa', status: 'signed', checkout_status: 'paid', checkout_paid_at: '2026-09-22T12:00:00.000Z' }],
+    ghl_sales_deal_bindings: [],
+    ghl_sales_sync_events: [],
+    sales_integration_deliveries: [],
+    sales_reps: [],
+  });
+  const first = await enqueueSalesWonDelivery(INTENT_ID, { db });
+  const second = await enqueueSalesWonDelivery(INTENT_ID, { db });
+  assert.equal(first.status, 'ghl_binding_missing');
+  assert.equal(second.status, 'ghl_binding_missing');
+  assert.equal(db.tables.ghl_sales_sync_events.length, 1);
+  assert.equal(db.tables.ghl_sales_sync_events[0].status, 'manual_review');
+  assert.equal(db.tables.ghl_sales_sync_events[0].error_code, 'ghl_binding_missing');
 });
 
 test('a claim racing the webhook preserves linked attribution and blocks Won after an owner change', async () => {
@@ -368,6 +396,9 @@ test('a claim racing the webhook preserves linked attribution and blocks Won aft
 test('migration reconciliation helper uses NOT EXISTS and stays service-role only', () => {
   const sql = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20260922154521_ghl_sales_dashboard_integration.sql'), 'utf8');
   assert.match(sql, /create or replace function public\.list_missing_ghl_sales_won_intents/i);
+  assert.match(sql, /join public\.ghl_sales_deal_bindings[\s\S]*binding\.status in \('linked', 'won_pending', 'won'\)[\s\S]*binding\.manual_review_required = false/i);
+  assert.match(sql, /join public\.membership_agreements[\s\S]*agreement\.status = 'signed'[\s\S]*agreement\.checkout_status = 'paid'[\s\S]*agreement\.checkout_paid_at is not null/i);
+  assert.match(sql, /join public\.clients[\s\S]*client\.billing_status = 'active'/i);
   assert.match(sql, /not exists[\s\S]*delivery\.integration = 'ghl'[\s\S]*delivery\.event_type = 'sales_won'/i);
   assert.match(sql, /revoke all on function public\.list_missing_ghl_sales_won_intents\(integer\)[\s\S]*from public, anon, authenticated/i);
   assert.match(sql, /grant execute on function public\.list_missing_ghl_sales_won_intents\(integer\)[\s\S]*to service_role/i);

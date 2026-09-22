@@ -117,7 +117,7 @@ function authenticateWebhook(req, rawBody, env) {
   if (!timingSafeSecret(suppliedSecret, expectedSecret)) return { ok: false, status: 401, code: 'unauthorized' };
 
   const signature = clean(req.get('x-ghl-signature'), 2000);
-  const publicKey = clean(env.GHL_WEBHOOK_PUBLIC_KEY, 4000);
+  const publicKey = String(env.GHL_WEBHOOK_PUBLIC_KEY || '').trim().slice(0, 8000);
   const requireSignature = clean(env.GHL_WEBHOOK_REQUIRE_SIGNATURE, 10).toLowerCase() === 'true';
   if ((signature || requireSignature) && !verifyGhlEd25519Signature(rawBody, signature, publicKey)) {
     return { ok: false, status: 401, code: 'invalid_signature' };

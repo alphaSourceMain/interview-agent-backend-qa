@@ -187,11 +187,13 @@ test('webhook authentication requires the shared secret and validates current Ed
   const raw = Buffer.from(JSON.stringify({ opportunityId: 'opp_qa', locationId: 'location_qa' }));
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const publicDer = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+  const publicPem = publicKey.export({ type: 'spki', format: 'pem' });
   const signature = crypto.sign(null, raw, privateKey).toString('base64');
   assert.equal(verifyGhlEd25519Signature(raw, signature, publicDer), true);
   assert.equal(timingSafeSecret('shared-secret', 'shared-secret'), true);
   const req = { get(name) { return ({ authorization: 'Bearer shared-secret', 'x-ghl-signature': signature })[String(name).toLowerCase()] || ''; } };
   assert.deepEqual(authenticateWebhook(req, raw, { GHL_SALES_WEBHOOK_SECRET: 'shared-secret', GHL_WEBHOOK_PUBLIC_KEY: publicDer, GHL_WEBHOOK_REQUIRE_SIGNATURE: 'true' }), { ok: true });
+  assert.deepEqual(authenticateWebhook(req, raw, { GHL_SALES_WEBHOOK_SECRET: 'shared-secret', GHL_WEBHOOK_PUBLIC_KEY: publicPem, GHL_WEBHOOK_REQUIRE_SIGNATURE: 'true' }), { ok: true });
   assert.equal(authenticateWebhook(req, Buffer.from('{}'), { GHL_SALES_WEBHOOK_SECRET: 'shared-secret', GHL_WEBHOOK_PUBLIC_KEY: publicDer, GHL_WEBHOOK_REQUIRE_SIGNATURE: 'true' }).code, 'invalid_signature');
 });
 

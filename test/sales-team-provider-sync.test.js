@@ -191,6 +191,35 @@ test('provider checks fail closed until reusable line setup and all notification
   assert.equal((await syncGhl(record, { ...env, SALES_TEAM_PROVIDER_SYNC_ENABLED: 'false' }, async () => assert.fail('must not call GHL'))).status, 'action_required');
 });
 
+test('only the pinned QA member on line 3 can stage pending GHL values; Grok remains unverified', async () => {
+  const qaMemberId = '4be26cba-e80a-4913-951c-b9aa21273712';
+  const stagedRecord = {
+    ...record,
+    member: { ...record.member, id: qaMemberId },
+    phone: { ...record.phone, id: '21000000-0000-4000-8000-000000000003', shared_voice_entrypoint: false, ghl_setup_status: 'pending' },
+    shared_voice_phone: { ...record.phone, id: '21000000-0000-4000-8000-000000000004', shared_voice_entrypoint: true, xai_setup_status: 'pending' },
+  };
+  const stagedEnv = {
+    ...env, APP_ENV: 'qa', SALES_TEAM_QA_STAGED_MEMBER_ID: qaMemberId,
+    SALES_TEAM_QA_STAGED_PHONE_ID: stagedRecord.phone.id,
+  };
+  const { state, fetchImpl } = ghlFake();
+  assert.equal((await verifyXai(stagedRecord)).status, 'action_required');
+  assert.equal((await syncGhl(stagedRecord, stagedEnv, fetchImpl)).status, 'synced');
+  assert.equal(state.values['mobile-value-1'].value, record.member.mobile_phone_e164);
+  assert.equal((await clearGhlRouting(stagedRecord, stagedEnv, fetchImpl)).status, 'synced');
+  assert.equal(state.values['mobile-value-1'].value, '');
+  assert.equal(state.values['user-value-1'].value, '');
+  for (const unsafeEnv of [
+    { ...stagedEnv, APP_ENV: 'production' },
+    { ...stagedEnv, SALES_TEAM_QA_STAGED_MEMBER_ID: 'another-member' },
+    { ...stagedEnv, SALES_TEAM_QA_STAGED_PHONE_ID: '21000000-0000-4000-8000-000000000004' },
+  ]) {
+    const guarded = await syncGhl(stagedRecord, unsafeEnv, async () => assert.fail('must not call GHL'));
+    assert.equal(guarded.errorCode, 'ghl_line_setup_unverified');
+  }
+});
+
 test('Grok readiness comes from the shared entrypoint instead of the selected GHL line', async () => {
   const pendingLine = { ...record.phone, xai_setup_status: 'pending', xai_agent_id: null, xai_phone_number_e164: null };
   const result = await verifyXai({ ...record, phone: pendingLine, shared_voice_phone: record.phone });

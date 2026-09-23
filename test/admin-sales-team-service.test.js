@@ -164,6 +164,27 @@ const applyEnv = {
   SLACK_SALES_WON_BOT_TOKEN: 'xoxb-' + 's'.repeat(40),
 };
 
+function configureStagedLineThree(db) {
+  const line3Id = '21000000-0000-4000-8000-000000000003';
+  const line4Id = '21000000-0000-4000-8000-000000000004';
+  const line3Number = '+17192592989';
+  Object.assign(db.tables.sales_phone_numbers[0], {
+    id: line3Id, e164: line3Number, shared_voice_entrypoint: false,
+    xai_setup_status: 'pending', ghl_setup_status: 'pending',
+  });
+  db.tables.sales_phone_numbers.push({
+    ...phone, id: line4Id, e164: '+17192495855', shared_voice_entrypoint: true,
+    xai_setup_status: 'pending', ghl_setup_status: 'pending',
+  });
+  db.tables.sales_phone_assignments[0].phone_number_id = line3Id;
+  db.tables.sales_team_config_drafts[0].payload.assignment.phone_number_id = line3Id;
+  return {
+    ...applyEnv, APP_ENV: 'qa', SALES_TEAM_QA_STAGED_MEMBER_ID: member.id,
+    SALES_TEAM_QA_STAGED_PHONE_ID: line3Id,
+    SALES_VOICE_GHL_WEBHOOKS_JSON: JSON.stringify({ [line3Number]: 'https://example.leadconnectorhq.com/hooks/line-3' }),
+  };
+}
+
 test('sales team route is mounted behind authentication and global-admin authorization', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
   assert.match(source, /adminRouter\.use\('\/sales-team', requireAuth, requireAdmin, createAdminSalesTeamRouter\(\{ db: supabaseAdmin \}\)\)/);
@@ -228,6 +249,35 @@ test('readiness requires all rep identities and both reusable GHL routing values
   assert.ok(notifications.missing.includes('Slack, GHL text, and Workspace email'));
 });
 
+test('QA line-3 staging relaxes only the two call-test attestations for the pinned test member', () => {
+  const qaMemberId = '4be26cba-e80a-4913-951c-b9aa21273712';
+  const staged = {
+    member: { ...member, id: qaMemberId }, assignment, config,
+    phone: { ...phone, id: '21000000-0000-4000-8000-000000000003', shared_voice_entrypoint: false, ghl_setup_status: 'pending' },
+    shared_voice_phone: { ...phone, id: '21000000-0000-4000-8000-000000000004', shared_voice_entrypoint: true, xai_setup_status: 'pending' },
+  };
+  const qaEnv = {
+    APP_ENV: 'qa', SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true',
+    SALES_TEAM_QA_STAGED_MEMBER_ID: qaMemberId,
+    SALES_TEAM_QA_STAGED_PHONE_ID: staged.phone.id,
+  };
+  assert.deepEqual(readinessFor(staged, qaEnv), { ready: true, missing: [], qa_staged: true });
+  for (const unsafeEnv of [
+    { ...qaEnv, APP_ENV: 'production' },
+    { ...qaEnv, SALES_TEAM_PROVIDER_SYNC_ENABLED: 'false' },
+    { ...qaEnv, SALES_TEAM_QA_STAGED_MEMBER_ID: 'another-member' },
+  ]) {
+    const result = readinessFor(staged, unsafeEnv);
+    assert.equal(result.ready, false);
+    assert.ok(result.missing.includes('Verified GHL line'));
+    assert.ok(result.missing.includes('Verified shared Grok Voice entrypoint'));
+  }
+  assert.equal(readinessFor({ ...staged, phone: { ...staged.phone, ghl_user_custom_value_id: null } }, qaEnv).ready, false);
+  assert.equal(readinessFor({ ...staged, shared_voice_phone: { ...staged.shared_voice_phone, handoff_token_rotated_at: null } }, qaEnv).ready, false);
+  assert.equal(readinessFor({ ...staged, phone: { ...staged.phone, ghl_setup_status: 'failed' } }, qaEnv).ready, false);
+  assert.equal(readinessFor({ ...staged, shared_voice_phone: { ...staged.shared_voice_phone, xai_setup_status: 'failed' } }, qaEnv).ready, false);
+});
+
 test('generated Grok prompt uses the rep name and never exposes delivery mechanics', () => {
   const prompt = buildManagedVoicePrompt(member, assignment, config);
   assert.match(prompt, /Would you like me to send that message to Michael Afesi\?/);
@@ -246,6 +296,49 @@ test('apply updates all GHL routes before one v2 database transaction', async ()
   assert.equal(db.calls[0].name, 'apply_sales_team_configuration_v2');
   assert.equal(db.calls[0].args.p_replace_team_member_id, null);
   assert.equal(db.calls[0].args.p_handoff_token_sha256, 'a'.repeat(64));
+});
+
+test('pinned QA line 3 can Apply for a call test while shared Grok and GHL attestations stay pending', async () => {
+  const db = makeDb();
+  const line4Id = '21000000-0000-4000-8000-000000000004';
+  const qaEnv = configureStagedLineThree(db);
+  const provider = providerFake();
+  const result = await applySalesTeamMember({ db, memberId: member.id, env: qaEnv, fetchImpl: provider.fetchImpl });
+  assert.equal(result.item.member.status, 'active');
+  assert.equal(result.provider_sync.slack.status, 'synced');
+  assert.equal(result.provider_sync.ghl.status, 'synced');
+  assert.equal(result.provider_sync.xai.status, 'action_required');
+  assert.equal(db.tables.sales_phone_numbers.find((row) => row.id === line4Id).xai_setup_status, 'pending');
+  assert.equal(provider.state.values['mobile-value-1'].value, member.mobile_phone_e164);
+  assert.equal(provider.state.values['user-value-1'].value, member.ghl_user_id);
+});
+
+test('staged QA database rejection restores the prior GHL route while both attestations remain pending', async () => {
+  const db = makeDb({ applyError: { message: 'sales_team_draft_stale' } });
+  const qaEnv = configureStagedLineThree(db);
+  const provider = providerFake();
+  await assert.rejects(
+    applySalesTeamMember({ db, memberId: member.id, env: qaEnv, fetchImpl: provider.fetchImpl }),
+    (error) => error.code === 'sales_team_draft_stale'
+  );
+  assert.equal(provider.state.user.phone, '+13035550000');
+  assert.equal(provider.state.values['mobile-value-1'].value, '+13035550001');
+  assert.equal(provider.state.values['user-value-1'].value, 'old-user');
+  assert.equal(db.tables.sales_phone_assignments[0].status, 'draft');
+  assert.equal(db.tables.sales_phone_numbers[1].xai_setup_status, 'pending');
+});
+
+test('staged QA deactivation clears pending line-3 values and leaves the shared line unchanged', async () => {
+  const db = makeDb();
+  const qaEnv = configureStagedLineThree(db);
+  const provider = providerFake();
+  await applySalesTeamMember({ db, memberId: member.id, env: qaEnv, fetchImpl: provider.fetchImpl });
+  await deactivateSalesTeamMember({ db, memberId: member.id, env: qaEnv, fetchImpl: provider.fetchImpl });
+  assert.equal(provider.state.values['mobile-value-1'].value, '');
+  assert.equal(provider.state.values['user-value-1'].value, '');
+  assert.equal(db.tables.sales_phone_assignments[0].status, 'inactive');
+  assert.equal(db.tables.sales_team_members[0].status, 'inactive');
+  assert.equal(db.tables.sales_phone_numbers[1].xai_setup_status, 'pending');
 });
 
 test('occupied line requires the exact incumbent before any provider write', async () => {

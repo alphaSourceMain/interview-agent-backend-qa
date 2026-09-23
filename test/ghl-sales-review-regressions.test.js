@@ -20,6 +20,7 @@ const {
 } = require('../src/lib/ghlSalesIntegration');
 const {
   createGhlSalesWebhookRouter,
+  finishReceipt,
   reserveReceipt,
   webhookIdentifiers,
 } = require('../routes/ghlSalesWebhook');
@@ -82,6 +83,11 @@ class MemoryQuery {
     if (this.mutation?.type === 'insert') {
       const row = { id: crypto.randomUUID(), ...this.mutation.value };
       if (this.duplicateFor(row)) return { data: null, error: { code: '23505', message: 'duplicate' } };
+      if (this.table === 'ghl_sales_webhook_receipts') {
+        row.attempt_count ??= 1;
+        row.first_received_at ??= new Date().toISOString();
+        row.last_received_at ??= row.first_received_at;
+      }
       this.db.tables[this.table] ||= [];
       this.db.tables[this.table].push(row);
       return { data: single ? { ...row } : [{ ...row }], error: null };
@@ -200,6 +206,56 @@ test('fresh processing webhook receipts return 503 and stale receipts are reclai
   assert.equal(freshImports, 1);
   assert.equal(freshDb.tables.ghl_sales_webhook_receipts[0].status, 'completed');
   assert.equal(freshDb.tables.ghl_sales_webhook_receipts[0].attempt_count, 2);
+});
+
+test('a stale webhook attempt cannot finish the receipt after another attempt reclaims it', async () => {
+  const db = new MemoryDb({ ghl_sales_webhook_receipts: [] });
+  const values = {
+    eventKey: 'ghl-ready:stale-qa-event',
+    bodyDigest: 'a'.repeat(64),
+    locationId: 'location_qa',
+    opportunityId: 'opp_qa',
+  };
+  const first = await reserveReceipt(db, values);
+  const row = db.tables.ghl_sales_webhook_receipts[0];
+  row.attempt_count = 1;
+  first.receipt.attempt_count = 1;
+  row.last_received_at = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+  first.receipt.last_received_at = row.last_received_at;
+  const second = await reserveReceipt(db, values);
+  assert.equal(second.receipt.attempt_count, 2);
+
+  await assert.rejects(
+    finishReceipt(db, first.receipt, { status: 'completed', bindingId: 'old_binding' }),
+    (error) => error.code === 'ghl_receipt_ownership_lost'
+  );
+  assert.equal(row.status, 'processing');
+  assert.equal(row.binding_id, undefined);
+
+  await finishReceipt(db, second.receipt, { status: 'completed', bindingId: 'current_binding' });
+  assert.equal(row.status, 'completed');
+  assert.equal(row.binding_id, 'current_binding');
+});
+
+test('a lost webhook receipt attempt returns retryable status without a false failure audit', async () => {
+  const db = new MemoryDb({ ghl_sales_webhook_receipts: [], ghl_sales_sync_events: [] });
+  const rawBody = Buffer.from(JSON.stringify({ opportunityId: 'opp_qa', locationId: 'location_qa', eventId: 'evt_race_qa' }));
+  const router = createGhlSalesWebhookRouter({
+    db,
+    env: { GHL_SALES_WEBHOOK_SECRET: 'webhook-secret', GHL_LOCATION_ID: 'location_qa' },
+    logger: { warn() {} },
+    importer: async () => {
+      const row = db.tables.ghl_sales_webhook_receipts[0];
+      row.attempt_count = 2;
+      row.last_received_at = new Date().toISOString();
+      return { binding: { id: 'binding_qa', status: 'ready' }, created: false };
+    },
+  });
+  const result = await invokeWebhook(router, rawBody, { authorization: 'Bearer webhook-secret' });
+  assert.equal(result.statusCode, 503);
+  assert.deepEqual(result.body, { error: 'ghl_receipt_ownership_lost' });
+  assert.equal(db.tables.ghl_sales_webhook_receipts[0].status, 'processing');
+  assert.equal(db.tables.ghl_sales_sync_events.length, 0);
 });
 
 test('admin retry resets an exhausted GHL delivery so the claim predicate can take it again', async () => {

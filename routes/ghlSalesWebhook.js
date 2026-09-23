@@ -96,7 +96,7 @@ async function reserveReceipt(db, values) {
 
 async function finishReceipt(db, receipt, values) {
   const completed = values.status === 'completed';
-  const { error } = await db.from('ghl_sales_webhook_receipts')
+  const { data, error } = await db.from('ghl_sales_webhook_receipts')
     .update({
       status: values.status,
       binding_id: values.bindingId || receipt.binding_id || null,
@@ -105,8 +105,14 @@ async function finishReceipt(db, receipt, values) {
       last_error_code: clean(values.errorCode, 80) || null,
       last_error_detail: clean(values.errorDetail, 500) || null,
     })
-    .eq('id', receipt.id);
+    .eq('id', receipt.id)
+    .eq('status', 'processing')
+    .eq('attempt_count', receipt.attempt_count)
+    .eq('last_received_at', receipt.last_received_at)
+    .select('id')
+    .maybeSingle();
   if (error) throw Object.assign(new Error('GHL receipt completion failed'), { code: 'ghl_receipt_completion_failed' });
+  if (!data) throw Object.assign(new Error('GHL receipt processing ownership changed'), { code: 'ghl_receipt_ownership_lost' });
 }
 
 function authenticateWebhook(req, rawBody, env) {
@@ -187,6 +193,9 @@ function createGhlSalesWebhookRouter(options = {}) {
       });
     } catch (error) {
       const code = clean(error?.code, 80) || 'ghl_sales_import_failed';
+      if (code === 'ghl_receipt_ownership_lost') {
+        return res.status(503).json({ error: code });
+      }
       const detail = clean(error?.message, 500) || 'The GHL sales import failed.';
       const bindingId = error?.bindingId || null;
       if (receipt?.id) {

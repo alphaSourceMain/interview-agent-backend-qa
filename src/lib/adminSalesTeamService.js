@@ -452,7 +452,7 @@ async function applySalesTeamMember({ db, memberId, replaceTeamMemberId = null, 
   if (config.notify_sms && !ghlWebhookForNumber(record.phone?.e164, env)) {
     throw serviceError(409, 'ghl_notification_webhook_missing', 'Configure the server-side GHL notification webhook for this company number before enabling SMS.', { ghl_notification_workflow_id: 'server_mapping_missing' });
   }
-  const providerRecord = { ...record, member, assignment, phone: record.phone, config };
+  const providerRecord = { ...record, member: { ...member, id: memberId }, assignment, phone: record.phone, config };
   const qaStaged = isQaStagedSalesLine(providerRecord, env);
   const occupiedResult = await db.from('sales_phone_assignments')
     .select('id,team_member_id')

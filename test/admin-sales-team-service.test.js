@@ -178,6 +178,7 @@ function configureStagedLineThree(db) {
   });
   db.tables.sales_phone_assignments[0].phone_number_id = line3Id;
   db.tables.sales_team_config_drafts[0].payload.assignment.phone_number_id = line3Id;
+  delete db.tables.sales_team_config_drafts[0].payload.member.id;
   return {
     ...applyEnv, APP_ENV: 'qa', SALES_TEAM_QA_STAGED_MEMBER_ID: member.id,
     SALES_TEAM_QA_STAGED_PHONE_ID: line3Id,
@@ -302,6 +303,7 @@ test('pinned QA line 3 can Apply for a call test while shared Grok and GHL attes
   const db = makeDb();
   const line4Id = '21000000-0000-4000-8000-000000000004';
   const qaEnv = configureStagedLineThree(db);
+  assert.equal(Object.hasOwn(db.tables.sales_team_config_drafts[0].payload.member, 'id'), false);
   const provider = providerFake();
   const result = await applySalesTeamMember({ db, memberId: member.id, env: qaEnv, fetchImpl: provider.fetchImpl });
   assert.equal(result.item.member.status, 'active');

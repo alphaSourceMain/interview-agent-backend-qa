@@ -208,6 +208,22 @@ test('completion migration adds fixed GHL user routing and service-role-only ato
   assert.doesNotMatch(sql, /grant [^;]* to (?:anon|authenticated)/);
 });
 
+test('QA Apply repair only qualifies ambiguous sales voice assignment columns', () => {
+  const migrationDir = path.join(__dirname, '..', 'supabase', 'migrations');
+  const original = fs.readFileSync(path.join(migrationDir, '20260921225344_sales_routing_control_plane_completion.sql'), 'utf8');
+  const repair = fs.readFileSync(path.join(migrationDir, '20260924020000_fix_sales_team_apply_column_ambiguity.sql'), 'utf8');
+  const functionSource = (sql) => sql.match(/create or replace function public\.apply_sales_team_configuration_v2\([\s\S]*?\n\$\$;/)?.[0];
+  const originalFunction = functionSource(original);
+  const repairedFunction = functionSource(repair);
+  assert.ok(originalFunction);
+  assert.ok(repairedFunction);
+  assert.equal((originalFunction.match(/where assignment_id =/g) || []).length, 4);
+  assert.equal(repairedFunction, originalFunction.replaceAll('where assignment_id =', 'where public.sales_voice_configs.assignment_id ='));
+  assert.doesNotMatch(repairedFunction, /where assignment_id =/);
+  assert.match(repair, /revoke all on function public\.apply_sales_team_configuration_v2[\s\S]*from public, anon, authenticated/);
+  assert.match(repair, /grant execute on function public\.apply_sales_team_configuration_v2[\s\S]*to service_role/);
+});
+
 test('shared voice migration keeps routing server-only and single-use', () => {
   const sql = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20260922112921_shared_sales_voice_routing.sql'), 'utf8').toLowerCase();
   assert.match(sql, /shared_voice_entrypoint boolean not null default false/);

@@ -6,6 +6,7 @@ const { resolveBillingOwnerForScope } = require('./clientBillingScope');
 const { normalizeBillingModel } = require('./billingModel');
 
 const ROLLOVER_BILLING_MODEL = 'rollover';
+const USAGE_BILLING_MODEL = 'usage';
 const EARLY_ENDED_SENTINEL_SUMMARY = 'Interview ended before substantive responses were captured.';
 const INSUFFICIENT_TRANSCRIPT_EARLY_END_SUMMARY_PREFIX = 'Interview ended before any substantive responses were recorded.';
 const NO_SUBSTANTIVE_CANDIDATE_RESPONSE_SUMMARY = 'Interview ended before a substantive candidate response was recorded.';
@@ -69,6 +70,7 @@ const UNRESOLVED_AVAILABILITY = Object.freeze({
   remaining_interviews: null,
   own_remaining_interviews: null,
   credit_interviews: null,
+  pool_remaining_interviews: null,
   rollover_drawn_offset: null,
   billing_model: null
 });
@@ -116,10 +118,17 @@ async function getRoleInterviewAvailability({ db, roleId, clientId }) {
     .maybeSingle();
   if (planSettingsError) return unresolvedAvailability();
 
-  const includedInterviewsPerRole = parseWholeNonNegative(planSettings?.included_interviews_per_role);
-  if (includedInterviewsPerRole == null) return unresolvedAvailability();
-
   const billingModel = normalizeBillingModel(planSettings?.billing_model, planSettings?.plan_tier);
+
+  // The usage model has no per-role included count — an Enterprise client buys
+  // one pool that every role draws from. Checked before the guard below, because
+  // a null included count would otherwise return an all-null response and every
+  // enforcement point reads `remaining != null && <= 0`, so all limits would
+  // silently stop applying.
+  const includedInterviewsPerRole = billingModel === USAGE_BILLING_MODEL
+    ? 0
+    : parseWholeNonNegative(planSettings?.included_interviews_per_role);
+  if (includedInterviewsPerRole == null) return unresolvedAvailability();
 
   const { data: purchaseRows, error: purchasesError } = await db
     .from('role_interview_purchases')
@@ -162,6 +171,18 @@ async function getRoleInterviewAvailability({ db, roleId, clientId }) {
     }
   }
 
+  // The pool belongs to the payer, so a child entity's role draws on the
+  // parent's. Loaded lazily to keep the require graph acyclic.
+  let poolRemainingInterviews = 0;
+  if (billingModel === USAGE_BILLING_MODEL) {
+    try {
+      const { getPoolRemaining } = require('./interviewPool');
+      poolRemainingInterviews = await getPoolRemaining({ db, billingClientId });
+    } catch (_) {
+      return unresolvedAvailability();
+    }
+  }
+
   const ownRemainingInterviews = Math.max(
     0,
     includedInterviewsPerRole + purchasedInterviews - usedInterviews - rolloverDrawnOffset
@@ -170,9 +191,16 @@ async function getRoleInterviewAvailability({ db, roleId, clientId }) {
     included_interviews_per_role: includedInterviewsPerRole,
     purchased_interviews: purchasedInterviews,
     used_interviews: usedInterviews,
-    remaining_interviews: ownRemainingInterviews + creditInterviews,
+    // Under the usage model there is no cap to report: an interview past the
+    // pool is metered, not refused. Null is what the enforcement points already
+    // read as "no limit applies", so a usage client is never blocked and never
+    // told a role is full. The pool figure below is what a dashboard shows.
+    remaining_interviews: billingModel === USAGE_BILLING_MODEL
+      ? null
+      : ownRemainingInterviews + creditInterviews,
     own_remaining_interviews: ownRemainingInterviews,
     credit_interviews: creditInterviews,
+    pool_remaining_interviews: poolRemainingInterviews,
     rollover_drawn_offset: rolloverDrawnOffset,
     billing_model: billingModel
   };

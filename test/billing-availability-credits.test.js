@@ -119,6 +119,7 @@ test('an Essentials client sees exactly the numbers it saw before credits existe
     remaining_interviews: 4,
     own_remaining_interviews: 4,
     credit_interviews: 0,
+    pool_remaining_interviews: 0,
     rollover_drawn_offset: 0,
     billing_model: 'fixed'
   });
@@ -143,7 +144,9 @@ test('an Enterprise client sees no credits', async () => {
   const availability = await availabilityFor(db);
 
   assert.equal(availability.credit_interviews, 0, 'usage clients are invoiced, not credited');
-  assert.equal(availability.remaining_interviews, 0);
+  assert.equal(availability.remaining_interviews, null,
+    'a usage role has no cap to report — interviews past the pool are metered, not refused');
+  assert.equal(availability.pool_remaining_interviews, 0);
   assert.equal(availability.billing_model, 'usage');
 });
 
@@ -243,6 +246,7 @@ test('every error path still answers with nulls, including the new keys', async 
       remaining_interviews: null,
       own_remaining_interviews: null,
       credit_interviews: null,
+      pool_remaining_interviews: null,
       rollover_drawn_offset: null,
       billing_model: null
     });

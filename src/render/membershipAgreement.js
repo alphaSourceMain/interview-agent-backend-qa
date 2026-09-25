@@ -226,6 +226,13 @@ function normalizeMembershipAgreementInput(input = {}) {
     // Coerced to a string first: normalizeText reads a numeric 0 as empty, and a
     // zero-cent usage price is a real price, not an absence.
     usage_interview_fee_cents: normalizeCentsInput(String(input.usage_interview_fee_cents ?? input.usageInterviewFeeCents ?? '')),
+    // The block of interviews an Enterprise client buys at signup. Absent or
+    // zero means no pool, which is a valid agreement. The discount and total are
+    // priced by enterprisePoolPricing when the agreement is sent and carried
+    // here, because this normalizer is synchronous and has no database.
+    pool_quantity: normalizeWholeNumberInput(input.pool_quantity ?? input.poolQuantity),
+    pool_discount_pct: normalizeMoneyInput(input.pool_discount_pct ?? input.poolDiscountPct),
+    pool_total_cents: normalizeCentsInput(String(input.pool_total_cents ?? input.poolTotalCents ?? '')),
     max_interview_minutes: normalizeWholeNumberInput(input.max_interview_minutes || input.maxInterviewMinutes || input.interview_duration_minutes || input.interviewDurationMinutes),
     first_role_prepay: normalizeFirstRolePrepayInput(input.first_role_prepay || input.firstRolePrepay),
     initial_term_start: normalizeDateInput(input.initial_term_start || input.initialTermStart),
@@ -293,6 +300,21 @@ function buildMembershipAgreementHtml(payload = {}, options = {}) {
     package_per_role_fee: formatUsd(normalized.per_role_fee),
     package_additional_interview_fee: formatUsd(normalized.additional_interview_fee),
     package_included_interviews_per_role: normalized.included_interviews_per_role || '—',
+    // The Enterprise interview pool bought at signup, and the price every
+    // interview beyond it is charged at.
+    show_interview_pool_terms: showPackageTerms
+      && normalized.membership_tier === 'enterprise'
+      && !!normalized.pool_quantity,
+    package_pool_quantity: normalized.pool_quantity || '—',
+    package_pool_discount_pct: normalized.pool_discount_pct
+      ? `${normalized.pool_discount_pct}%`
+      : '0%',
+    package_pool_total: normalized.pool_total_cents == null
+      ? '—'
+      : formatUsdCents(normalized.pool_total_cents),
+    package_usage_interview_fee: normalized.usage_interview_fee_cents == null
+      ? '—'
+      : formatUsdCents(normalized.usage_interview_fee_cents),
     package_max_interview_minutes: normalized.max_interview_minutes || '—',
     package_fee_period_label: normalized.billing_option === 'annual' ? 'per year' : 'per month',
     show_first_role_prepay_terms: showPackageTerms && normalized.first_role_prepay.present,

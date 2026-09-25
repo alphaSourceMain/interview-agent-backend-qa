@@ -10,6 +10,7 @@ const { finalizePendingRolePurchase } = require('../../services/rolePurchaseFina
 const { requirePlanCapacity } = require('../../services/planCapacity');
 const { defaultBillingModelForPlanTier, resolveBillingModel } = require('../../services/billingModel');
 const { applyUsageToInvoice, findLastBilledPeriodEnd } = require('../../services/usageBilling');
+const { markPoolFailed, markPoolPaid } = require('../../services/interviewPool');
 const router = express.Router();
 
 const SETTLED_PAYMENT_STATUSES = new Set(['paid', 'no_payment_required']);
@@ -689,7 +690,56 @@ router.post('/', async (req, res) => {
       const paymentFailed = event.type === 'checkout.session.async_payment_failed';
       const paymentSettled = !paymentFailed && isSettledPayment(eventObject);
 
-      if (purchaseType === 'additional_interviews') {
+      if (purchaseType === 'interview_pool') {
+        const poolId = String(metadata?.client_interview_pool_id || '').trim();
+        if (!poolId) throw permanentFailure('Interview pool id missing from checkout metadata');
+
+        const { data: pool, error: poolLookupErr } = await supabaseAdmin
+          .from('client_interview_pools')
+          .select('id,client_id,quantity_purchased,status')
+          .eq('id', poolId)
+          .maybeSingle();
+        if (poolLookupErr) throw new Error(poolLookupErr.message || 'Interview pool lookup failed');
+        if (!pool) throw permanentFailure('Interview pool not found');
+
+        // Same cross-checks the additional-interviews branch makes: metadata that
+        // disagrees with the row means the session is not describing this pool,
+        // and no retry will change that.
+        if (metadataClientId && String(pool.client_id) !== metadataClientId) {
+          throw permanentFailure('Interview pool client mismatch');
+        }
+        const metadataPoolQuantity = Number(metadata?.pool_quantity);
+        if (Number.isInteger(metadataPoolQuantity) && metadataPoolQuantity > 0
+          && Number(pool.quantity_purchased) !== metadataPoolQuantity) {
+          throw permanentFailure('Interview pool quantity mismatch');
+        }
+
+        if (paymentFailed) {
+          await markPoolFailed({ db: supabaseAdmin, poolId });
+          console.warn('[stripe-webhook][interview-pool] payment_failed', {
+            request_id, client_interview_pool_id: poolId, client_id: pool.client_id
+          });
+        } else if (!paymentSettled) {
+          console.log('[stripe-webhook][interview-pool] payment_not_settled', {
+            request_id,
+            client_interview_pool_id: poolId,
+            payment_status: String(eventObject?.payment_status || '') || null
+          });
+        } else {
+          const result = await markPoolPaid({
+            db: supabaseAdmin,
+            poolId,
+            stripePaymentIntentId: pickId(eventObject?.payment_intent) || null
+          });
+          console.log('[stripe-webhook][interview-pool] settled', {
+            request_id,
+            client_interview_pool_id: poolId,
+            client_id: pool.client_id,
+            paid: result.paid === true,
+            reason: result.reason || null
+          });
+        }
+      } else if (purchaseType === 'additional_interviews') {
         const purchaseId = String(metadata?.role_interview_purchase_id || '').trim();
         const metadataRoleId = String(metadata?.role_id || '').trim();
         const metadataQuantity = Number(metadata?.quantity);

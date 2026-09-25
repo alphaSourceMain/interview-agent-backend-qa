@@ -8,6 +8,7 @@ const {
   getAlphaScreenFirstRolePrepayStripePriceId
 } = require('./alphaScreenPackages')
 const { resolvePublicBackendBase, buildClientDashboardReturnUrl } = require('../config/urlConfig')
+const { priceEnterprisePool } = require('./enterprisePoolPricing')
 
 function makeError(status, code, detail) {
   const err = new Error(detail || code || 'checkout_failed')
@@ -288,6 +289,9 @@ async function createSubscriptionCheckoutSession({
 
   const lineItems = []
   let enterpriseCheckoutMetadata = null
+  let poolQuantity = null
+  let poolMetadata = null
+  let poolPoolId = null
   if (normalizedPlanTier === 'enterprise') {
     const platformFee = asMoneyOrNull(enterpriseFees?.platform_fee, { allowZero: false })
     const perRoleFee = asMoneyOrNull(enterpriseFees?.per_role_fee, { allowZero: true })
@@ -309,6 +313,18 @@ async function createSubscriptionCheckoutSession({
       : null
     if (usageFeeSupplied && usageInterviewFeeCents === null) {
       throw makeError(400, 'invalid_enterprise_fees', 'Invalid enterprise pricing fields.')
+    }
+    // Also optional. A pool cannot be priced without a per-interview price,
+    // since the pool is sold at that same number.
+    const poolSupplied = isSuppliedValue(enterpriseFees?.pool_quantity)
+    poolQuantity = poolSupplied
+      ? asWholeNumberOrNull(enterpriseFees.pool_quantity, { allowZero: false })
+      : null
+    if (poolSupplied && poolQuantity === null) {
+      throw makeError(400, 'invalid_enterprise_fees', 'Invalid enterprise pricing fields.')
+    }
+    if (poolQuantity !== null && usageInterviewFeeCents === null) {
+      throw makeError(400, 'pool_requires_usage_price', 'An interview pool needs a per-interview usage price.')
     }
     const platformCents = Math.round(platformFee * 100)
     if (!Number.isFinite(platformCents) || platformCents <= 0) {
@@ -339,6 +355,62 @@ async function createSubscriptionCheckoutSession({
       }
     })
     lineItems.push({ price: enterprisePrice.id, quantity: 1 })
+
+    // The interview pool is a one-off charge alongside the recurring membership,
+    // the same shape first-role prepay uses below. It is charged as a single
+    // unit amount with quantity 1 because the volume discount is rounded on the
+    // whole order — see enterprisePoolPricing.
+    if (poolQuantity !== null) {
+      const quote = await priceEnterprisePool({
+        db: supabaseAdmin,
+        quantity: poolQuantity,
+        unitPriceCents: usageInterviewFeeCents
+      })
+      const poolPrice = await stripe.prices.create({
+        currency: 'usd',
+        unit_amount: quote.total_cents,
+        product_data: { name: `Interview pool (${quote.quantity} interviews)` },
+        metadata: {
+          source: normalizedMetadataSource,
+          client_id: client.id,
+          purchase_type: 'interview_pool',
+          quantity: String(quote.quantity),
+          discount_pct: String(quote.discount_pct),
+          discounted_unit_price_cents: String(quote.discounted_unit_price_cents)
+        }
+      })
+      lineItems.push({ price: poolPrice.id, quantity: 1 })
+
+      // Reserved before the session exists, so the webhook always has a row to
+      // mark paid even if the response never reaches the caller.
+      const { data: pendingPool, error: poolInsertError } = await supabaseAdmin
+        .from('client_interview_pools')
+        .insert({
+          client_id: client.id,
+          quantity_purchased: quote.quantity,
+          quantity_remaining: 0,
+          unit_price_cents: quote.unit_price_cents,
+          discount_pct: quote.discount_pct,
+          total_cents: quote.total_cents,
+          status: 'pending'
+        })
+        .select('id')
+        .maybeSingle()
+      if (poolInsertError || !pendingPool?.id) {
+        throw makeError(503, 'interview_pool_reserve_failed', 'The interview pool could not be reserved.')
+      }
+      poolPoolId = pendingPool.id
+
+      poolMetadata = {
+        purchase_type: 'interview_pool',
+        client_interview_pool_id: String(pendingPool.id),
+        pool_quantity: String(quote.quantity),
+        pool_unit_price_cents: String(quote.unit_price_cents),
+        pool_discount_pct: String(quote.discount_pct),
+        pool_discounted_unit_price_cents: String(quote.discounted_unit_price_cents),
+        pool_total_cents: String(quote.total_cents)
+      }
+    }
   } else {
     const priceId = getAlphaScreenStripePriceId(normalizedPlanTier, normalizedBillingInterval)
     if (!priceId) throw makeError(500, 'stripe_price_not_configured', 'Stripe price is not configured.')
@@ -384,6 +456,7 @@ async function createSubscriptionCheckoutSession({
     billing_interval: normalizedBillingInterval,
     ...normalizeMetadataObject(enterpriseCheckoutMetadata || {}),
     ...normalizeMetadataObject(firstRolePrepayMetadata || {}),
+    ...normalizeMetadataObject(poolMetadata || {}),
     ...normalizeMetadataObject(metadata),
     ...normalizeMetadataObject(replacementMetadata || {})
   }
@@ -447,6 +520,24 @@ async function createSubscriptionCheckoutSession({
     }
   }
 
+  // Recorded for support: the webhook finds the pool by its id in metadata, not
+  // by the session, so a failure here costs traceability rather than the pool.
+  if (poolPoolId) {
+    const poolSessionId = String(primaryCheckoutSession?.id || hostedFallbackSession?.id || '').trim()
+    if (poolSessionId) {
+      const { error: poolSessionError } = await supabaseAdmin
+        .from('client_interview_pools')
+        .update({ stripe_checkout_session_id: poolSessionId })
+        .eq('id', poolPoolId)
+      if (poolSessionError) {
+        console.error('interview_pool_session_link_failed', {
+          client_interview_pool_id: poolPoolId,
+          error: poolSessionError.message || poolSessionError
+        })
+      }
+    }
+  }
+
   return {
     session: primaryCheckoutSession,
     fallbackSession: hostedFallbackSession,
@@ -454,6 +545,7 @@ async function createSubscriptionCheckoutSession({
     client,
     clientEmail,
     checkoutMetadata,
+    interviewPoolId: poolPoolId,
     replacesStripeSubscriptionId,
     replacementPolicy: replacesStripeSubscriptionId ? 'immediate_cancel' : null
   }

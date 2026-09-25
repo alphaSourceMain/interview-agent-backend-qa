@@ -279,7 +279,7 @@ test('valid Essential monthly intent creates pending intent with central package
   assert.equal(response.body.selected_package.annual_platform_fee_note, 'Discounted annual platform fee')
   assert.equal(response.body.selected_package.included_interviews, 20)
   assert.equal(response.body.selected_package.interview_duration_minutes, 10)
-  assert.equal(response.body.selected_package.additional_interview_price, 30)
+  assert.equal(response.body.selected_package.additional_interview_price, 25)
   assert.equal(response.body.selected_package.per_role_fee, 399)
   assert.equal(response.body.selected_package.first_role_prepay.selected, false)
   assert.equal(response.body.selected_package.first_role_prepay.discounted_credit_amount_cents, 35900)
@@ -329,7 +329,7 @@ test('valid Pro annual intent creates pending intent when annual cadence is supp
   assert.equal(response.body.selected_package.annual_platform_fee_note, 'Discounted annual platform fee')
   assert.equal(response.body.selected_package.included_interviews, 30)
   assert.equal(response.body.selected_package.max_interview_minutes, 12)
-  assert.equal(response.body.selected_package.additional_interview_fee, 35)
+  assert.equal(response.body.selected_package.additional_interview_fee, 30)
   assert.equal(response.body.selected_package.first_role_prepay.selected, false)
   assert.equal(response.body.selected_package.first_role_prepay.discounted_credit_amount_cents, 62900)
   assert.equal(db.inserts[0].row.package_snapshot.per_role_fee, 699)
@@ -522,9 +522,9 @@ test('duplicate pending intent returns existing safe response without inserting'
         included_interviews_per_role: 20,
         interview_duration_minutes: 10,
         max_interview_minutes: 10,
-        additional_interview_price: 30,
-        additional_interview_fee: 30,
-        overage_price: 30,
+        additional_interview_price: 25,
+        additional_interview_fee: 25,
+        overage_price: 25,
         per_role_fee: 399
       }
     }

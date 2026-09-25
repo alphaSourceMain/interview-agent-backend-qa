@@ -40,7 +40,7 @@ no matter how many times its record is updated.
 ## Essentials — the fixed model
 
 Each role gets an allowance of 20 interviews. Additional interviews can be bought
-for that role at $30 each, and count toward the same role.
+for that role at $25 each, and count toward the same role.
 
 When the role is closed, any unused part of the allowance is gone. Reopening the
 role does not bring it back — the allowance is per role, and closing it ends it.
@@ -50,7 +50,7 @@ role does not bring it back — the allowance is per role, and closing it ends i
 ## Pro — the rollover model
 
 Each role gets an allowance of 30 interviews, and additional interviews can be
-bought at $35 each.
+bought at $30 each.
 
 **When a role is closed**, whatever is left of that role's allowance becomes
 client credit. Credit is not tied to the role it came from: it can be spent on

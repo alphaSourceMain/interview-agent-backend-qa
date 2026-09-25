@@ -84,7 +84,7 @@ test('central package config returns canonical Essential and Pro values', () => 
   assert.deepEqual(getAlphaScreenPlanSettingsDefaults('basic'), {
     per_role_fee: 399,
     included_interviews_per_role: 20,
-    additional_interview_fee: 30,
+    additional_interview_fee: 25,
     max_interview_minutes: 10
   })
   assert.equal(getAlphaScreenPlatformFee('basic', 'monthly'), 299)
@@ -94,7 +94,7 @@ test('central package config returns canonical Essential and Pro values', () => 
   assert.deepEqual(getAlphaScreenPlanSettingsDefaults('pro'), {
     per_role_fee: 699,
     included_interviews_per_role: 30,
-    additional_interview_fee: 35,
+    additional_interview_fee: 30,
     max_interview_minutes: 12
   })
   assert.equal(getAlphaScreenPlatformFee('pro', 'monthly'), 599)
@@ -103,7 +103,7 @@ test('central package config returns canonical Essential and Pro values', () => 
   assert.equal(buildAlphaScreenPackageSnapshot('pro', 'monthly').first_role_prepay.normal_role_fee_cents, 69900)
 })
 
-test('webhook Essential provisioning payload uses 20 interviews, 10 minutes, and $30 overage', () => {
+test('webhook Essential provisioning payload uses 20 interviews, 10 minutes, and $25 overage', () => {
   const payload = buildAlphaScreenPlanSettingsPayload({
     clientId: 'client-basic',
     planKey: 'basic',
@@ -117,12 +117,12 @@ test('webhook Essential provisioning payload uses 20 interviews, 10 minutes, and
     platform_fee: 299,
     per_role_fee: 399,
     included_interviews_per_role: 20,
-    additional_interview_fee: 30,
+    additional_interview_fee: 25,
     max_interview_minutes: 10
   })
 })
 
-test('webhook Pro provisioning payload uses 30 interviews, 12 minutes, and $35 overage', () => {
+test('webhook Pro provisioning payload uses 30 interviews, 12 minutes, and $30 overage', () => {
   const payload = buildAlphaScreenPlanSettingsPayload({
     clientId: 'client-pro',
     planKey: 'pro',
@@ -136,7 +136,7 @@ test('webhook Pro provisioning payload uses 30 interviews, 12 minutes, and $35 o
     platform_fee: 6499,
     per_role_fee: 699,
     included_interviews_per_role: 30,
-    additional_interview_fee: 35,
+    additional_interview_fee: 30,
     max_interview_minutes: 12
   })
 })
@@ -165,7 +165,7 @@ test('central package snapshot includes public package values and no Stripe pric
   assert.equal(snapshot.annual_platform_fee_note, 'Discounted annual platform fee')
   assert.equal(snapshot.included_interviews, 30)
   assert.equal(snapshot.max_interview_minutes, 12)
-  assert.equal(snapshot.additional_interview_fee, 35)
+  assert.equal(snapshot.additional_interview_fee, 30)
   assert.equal(snapshot.per_role_fee, 699)
   assert.deepEqual(snapshot.first_role_prepay, {
     enabled: true,
@@ -211,7 +211,7 @@ test('public package endpoint exposes safe package data and no Stripe secrets', 
     assert.equal(basic.included_interviews, 20)
     assert.equal(basic.interview_duration_minutes, 10)
     assert.equal(basic.scored_question_count, 5)
-    assert.equal(basic.overage_price, 30)
+    assert.equal(basic.overage_price, 25)
     assert.equal(pro.platform_monthly_fee, 599)
     assert.equal(pro.platform_monthly_fee_cents, 59900)
     assert.equal(pro.platform_annual_fee, 6499)
@@ -223,7 +223,7 @@ test('public package endpoint exposes safe package data and no Stripe secrets', 
     assert.equal(pro.included_interviews, 30)
     assert.equal(pro.interview_duration_minutes, 12)
     assert.equal(pro.scored_question_count, 6)
-    assert.equal(pro.overage_price, 35)
+    assert.equal(pro.overage_price, 30)
 
     const basicMonthly = basic.billing_cadences.find((item) => item.key === 'monthly')
     const proAnnual = pro.billing_cadences.find((item) => item.key === 'annual')

@@ -182,7 +182,7 @@ test('the existing plan settings fields are unchanged by the new column', async 
     platform_fee: 599,
     per_role_fee: 699,
     included_interviews_per_role: 30,
-    additional_interview_fee: 35,
+    additional_interview_fee: 30,
     max_interview_minutes: 12,
     billing_model: 'rollover'
   });

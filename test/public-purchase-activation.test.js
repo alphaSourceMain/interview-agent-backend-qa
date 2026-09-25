@@ -334,10 +334,10 @@ test('public purchase webhook activation provisions Essential and Pro monthly/an
   // The last column is the billing model the tier provisions: Essentials keeps a
   // per-role allowance, Pro rolls the unused part over as client credit.
   const cases = [
-    ['basic', 'monthly', 299, 399, 20, 10, 30, 'fixed'],
-    ['basic', 'annual', 3299, 399, 20, 10, 30, 'fixed'],
-    ['pro', 'monthly', 599, 699, 30, 12, 35, 'rollover'],
-    ['pro', 'annual', 6499, 699, 30, 12, 35, 'rollover']
+    ['basic', 'monthly', 299, 399, 20, 10, 25, 'fixed'],
+    ['basic', 'annual', 3299, 399, 20, 10, 25, 'fixed'],
+    ['pro', 'monthly', 599, 699, 30, 12, 30, 'rollover'],
+    ['pro', 'annual', 6499, 699, 30, 12, 30, 'rollover']
   ]
 
   for (const [plan, cadence, platformFee, perRoleFee, included, minutes, overage, billingModel] of cases) {

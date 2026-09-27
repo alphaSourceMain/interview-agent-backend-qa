@@ -9,7 +9,6 @@ const analyzeResume = require('../../services/analyzeResume');
 const { supabaseAdmin } = require('../../clients/supabase');
 const { checkDuplicateCandidate } = require('../../services/duplicateCandidate');
 const { getRoleInterviewAvailability, syncRoleInterviewLimitNotification } = require('../../services/roleInterviewAvailability');
-const { syncInterviewCreditDraw } = require('../../services/interviewCredits');
 const { markInterviewCompleted } = require('../../services/interviewCompletion');
 const { isRoleInactive, buildRoleInactivePayload, logInactiveRoleBlocked } = require('../../services/roleLifecycle');
 
@@ -1000,28 +999,6 @@ router.post('/answers', async (req, res) => {
           });
         }
       }
-
-      const postInsertAvailability = await getRoleInterviewAvailability({
-        db: supabaseAdmin,
-        roleId: role.id,
-        clientId: role.client_id || null
-      });
-      // A text interview is complete the moment it is inserted, so this is where
-      // it draws a credit if the role's own allowance is already spent.
-      const creditDraw = await syncInterviewCreditDraw({
-        db: supabaseAdmin,
-        clientId: role.client_id || null,
-        roleId: role.id,
-        interviewId: insertedInterview?.id || null,
-        availability: postInsertAvailability
-      });
-      await syncRoleInterviewLimitNotification({
-        db: supabaseAdmin,
-        roleId: role.id,
-        clientId: role.client_id || null,
-        remainingInterviews: creditDraw.remaining_interviews,
-        roleTitle: role.title || ''
-      });
 
       if (latestReport?.id) {
         const reportAnalysis = {

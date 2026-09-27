@@ -292,7 +292,7 @@ const availabilityFor = (db, roleId = ROLE, clientId = PARENT) =>
   getRoleInterviewAvailability({ db, roleId, clientId });
 
 test('a usage role reports the pool and no cap', async () => {
-  const db = makeDb({ pools: [pool({ quantity_remaining: 6 })] });
+  const db = makeDb({ pools: [pool({ quantity_purchased: 6 })] });
 
   const availability = await availabilityFor(db);
 
@@ -304,7 +304,7 @@ test('a usage role reports the pool and no cap', async () => {
 });
 
 test('a child role sees the parent pool', async () => {
-  const db = makeDb({ pools: [pool({ quantity_remaining: 6 })] });
+  const db = makeDb({ pools: [pool({ quantity_purchased: 6 })] });
 
   const availability = await availabilityFor(db, CHILD_ROLE, CHILD);
 
@@ -313,7 +313,14 @@ test('a child role sees the parent pool', async () => {
 });
 
 test('an empty pool still reports no cap, so interviews carry on', async () => {
-  const db = makeDb({ pools: [pool({ quantity_remaining: 0 })] });
+  // Genuinely exhausted: one interview bought, one run.
+  const db = makeDb({
+    pools: [pool({ quantity_purchased: 1 })],
+    interviews: [{
+      id: 'iv_1', client_id: PARENT, role_id: ROLE, status: 'completed',
+      completed_at: '2026-09-02T00:00:00.000Z'
+    }]
+  });
 
   const availability = await availabilityFor(db);
 
@@ -323,7 +330,7 @@ test('an empty pool still reports no cap, so interviews carry on', async () => {
 });
 
 test('a usage client with a stored included count still ignores it', async () => {
-  const db = makeDb({ included: 25, pools: [pool({ quantity_remaining: 1 })] });
+  const db = makeDb({ included: 25, pools: [pool({ quantity_purchased: 1 })] });
 
   assert.equal((await availabilityFor(db)).included_interviews_per_role, 0);
 });
@@ -331,7 +338,7 @@ test('a usage client with a stored included count still ignores it', async () =>
 test('legacy paid top-ups on a usage role are still counted', async () => {
   const db = makeDb({
     purchases: [{ client_id: PARENT, role_id: ROLE, quantity: 4, status: 'paid' }],
-    pools: [pool({ quantity_remaining: 2 })]
+    pools: [pool({ quantity_purchased: 2 })]
   });
 
   const availability = await availabilityFor(db);
@@ -343,7 +350,7 @@ test('legacy paid top-ups on a usage role are still counted', async () => {
 
 test('the other models are untouched by the pool', async () => {
   for (const [planTier, billingModel] of [['basic', 'fixed'], ['pro', 'rollover']]) {
-    const db = makeDb({ planTier, billingModel, included: 5, pools: [pool({ quantity_remaining: 9 })] });
+    const db = makeDb({ planTier, billingModel, included: 5, pools: [pool({ quantity_purchased: 9 })] });
 
     const availability = await availabilityFor(db);
 

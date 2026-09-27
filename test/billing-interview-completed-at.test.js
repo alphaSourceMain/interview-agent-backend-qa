@@ -101,20 +101,16 @@ test('every path that makes an interview used stamps it', () => {
   const tavus = fs.readFileSync(path.join(ROOT, 'src', 'services', 'tavusEvents', 'index.js'), 'utf8');
   const text = fs.readFileSync(path.join(ROOT, 'src', 'routes', 'public', 'textInterview.js'), 'utf8');
 
-  // Video: both paths route through the one helper, which stamps before it does
-  // anything else.
+  // Video: both paths route through the one helper, which records the fact and
+  // nothing else.
   assert.match(tavus, /markInterviewCompleted\(\{ db: supabaseAdmin, interviewId \}\)/);
-  const helperStart = tavus.indexOf('async function syncInterviewCapacityAfterUse');
+  const helperStart = tavus.indexOf('async function recordInterviewCompletion');
   const helper = tavus.slice(helperStart, tavus.indexOf('async function applyTranscriptScoringForInterview'));
-  assert.ok(helper.length, 'expected the capacity helper to be present');
-  assert.ok(
-    helper.indexOf('markInterviewCompleted') < helper.indexOf('getRoleInterviewAvailability'),
-    'the fact is recorded before anything that can fail'
-  );
+  assert.ok(helper.length, 'expected the completion helper to be present');
 
-  // And the helper is reached from both the scored-transcript path and the
+  // And it is reached from both the scored-transcript path and the
   // final-transcript reconciliation.
-  assert.equal((tavus.match(/await syncInterviewCapacityAfterUse\(/g) || []).length, 2);
+  assert.equal((tavus.match(/await recordInterviewCompletion\(/g) || []).length, 2);
 
   // Text.
   assert.match(text, /markInterviewCompleted\(\{ db: supabaseAdmin, interviewId: insertedInterview\.id \}\)/);

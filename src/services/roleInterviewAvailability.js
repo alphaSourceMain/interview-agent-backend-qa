@@ -79,129 +79,64 @@ function unresolvedAvailability() {
   return { ...UNRESOLVED_AVAILABILITY };
 }
 
-// Credits are only spendable under the rollover model, and only that model
-// carries a drawn offset. Loaded lazily because the credit service reads
-// availability to decide what to mint.
-async function loadRolloverPosition(db, clientId, roleId) {
-  const { listAvailableCredits } = require('./interviewCredits');
-  const { data: role, error: roleError } = await db
-    .from('roles')
-    .select('rollover_drawn_offset')
-    .eq('id', roleId)
-    .maybeSingle();
-  if (roleError) throw new Error(roleError.message || 'Role rollover offset lookup failed');
-
-  const credits = await listAvailableCredits({ db, clientId });
-  let creditInterviews = 0;
-  for (const credit of credits) {
-    const remaining = parseWholeNonNegative(credit?.remaining);
-    if (remaining != null) creditInterviews += remaining;
-  }
-
-  return {
-    creditInterviews,
-    rolloverDrawnOffset: parseWholeNonNegative(role?.rollover_drawn_offset) ?? 0
-  };
+// Loaded lazily: the allocation reads isUsedInterviewRow from this file, so a
+// top-level require would be circular.
+function loadAllocator() {
+  return require('./interviewAllocation').allocateInterviews;
 }
 
-async function getRoleInterviewAvailability({ db, roleId, clientId }) {
+/**
+ * What a role has left.
+ *
+ * Everything here is derived from the interviews table by the allocation, so the
+ * numbers move the instant an interview is stamped completed — no counter to
+ * keep in step, no job to fall behind.
+ *
+ * `allocation` is optional and exists for callers that need several roles: the
+ * allocation walks every used interview for the whole family, so a roles list
+ * should compute it once and pass it to each role rather than paying for that
+ * walk per role. Omit it and one is computed for this role alone.
+ */
+async function getRoleInterviewAvailability({ db, roleId, clientId, allocation = null } = {}) {
   if (!db || !roleId || !clientId) return unresolvedAvailability();
 
   const billingScope = await resolveBillingOwnerForScope(db, clientId);
   if (!billingScope.ok) return unresolvedAvailability();
   const billingClientId = billingScope.billingClientId || clientId;
 
-  const { data: planSettings, error: planSettingsError } = await db
-    .from('client_plan_settings')
-    .select('included_interviews_per_role,plan_tier,billing_model')
-    .eq('client_id', billingClientId)
-    .maybeSingle();
-  if (planSettingsError) return unresolvedAvailability();
-
-  const billingModel = normalizeBillingModel(planSettings?.billing_model, planSettings?.plan_tier);
-
-  // The usage model has no per-role included count — an Enterprise client buys
-  // one pool that every role draws from. Checked before the guard below, because
-  // a null included count would otherwise return an all-null response and every
-  // enforcement point reads `remaining != null && <= 0`, so all limits would
-  // silently stop applying.
-  const includedInterviewsPerRole = billingModel === USAGE_BILLING_MODEL
-    ? 0
-    : parseWholeNonNegative(planSettings?.included_interviews_per_role);
-  if (includedInterviewsPerRole == null) return unresolvedAvailability();
-
-  const { data: purchaseRows, error: purchasesError } = await db
-    .from('role_interview_purchases')
-    .select('quantity')
-    .eq('client_id', clientId)
-    .eq('role_id', roleId)
-    .eq('status', 'paid');
-  if (purchasesError) return unresolvedAvailability();
-
-  let purchasedInterviews = 0;
-  for (const row of (purchaseRows || [])) {
-    const quantity = parseWholeNonNegative(row?.quantity);
-    if (quantity != null) purchasedInterviews += quantity;
-  }
-
-  const { data: interviewRows, error: interviewsError } = await db
-    .from('interviews')
-    .select('status,transcript_scores,interview_summary,has_substantive_response,failure_code,conversation_progress_state')
-    .eq('client_id', clientId)
-    .eq('role_id', roleId);
-  if (interviewsError) return unresolvedAvailability();
-
-  let usedInterviews = 0;
-  for (const row of (interviewRows || [])) {
-    if (isUsedInterviewRow(row)) usedInterviews += 1;
-  }
-
-  // Only the rollover model has credits to add or an offset to subtract, so a
-  // fixed or usage client costs exactly the queries it always did and sees
-  // exactly the numbers it always saw.
-  let creditInterviews = 0;
-  let rolloverDrawnOffset = 0;
-  if (billingModel === ROLLOVER_BILLING_MODEL) {
+  let resolved = allocation;
+  if (!resolved) {
     try {
-      const position = await loadRolloverPosition(db, clientId, roleId);
-      creditInterviews = position.creditInterviews;
-      rolloverDrawnOffset = position.rolloverDrawnOffset;
+      resolved = await loadAllocator()({ db, billingClientId });
     } catch (_) {
       return unresolvedAvailability();
     }
   }
+  if (!resolved?.billing_model) return unresolvedAvailability();
 
-  // The pool belongs to the payer, so a child entity's role draws on the
-  // parent's. Loaded lazily to keep the require graph acyclic.
-  let poolRemainingInterviews = 0;
-  if (billingModel === USAGE_BILLING_MODEL) {
-    try {
-      const { getPoolRemaining } = require('./interviewPool');
-      poolRemainingInterviews = await getPoolRemaining({ db, billingClientId });
-    } catch (_) {
-      return unresolvedAvailability();
-    }
-  }
+  const billingModel = resolved.billing_model;
+  const counters = resolved.by_role.get(String(roleId)) || {
+    used: 0, own: 0, credit: 0, pool: 0, usage: 0, own_remaining: 0, drawn_from_revoked: 0
+  };
+  const allowance = resolved.allowance_by_role?.get(String(roleId));
+  const includedInterviewsPerRole = resolved.included_per_role ?? 0;
+  const purchasedInterviews = Math.max(0, (allowance ?? includedInterviewsPerRole) - includedInterviewsPerRole);
 
-  const ownRemainingInterviews = Math.max(
-    0,
-    includedInterviewsPerRole + purchasedInterviews - usedInterviews - rolloverDrawnOffset
-  );
   return {
     included_interviews_per_role: includedInterviewsPerRole,
     purchased_interviews: purchasedInterviews,
-    used_interviews: usedInterviews,
+    used_interviews: counters.used,
     // Under the usage model there is no cap to report: an interview past the
     // pool is metered, not refused. Null is what the enforcement points already
     // read as "no limit applies", so a usage client is never blocked and never
     // told a role is full. The pool figure below is what a dashboard shows.
     remaining_interviews: billingModel === USAGE_BILLING_MODEL
       ? null
-      : ownRemainingInterviews + creditInterviews,
-    own_remaining_interviews: ownRemainingInterviews,
-    credit_interviews: creditInterviews,
-    pool_remaining_interviews: poolRemainingInterviews,
-    rollover_drawn_offset: rolloverDrawnOffset,
+      : counters.own_remaining + resolved.totals.credit_balance,
+    own_remaining_interviews: counters.own_remaining,
+    credit_interviews: billingModel === ROLLOVER_BILLING_MODEL ? resolved.totals.credit_balance : 0,
+    pool_remaining_interviews: billingModel === USAGE_BILLING_MODEL ? resolved.totals.pool_remaining : 0,
+    rollover_drawn_offset: counters.drawn_from_revoked,
     billing_model: billingModel
   };
 }

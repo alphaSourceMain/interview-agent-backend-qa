@@ -126,9 +126,12 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
     billing_model: null,
     entries: [],
     by_role: new Map(),
+    included_per_role: 0,
+    allowance_by_role: new Map(),
     totals: { used: 0, own: 0, credit: 0, pool: 0, usage: 0, credit_balance: 0, pool_remaining: 0 },
     credits: [],
     pools: [],
+    roles: [],
     entity_label_by_client: new Map()
   };
   if (!db || !billingClientId) return empty;
@@ -335,6 +338,10 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
     billing_model: billing.billing_model,
     entries,
     by_role: roleUsage,
+    // The per-role figures availability reports: the included count is the same
+    // for every role, and the allowance is that plus anything bought for it.
+    included_per_role: includedPerRole,
+    allowance_by_role: allowanceByRole,
     totals,
     credits,
     pools,

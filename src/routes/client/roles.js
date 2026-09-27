@@ -14,6 +14,7 @@ const { hasClientAccess, hasClientManagerAccess } = require('../../services/serv
 const { resolveBillingOwnerForScope } = require('../../services/clientBillingScope');
 const { findUnusedFirstRolePrepayCredit } = require('../../services/rolePurchaseFinalizer');
 const { syncRoleCreditsForStatusChange } = require('../../services/interviewCredits');
+const { allocateInterviews } = require('../../services/interviewAllocation');
 
 const { requireAuth, withClientScope } = require('../../middleware/auth');
 const { createRoleJdReplacementRouter } = require('./roleJdReplacement');
@@ -223,13 +224,36 @@ router.get('/', requireAuth, withClientScope, async (req, res) => {
 
     const availabilityByRoleId = {};
     if (roles.length) {
-      const availabilityRows = await Promise.all(roles.map(async (role) => {
-        if (!role?.id) {
-          return [null, null];
+      // The allocation walks every used interview for the whole billing family,
+      // so it is computed once here and handed to each role rather than being
+      // paid for per role.
+      const allocationByBillingClientId = new Map();
+      const allocationFor = async (roleClientId) => {
+        const scope = await resolveBillingOwnerForScope(db, roleClientId);
+        if (!scope.ok) return null;
+        const billingClientId = scope.billingClientId || roleClientId;
+        if (!allocationByBillingClientId.has(billingClientId)) {
+          allocationByBillingClientId.set(
+            billingClientId,
+            await allocateInterviews({ db, billingClientId })
+          );
         }
-        const availability = await getRoleInterviewAvailability({ db, roleId: role.id, clientId: role.client_id || clientId });
-        return [role.id, availability];
-      }));
+        return allocationByBillingClientId.get(billingClientId);
+      };
+
+      const availabilityRows = [];
+      for (const role of roles) {
+        if (!role?.id) {
+          availabilityRows.push([null, null]);
+          continue;
+        }
+        const roleClientId = role.client_id || clientId;
+        const allocation = await allocationFor(roleClientId);
+        const availability = await getRoleInterviewAvailability({
+          db, roleId: role.id, clientId: roleClientId, allocation
+        });
+        availabilityRows.push([role.id, availability]);
+      }
       for (const [roleId, availability] of availabilityRows) {
         if (!roleId) continue;
         availabilityByRoleId[roleId] = availability || null;

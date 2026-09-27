@@ -10,6 +10,7 @@ const { supabaseAdmin } = require('../../clients/supabase');
 const { checkDuplicateCandidate } = require('../../services/duplicateCandidate');
 const { getRoleInterviewAvailability, syncRoleInterviewLimitNotification } = require('../../services/roleInterviewAvailability');
 const { syncInterviewCreditDraw } = require('../../services/interviewCredits');
+const { markInterviewCompleted } = require('../../services/interviewCompletion');
 const { isRoleInactive, buildRoleInactivePayload, logInactiveRoleBlocked } = require('../../services/roleLifecycle');
 
 const router = express.Router();
@@ -986,6 +987,20 @@ router.post('/answers', async (req, res) => {
         analysis: interviewAnalysis,
         status: 'completed',
       }).select('id').maybeSingle();
+
+      // The one fact billing needs. A text interview is complete the moment it
+      // is inserted, so it is stamped here.
+      if (insertedInterview?.id) {
+        try {
+          await markInterviewCompleted({ db: supabaseAdmin, interviewId: insertedInterview.id });
+        } catch (completionErr) {
+          console.error('[text-interview] interview completion stamp failed', {
+            interview_id: insertedInterview.id,
+            error: completionErr?.message || completionErr
+          });
+        }
+      }
+
       const postInsertAvailability = await getRoleInterviewAvailability({
         db: supabaseAdmin,
         roleId: role.id,

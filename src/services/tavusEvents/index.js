@@ -14,6 +14,7 @@ const { generateInterviewAnalysisV2 } = require('../interviewAnalysisV2');
 const { INSUFFICIENT_SUMMARY, isSubstantiveTranscript, scoreInterview } = require('../interviewScoring');
 const { getRoleInterviewAvailability, syncRoleInterviewLimitNotification } = require('../roleInterviewAvailability');
 const { syncInterviewCreditDraw } = require('../interviewCredits');
+const { markInterviewCompleted } = require('../interviewCompletion');
 const { transcriptCompletionTransition } = require('../interviewLifecycle');
 const { classifyCandidateUtterance } = require('../interviewUtteranceClassifier');
 const { excludeWarmupFromTranscript, excludeWarmupFromTranscriptItems } = require('../warmupExclusion');
@@ -1427,6 +1428,22 @@ async function syncInterviewCapacityAfterUse({ interview, fresh, requestId, conv
   const roleId = fresh?.role_id || interview?.role_id || null;
   const clientId = fresh?.client_id || interview?.client_id || null;
   const interviewId = fresh?.id || interview?.id || null;
+
+  // The one fact billing needs. Written first and independently of anything
+  // below, so it lands even if the capacity work fails.
+  if (interviewId) {
+    try {
+      await markInterviewCompleted({ db: supabaseAdmin, interviewId });
+    } catch (completionErr) {
+      console.error('[webhook] interview completion stamp failed', {
+        request_id: requestId || null,
+        interview_id: interviewId,
+        conversation_id: conversationId || null,
+        error: completionErr?.message || completionErr
+      });
+    }
+  }
+
   if (!roleId || !clientId) return;
 
   try {

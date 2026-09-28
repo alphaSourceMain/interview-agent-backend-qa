@@ -9,8 +9,7 @@ const { resolveBillingOwnerForScope } = require('../../services/clientBillingSco
 const { canViewLegalBillingForClient } = require('../../services/clientScope');
 const { supabaseAdmin } = require('../../clients/supabase');
 const { normalizeBillingModel } = require('../../services/billingModel');
-const { listAvailableCredits } = require('../../services/interviewCredits');
-const { computeUnbilledUsage } = require('../../services/usageBilling');
+const { readBillingForClient } = require('../../services/billingReadModel');
 const { requireAuth, withClientScope } = require('../../middleware/auth');
 const {
   hasClientWriteAccess,
@@ -114,19 +113,17 @@ router.get('/clients/billing/credits', requireAuth, withClientScope, async (req,
     const clientId = resolveReadableClientId(req, res)
     if (!clientId) return
 
-    const credits = await listAvailableCredits({ db: supabaseAdmin, clientId })
-    if (!credits.length) return res.json({ items: [], total_remaining: 0 })
+    const billing = await readBillingForClient({ db: supabaseAdmin, clientId })
+    if (!billing.ok) return res.status(500).json({ error: 'list_credits_failed', detail: billing.reason })
+    if (!billing.credits.items.length) return res.json({ items: [], total_remaining: 0 })
 
-    const sourceRoleIds = [...new Set(credits.map((credit) => String(credit.source_role_id || '')).filter(Boolean))]
-    const { data: roles, error: rolesError } = await supabaseAdmin
-      .from('roles')
-      .select('id,title')
-      .in('id', sourceRoleIds)
-      .eq('client_id', clientId)
-    if (rolesError) return res.status(500).json({ error: 'list_credits_failed', detail: rolesError.message })
-    const titleById = new Map((roles || []).map((role) => [String(role.id), role.title || null]))
+    // The role a credit came from is named from the caller's own roles only, so
+    // a title never leaks across clients.
+    const titleById = new Map((billing.allocation.roles || [])
+      .filter((role) => String(role.client_id) === String(clientId))
+      .map((role) => [String(role.id), role.title || null]))
 
-    const items = credits.map((credit) => ({
+    const items = billing.credits.items.map((credit) => ({
       id: credit.id,
       source_role_id: credit.source_role_id,
       source_role_title: titleById.get(String(credit.source_role_id)) || null,
@@ -135,28 +132,58 @@ router.get('/clients/billing/credits', requireAuth, withClientScope, async (req,
       minted_at: credit.minted_at,
       expires_at: credit.expires_at
     }))
-    const totalRemaining = items.reduce((sum, item) => sum + Number(item.remaining || 0), 0)
-    return res.json({ items, total_remaining: totalRemaining })
+    return res.json({ items, total_remaining: billing.credits.total_remaining })
   } catch (e) {
     return res.status(500).json({ error: 'list_credits_failed', detail: e?.message || 'list_credits_failed' })
   }
 })
 
 // What a usage client has run beyond its included counts and not yet been
-// invoiced for. Read-only: nothing here talks to Stripe or writes the ledger.
+// invoiced for, and what it has already been invoiced. Read-only: nothing here
+// talks to Stripe or writes the ledger.
+//
+// The unbilled figure is live — an interview finished this morning is in it
+// straight away — so it is not the same as the amount on the next invoice,
+// which covers the month that has ended. Both come from the same allocation.
 router.get('/clients/billing/usage', requireAuth, withClientScope, async (req, res) => {
   try {
     const clientId = resolveReadableClientId(req, res)
     if (!clientId) return
 
-    const usage = await computeUnbilledUsage({ db: supabaseAdmin, clientId })
+    const billing = await readBillingForClient({ db: supabaseAdmin, clientId })
+    if (!billing.ok) return res.status(500).json({ error: 'read_usage_failed', detail: billing.reason })
+
     return res.json({
-      lines: usage.lines,
-      total_cents: usage.total_cents,
-      billable: usage.lines.length > 0
+      lines: billing.unbilled_usage.lines,
+      total_cents: billing.unbilled_usage.total_cents,
+      billable: billing.unbilled_usage.billable,
+      billed_invoices: billing.billed_usage.invoices
     })
   } catch (e) {
     return res.status(500).json({ error: 'read_usage_failed', detail: e?.message || 'read_usage_failed' })
+  }
+})
+
+// The Enterprise interview pool bought at signup: what is left of it, and what
+// each block has been spent on. A client on any other model has no pool, which
+// is zero rather than an error.
+router.get('/clients/billing/pool', requireAuth, withClientScope, async (req, res) => {
+  try {
+    const clientId = resolveReadableClientId(req, res)
+    if (!clientId) return
+
+    const billing = await readBillingForClient({ db: supabaseAdmin, clientId })
+    if (!billing.ok) return res.status(500).json({ error: 'read_pool_failed', detail: billing.reason })
+
+    return res.json({
+      billing_model: billing.billing_model,
+      purchased: billing.pool.purchased,
+      used: billing.pool.used,
+      remaining: billing.pool.remaining,
+      items: billing.pool.items
+    })
+  } catch (e) {
+    return res.status(500).json({ error: 'read_pool_failed', detail: e?.message || 'read_pool_failed' })
   }
 })
 

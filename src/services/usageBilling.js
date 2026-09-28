@@ -58,6 +58,9 @@ function monthLabel(startIso) {
   return `${date.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' })} ${date.getUTCFullYear()}`;
 }
 
+const PRIOR_MONTH_WINDOW = 'prior-month';
+const ALL_UNBILLED_WINDOW = 'all';
+
 function normalizeRoleStatus(value) {
   return String(value || '').trim().toLowerCase() === 'inactive' ? 'closed' : 'open';
 }
@@ -71,8 +74,14 @@ function normalizeRoleStatus(value) {
  * silently. The ledger's unique interview_id is what stops it being billed
  * again, and the caller stamps completed_at afterwards so it behaves normally
  * from then on.
+ *
+ * `window: 'all'` drops the month filter and answers with every metered
+ * interview that is not yet on the ledger — what a dashboard shows, where an
+ * interview run this morning should already be visible. Billing always uses the
+ * default window, so what is *displayed* and what is *charged* come from the
+ * same arithmetic and differ only in how far they look.
  */
-async function computeUnbilledUsage({ db, clientId, asOf, allocation = null } = {}) {
+async function computeUnbilledUsage({ db, clientId, asOf, allocation = null, window = PRIOR_MONTH_WINDOW } = {}) {
   if (!db || !clientId) return emptyUsage('invalid_request');
 
   const resolved = allocation
@@ -82,6 +91,7 @@ async function computeUnbilledUsage({ db, clientId, asOf, allocation = null } = 
   const unitPriceCents = parseWholeNonNegative(resolved.usage_interview_fee_cents);
   if (unitPriceCents == null) return emptyUsage('no_usage_price');
 
+  const wholeHistory = window === ALL_UNBILLED_WINDOW;
   const { start, end } = priorMonthBounds(asOf);
 
   const familyIds = [String(clientId), ...[...resolved.entity_label_by_client.keys()]];
@@ -104,7 +114,7 @@ async function computeUnbilledUsage({ db, clientId, asOf, allocation = null } = 
 
     const completedAt = entry.completed_at;
     const isMissing = !completedAt;
-    if (!isMissing && !(completedAt >= start && completedAt < end)) continue;
+    if (!wholeHistory && !isMissing && !(completedAt >= start && completedAt < end)) continue;
     if (isMissing) missingCompletedAt.push(entry);
 
     const roleId = String(entry.role_id);
@@ -206,6 +216,45 @@ async function recordUsageLines({ db, clientId, lines, stripeInvoiceId, periodSt
 
   const inserted = Array.isArray(data) ? data : [];
   return { inserted: inserted.length, rows: inserted };
+}
+
+/**
+ * The invoices this client's usage has already been billed on, newest first.
+ *
+ * History comes from the ledger rather than the allocation: it is the record of
+ * what was actually charged, at the price it was charged at, and it must not
+ * move if a role is renamed or an interview is re-examined later.
+ */
+async function listBilledUsageInvoices({ db, clientId, limit = 12 } = {}) {
+  if (!db || !clientId) return [];
+  const { data, error } = await db
+    .from('usage_billing_ledger')
+    .select('stripe_invoice_id,unit_price_cents,period_start,period_end,billed_at')
+    .eq('client_id', clientId)
+    .not('billed_at', 'is', null)
+    .order('billed_at', { ascending: false });
+  if (error) throw new Error(error.message || 'Usage billing ledger lookup failed');
+
+  const byInvoice = new Map();
+  for (const row of (data || [])) {
+    const invoiceId = String(row?.stripe_invoice_id || '').trim();
+    if (!invoiceId) continue;
+    if (!byInvoice.has(invoiceId)) {
+      byInvoice.set(invoiceId, {
+        stripe_invoice_id: invoiceId,
+        interviews: 0,
+        amount_cents: 0,
+        period_start: row.period_start || null,
+        period_end: row.period_end || null,
+        month_label: row.period_start ? monthLabel(row.period_start) : null,
+        billed_at: row.billed_at || null
+      });
+    }
+    const invoice = byInvoice.get(invoiceId);
+    invoice.interviews += 1;
+    invoice.amount_cents += Number(row.unit_price_cents || 0);
+  }
+  return [...byInvoice.values()].slice(0, limit);
 }
 
 /** Every ledger row attached to one Stripe invoice. */
@@ -453,11 +502,14 @@ async function createImmediateUsageInvoice({
 }
 
 module.exports = {
+  ALL_UNBILLED_WINDOW,
   EMPTY_USAGE,
+  PRIOR_MONTH_WINDOW,
   USAGE_BILLING_MODEL,
   applyUsageToInvoice,
   computeUnbilledUsage,
   createImmediateUsageInvoice,
+  listBilledUsageInvoices,
   listLedgerRowsForInvoice,
   markUsageLinesBilled,
   priorMonthBounds,

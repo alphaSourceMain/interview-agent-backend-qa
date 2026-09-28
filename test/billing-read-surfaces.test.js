@@ -51,6 +51,7 @@ function usedInterviews(count, { clientId = MINE, roleId = 'role_1', prefix = 'i
     client_id: clientId,
     role_id: roleId,
     status: 'completed',
+    completed_at: new Date(start + i * 3600000).toISOString(),
     updated_at: new Date(start + i * 3600000).toISOString()
   }));
 }
@@ -74,6 +75,7 @@ function makeDb({
   unitPriceCents = null,
   credits = [],
   interviews = [],
+  pools = [],
   roles = [
     { id: 'role_1', client_id: MINE, title: 'Hygienist' },
     { id: 'role_closed', client_id: MINE, title: 'Receptionist' }
@@ -101,6 +103,7 @@ function makeDb({
     ],
     roles,
     interviews,
+    client_interview_pools: pools,
     interview_credits: credits,
     interview_credit_draws: [],
     usage_billing_ledger: ledger
@@ -137,8 +140,8 @@ function loadClientApp(db, { memberships = [MINE], isGlobalAdmin = false } = {})
 test('a client sees its credits, soonest to expire first, with the role they came from', async () => {
   const db = makeDb({
     credits: [
-      credit({ id: 'c_late', source_role_id: 'role_closed', remaining: 2, expires_at: '2026-12-01T00:00:00.000Z' }),
-      credit({ id: 'c_soon', source_role_id: 'role_1', remaining: 3, expires_at: '2026-10-01T00:00:00.000Z' })
+      credit({ id: 'c_late', source_role_id: 'role_closed', quantity: 2, expires_at: '2026-12-01T00:00:00.000Z' }),
+      credit({ id: 'c_soon', source_role_id: 'role_1', quantity: 3, expires_at: '2026-10-01T00:00:00.000Z' })
     ]
   });
 
@@ -241,6 +244,44 @@ test('a client on another model sees no usage rather than an error', async () =>
   assert.equal(res.body.billable, false);
 });
 
+test('the unbilled figure is live, not the month that has ended', async () => {
+  // Two interviews last month, two this morning. The next invoice will only
+  // cover last month, but the dashboard must show everything run and unbilled,
+  // or a client cannot tell what an interview is costing them today.
+  const db = makeDb({
+    planTier: 'enterprise', billingModel: 'usage', included: 0, unitPriceCents: 2500,
+    interviews: [
+      ...usedInterviews(2, { prefix: 'last', from: '2026-08-10T00:00:00.000Z' }),
+      ...usedInterviews(2, { prefix: 'today', from: new Date().toISOString() })
+    ]
+  });
+
+  const res = await request(loadClientApp(db)).get('/clients/billing/usage');
+
+  assert.equal(res.body.total_cents, 4 * 2500);
+  assert.equal(res.body.lines[0].quantity, 4);
+});
+
+test('interviews already invoiced are not shown as unbilled again', async () => {
+  const db = makeDb({
+    planTier: 'enterprise', billingModel: 'usage', included: 0, unitPriceCents: 2500,
+    interviews: usedInterviews(3),
+    ledger: [{
+      client_id: MINE, role_id: 'role_1', interview_id: 'iv_1', unit_price_cents: 2500,
+      stripe_invoice_id: 'in_1', billed_at: '2026-09-01T00:00:00.000Z',
+      period_start: '2026-08-01T00:00:00.000Z', period_end: '2026-09-01T00:00:00.000Z'
+    }]
+  });
+
+  const res = await request(loadClientApp(db)).get('/clients/billing/usage');
+
+  assert.equal(res.body.total_cents, 2 * 2500, 'the billed one is history, not a balance');
+  assert.deepEqual(res.body.billed_invoices.map((invoice) => invoice.stripe_invoice_id), ['in_1']);
+  assert.equal(res.body.billed_invoices[0].interviews, 1);
+  assert.equal(res.body.billed_invoices[0].amount_cents, 2500);
+  assert.equal(res.body.billed_invoices[0].month_label, 'August 2026');
+});
+
 test('a client cannot read the usage of a client it is not a member of', async () => {
   const res = await request(loadClientApp(makeDb(), { memberships: [MINE] }))
     .get(`/clients/billing/usage?client_id=${THEIRS}`);
@@ -258,6 +299,75 @@ test('reading usage writes nothing', async () => {
 
   assert.deepEqual(db.tables.usage_billing_ledger, [], 'a read must never reserve or bill anything');
   assert.deepEqual(db.calls.filter((call) => call.op !== 'select'), []);
+});
+
+test('a usage client sees what is left of its interview pool', async () => {
+  const db = makeDb({
+    planTier: 'enterprise', billingModel: 'usage', included: 0, unitPriceCents: 2500,
+    interviews: usedInterviews(4),
+    pools: [{
+      id: 'pool_1', client_id: MINE, quantity_purchased: 10, status: 'paid',
+      created_at: '2026-07-01T00:00:00.000Z', paid_at: '2026-07-01T00:00:00.000Z'
+    }]
+  });
+
+  const res = await request(loadClientApp(db)).get('/clients/billing/pool');
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.billing_model, 'usage');
+  assert.equal(res.body.purchased, 10);
+  assert.equal(res.body.used, 4, 'four interviews have been run against it');
+  assert.equal(res.body.remaining, 6);
+  assert.equal(res.body.items[0].id, 'pool_1');
+});
+
+test('an unpaid pool is not spendable and is not counted', async () => {
+  const db = makeDb({
+    planTier: 'enterprise', billingModel: 'usage', included: 0, unitPriceCents: 2500,
+    pools: [{
+      id: 'pool_pending', client_id: MINE, quantity_purchased: 10, status: 'pending',
+      created_at: '2026-07-01T00:00:00.000Z', paid_at: null
+    }]
+  });
+
+  const res = await request(loadClientApp(db)).get('/clients/billing/pool');
+
+  assert.equal(res.body.purchased, 0);
+  assert.equal(res.body.remaining, 0);
+  assert.deepEqual(res.body.items, []);
+});
+
+test('a client on another model has no pool rather than an error', async () => {
+  const db = makeDb({ planTier: 'pro', billingModel: 'rollover', interviews: usedInterviews(3) });
+
+  const res = await request(loadClientApp(db)).get('/clients/billing/pool');
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.remaining, 0);
+  assert.deepEqual(res.body.items, []);
+});
+
+test('a client cannot read the pool of a client it is not a member of', async () => {
+  const res = await request(loadClientApp(makeDb(), { memberships: [MINE] }))
+    .get(`/clients/billing/pool?client_id=${THEIRS}`);
+
+  assert.equal(res.status, 403);
+});
+
+test('reading the pool writes nothing', async () => {
+  const db = makeDb({
+    planTier: 'enterprise', billingModel: 'usage', included: 0, unitPriceCents: 2500,
+    interviews: usedInterviews(3),
+    pools: [{
+      id: 'pool_1', client_id: MINE, quantity_purchased: 2, status: 'paid',
+      created_at: '2026-07-01T00:00:00.000Z', paid_at: '2026-07-01T00:00:00.000Z'
+    }]
+  });
+
+  await request(loadClientApp(db)).get('/clients/billing/pool');
+
+  assert.deepEqual(db.calls.filter((call) => call.op !== 'select'), [],
+    'nothing is drawn down by looking at it');
 });
 
 // --- the admin surface -----------------------------------------------------
@@ -283,7 +393,7 @@ test('the admin summary answers billing model, pricing, credits and unbilled usa
   const db = makeDb({
     planTier: 'enterprise', billingModel: 'usage', included: 1, unitPriceCents: 2500,
     interviews: usedInterviews(4),
-    credits: [credit({ remaining: 2 })]
+    credits: [credit({ quantity: 2 })]
   });
 
   const res = await request(loadAdminApp(db)).get(`/admin/clients/${MINE}/billing-summary`);
@@ -354,10 +464,11 @@ test('GET /roles carries the new availability keys through to the payload', () =
   }
 });
 
-test('the three read routes are registered with the auth they need', () => {
+test('the four read routes are registered with the auth they need', () => {
   const clientSource = fs.readFileSync(clientBillingPath, 'utf8');
   assert.match(clientSource, /router\.get\('\/clients\/billing\/credits', requireAuth, withClientScope/);
   assert.match(clientSource, /router\.get\('\/clients\/billing\/usage', requireAuth, withClientScope/);
+  assert.match(clientSource, /router\.get\('\/clients\/billing\/pool', requireAuth, withClientScope/);
 
   const adminSource = fs.readFileSync(adminBillingPath, 'utf8');
   assert.match(adminSource, /router\.get\('\/clients\/:id\/billing-summary', requireAuth, requireAdmin/);
@@ -366,6 +477,7 @@ test('the three read routes are registered with the auth they need', () => {
   for (const route of [
     'GET /clients/billing/credits',
     'GET /clients/billing/usage',
+    'GET /clients/billing/pool',
     'GET /admin/clients/:id/billing-summary'
   ]) {
     assert.ok(inventory.includes(route), `${route} must be in the route inventory`);

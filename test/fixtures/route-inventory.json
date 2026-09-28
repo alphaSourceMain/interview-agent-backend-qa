@@ -71,6 +71,7 @@
   "GET /client-members/me",
   "GET /client-members/tester-ack",
   "GET /clients/billing/credits",
+  "GET /clients/billing/pool",
   "GET /clients/billing/summary",
   "GET /clients/billing/usage",
   "GET /clients/entities",

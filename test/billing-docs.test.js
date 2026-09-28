@@ -46,9 +46,9 @@ test('the env var and cron path in the document are the ones the route uses', ()
 
 test('every billing migration on disk is listed, and every listed one exists', () => {
   const migrations = fs.readdirSync(path.join(ROOT, 'supabase', 'migrations'))
-    .filter((name) => /^2026092[0-9]\d{6}_(billing_models|interview_credits|usage_billing_ledger|billing_idempotency_keys)\.sql$/.test(name));
+    .filter((name) => /^2026092[0-9]\d{6}_(billing_models|interview_credits|usage_billing_ledger|billing_idempotency_keys|role_interview_purchase_failed_status|enterprise_pool_discounts|client_interview_pools|interviews_completed_at)\.sql$/.test(name));
 
-  assert.equal(migrations.length, 4, 'expected the four billing migrations');
+  assert.equal(migrations.length, 8, 'expected the eight billing migrations');
   for (const name of migrations) {
     assert.match(doc, new RegExp(name.replace(/\./g, '\\.')), `${name} must be listed in the document`);
   }
@@ -101,4 +101,61 @@ test('the new cron surface is inventoried in the public-surfaces findings', (t) 
   const findings = fs.readFileSync(findingsPath, 'utf8');
   assert.match(findings, /POST \/internal\/billing\/usage-invoices/);
   assert.match(findings, /USAGE_BILLING_CRON_SECRET/);
+});
+
+test('the migrations that change tables this repository does not define are called out', () => {
+  // A migration touching `interviews`, `roles` or `client_plan_settings` is
+  // changing a table whose access model lives outside this repository. Someone
+  // applying these needs to know which ones those are.
+  const dir = path.join(ROOT, 'supabase', 'migrations');
+  const created = fs.readdirSync(dir)
+    .map((name) => fs.readFileSync(path.join(dir, name), 'utf8'))
+    .join(' ');
+
+  for (const table of ['interviews', 'roles', 'client_plan_settings']) {
+    const createsIt = new RegExp('create table (if not exists )?(public\\.)?' + table + '\\b');
+    assert.ok(
+      !createsIt.test(created),
+      table + ' is now created in this repository; the document says it is not'
+    );
+    assert.ok(doc.includes('`' + table + '`'), table + ' must be named in the document');
+  }
+  assert.match(doc, /does not define/i, 'the section must exist');
+});
+
+test('the completed_at migration still changes no access, as the document claims', () => {
+  const migration = fs.readFileSync(
+    path.join(ROOT, 'supabase', 'migrations', '20260926120000_interviews_completed_at.sql'), 'utf8'
+  );
+  // Comments are stripped: the migration says in prose that it deliberately
+  // grants nothing, and that sentence must not read as a grant.
+  const statements = migration
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith('--'))
+    .join(' ')
+    .toLowerCase();
+
+  for (const statement of ['grant ', 'revoke ', 'enable row level security']) {
+    assert.ok(!statements.includes(statement),
+      `the migration must not ${statement.trim()} on public.interviews`);
+  }
+  assert.match(doc, /no RLS,\s+`grant` or `revoke` statement/,
+    'the reason it has none must stay written down');
+});
+
+test('the client endpoints in the document include the pool read', () => {
+  const inventory = JSON.parse(fs.readFileSync(path.join(ROOT, 'test', 'fixtures', 'route-inventory.json'), 'utf8'));
+  assert.match(doc, /GET \/clients\/billing\/pool/);
+  assert.ok(inventory.includes('GET /clients/billing/pool'));
+});
+
+test('the document says the dashboard figure is live and the invoice is the prior month', () => {
+  assert.match(doc, /not the same number/i);
+  assert.match(doc, /calendar month that has ended/i);
+});
+
+test('the frontend contract exists and is pointed at from the model document', () => {
+  assert.ok(fs.existsSync(path.join(ROOT, 'docs', 'billing-frontend-contract.md')));
+  assert.match(doc, /billing-frontend-contract\.md/,
+    'a frontend developer will not find it unless this document links to it');
 });

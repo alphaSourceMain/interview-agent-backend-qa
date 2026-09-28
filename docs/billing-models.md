@@ -86,22 +86,45 @@ interviews at all and simply pay per interview.
 interview beyond it is charged at the client's per-interview price. The included
 count is per role, not per client.
 
-**When it is billed** depends on how the client pays the platform fee.
+**Which allowance is spent first.** The role's own included count, then the
+client's interview pool, then the meter. An Enterprise client with 25 included
+per role and a pool of 200 pays nothing until both are gone. An interview's payer
+is decided by the order interviews were completed in and never changes
+afterwards.
 
-- **Monthly clients.** When Stripe opens the next month's draft invoice, the
-  usage for the period is added to it as line items before it goes out. The
-  client gets one invoice with the platform fee and their usage on it.
-- **Annual clients.** Their platform-fee invoice only appears once a year, so a
-  scheduled job raises a separate usage invoice each month, on the same day of
-  the month their subscription started. If that day does not exist in a given
-  month — the 31st in a 30-day month — it runs on the last day instead.
+**When it is billed.** Always the calendar month that has just ended, decided by
+when each interview completed. How it reaches the client depends on how they pay
+the platform fee.
 
-**What the invoice looks like.** One line per role:
+- **Monthly clients.** When Stripe opens the next invoice, last month's usage is
+  added to it as line items before it goes out. One invoice, platform fee and
+  usage together.
+- **Annual clients.** Their platform-fee invoice appears once a year, so a
+  scheduled job raises a separate usage invoice on the **1st of each month**. The
+  job runs daily and does nothing on any other day, so a missed day is a missed
+  run rather than a missed month.
+
+**Subscriptions start on the 1st.** An Enterprise checkout anchors the
+subscription's billing cycle to the next 1st of the month at 00:00 UTC, and the
+part-month before that is charged up front as a proration. Without this, a client
+who signed up on the 20th would be invoiced on the 20th while their usage was
+being calculated for calendar months.
+
+**What the invoice looks like.** One line per role, naming the entity where the
+role belongs to a child client, and whether the role is still open:
 
 ```
-Interviews — Hygienist (2026-08-01 to 2026-09-01)     12 x $25.00     $300.00
-Interviews — Front Desk (2026-08-01 to 2026-09-01)     3 x $25.00      $75.00
+Interviews — Hygienist [open] (August 2026)                12 x $25.00   $300.00
+Interviews — Downtown Office · Front Desk [closed] (August 2026)  3 x $25.00  $75.00
 ```
+
+**An interview with no completion time.** Completion is recorded on the
+interview when it finishes. If that write failed, the interview has no month to
+be billed in, so it is billed on the invoice being built now, logged as
+`usage_missing_completed_at` with the interview and client id, and stamped with
+the billing time so it behaves normally from then on. **A `usage_missing_completed_at`
+line means a completion stamp failed and is worth investigating** — the billing
+is correct either way, but something upstream did not finish cleanly.
 
 **An interview is never billed twice.** Each billed interview is recorded
 individually, and the database refuses a second record for the same interview.
@@ -194,19 +217,39 @@ and the last twelve usage invoices.
 
 ## Client endpoints
 
+Field-by-field request and response shapes for every endpoint below, with an
+example per billing model and every error code, are in
+[`docs/billing-frontend-contract.md`](billing-frontend-contract.md) — that is the
+document to hand a frontend developer.
+
 Both require an authenticated client user and return only that client's data.
 
 ```
 GET /clients/billing/credits
 GET /clients/billing/usage
+GET /clients/billing/pool
 ```
 
 `credits` lists unspent credit — the role it came from, how much is left, and
 when it expires — soonest to expire first. A client with no credits gets an empty
 list, not an error.
 
-`usage` shows what a usage client has run beyond its included counts and not yet
-been invoiced for. It is read-only and does not contact Stripe.
+`usage` shows what a usage client has run and not yet been invoiced for, plus the
+last twelve invoices their usage was billed on. It is read-only and does not
+contact Stripe.
+
+`pool` shows what is left of the Enterprise interview pool bought at signup.
+
+**The dashboard figure and the invoice are not the same number, deliberately.**
+What these endpoints report as unbilled is *live*: every metered interview not
+yet invoiced, including one that finished a minute ago. An invoice covers the
+calendar month that has ended. So the dashboard will usually show more than the
+next invoice charges. Both come from the same calculation over the same data and
+differ only in how far back they look.
+
+Every figure on these endpoints is worked out when it is asked for, from the
+interviews table, by the same function the invoice is built from — so a screen
+and a bill cannot disagree, and no number needs repairing after a failure.
 
 `GET /roles` also now returns `own_remaining_interviews`, `credit_interviews` and
 `billing_model` for each role, alongside the counts it already returned.
@@ -240,9 +283,11 @@ POST /internal/billing/usage-invoices
 Header: x-cron-secret: <USAGE_BILLING_CRON_SECRET>
 ```
 
-Run this **once a day**. The job itself picks out only the annual Enterprise
-clients whose anniversary is that day, so running it daily is correct and running
-it twice in a day is harmless.
+Run this **once a day**. The job bills annual Enterprise clients only, and does
+nothing at all unless the day is the **1st of the month** in UTC — it answers
+`{ "skipped": "not_first_of_month" }` otherwise. Running it daily is correct, and
+running it twice on the 1st is harmless: an interview already on the ledger is
+never billed again.
 
 It always answers `200` with a per-client breakdown, even if an individual client
 fails, so that a scheduler does not replay the clients that already succeeded.
@@ -252,23 +297,65 @@ Check the `failed` count and the `results` array.
 
 ## Migrations
 
-Applied in this order:
+Every migration this billing work added, in the order they apply. Names are
+timestamps, so alphabetical order is run order.
 
-| File | Adds |
+| File | What it does |
 | --- | --- |
-| `20260921120000_billing_models.sql` | `billing_model`, `usage_interview_fee_cents` and `rollover_days` on `client_plan_settings`, and backfills each existing client to the model its tier implies |
-| `20260921130000_interview_credits.sql` | `interview_credits`, `interview_credit_draws`, and `roles.rollover_drawn_offset` |
-| `20260921140000_usage_billing_ledger.sql` | `usage_billing_ledger` |
-| `20260921150000_billing_idempotency_keys.sql` | `billing_idempotency_keys` |
+| `20260921120000_billing_models.sql` | Adds `billing_model`, `usage_interview_fee_cents` and `rollover_days` to `client_plan_settings`, and backfills each existing client to the model its tier implies |
+| `20260921130000_interview_credits.sql` | Creates `interview_credits` and `interview_credit_draws`; adds `rollover_drawn_offset` to `roles` |
+| `20260921140000_usage_billing_ledger.sql` | Creates `usage_billing_ledger`, with a unique constraint on `interview_id` — the guard that stops an interview being billed twice |
+| `20260921150000_billing_idempotency_keys.sql` | Creates `billing_idempotency_keys`, for the `Idempotency-Key` contract on the money-spending admin routes |
+| `20260924120000_role_interview_purchase_failed_status.sql` | Widens the status check on `role_interview_purchases` to allow `failed`, which the code already wrote |
+| `20260925120000_enterprise_pool_discounts.sql` | Creates `enterprise_pool_discounts` and seeds the volume bands for pool pricing |
+| `20260925130000_client_interview_pools.sql` | Creates `client_interview_pools` and `client_interview_pool_draws` |
+| `20260926120000_interviews_completed_at.sql` | Adds `completed_at` to `interviews`, indexes `(client_id, completed_at)`, and backfills existing rows |
 
-All four are safe to run more than once. Every table creation is
-`create table if not exists`, every column addition is guarded by an existence
-check, and the tier backfill runs only on the migration that introduces the
-column — so re-running will not overwrite a model an administrator has since
-changed by hand.
+### Which of these touch tables this repository does not define
 
-All new tables have row-level security enabled and are reachable only by the
-service role.
+Most of the schema predates this repository: `interviews`, `clients`, `roles`
+and `client_plan_settings` have no `create table` anywhere in
+`supabase/migrations`. They are created and governed elsewhere, so a migration
+that touches one is changing a table whose access model is **not** visible here.
+
+| Migration | Foreign table it changes | What that means |
+| --- | --- | --- |
+| `20260921120000_billing_models.sql` | `client_plan_settings` | Adds three columns and backfills them. No change to who can read the table. |
+| `20260921130000_interview_credits.sql` | `roles` | Adds one column, `rollover_drawn_offset`. |
+| `20260926120000_interviews_completed_at.sql` | `interviews` | Adds one column and one index, and backfills it. |
+
+**`20260926120000_interviews_completed_at.sql` deliberately contains no RLS,
+`grant` or `revoke` statement**, and a test asserts it never gains one.
+`public.interviews` is not in the containment migration that locks the billing
+tables down, so it carries policies from outside this repository — very likely
+ones that let an authenticated dashboard user read their own client's rows.
+Revoking on it to match the billing tables would have broken the frontend.
+Adding a column is not a reason to change a table's access model.
+
+The other migrations create their own tables, so they set their own access:
+every one enables row-level security, revokes all privileges from `anon` and
+`authenticated`, and grants only the service role. Nothing reaches them except
+the backend.
+
+### Two things the client should check against the live database
+
+1. **Does `interviews.updated_at` have a default or a trigger?** Nothing in
+   `supabase/migrations` sets one, and the code writes it on some paths and not
+   others. It is no longer used for anything that decides money, but the C1
+   backfill of `completed_at` used it, so it is worth knowing what is really
+   there.
+2. **The `completed_at` backfill is approximate for older video interviews.**
+   It used `updated_at`, which on the scored-transcript path can predate the
+   finish. Interviews completed from C1 onwards carry a real stamp. Only
+   historical reporting is affected: nothing already billed is re-billed, because
+   the ledger is what prevents that.
+
+### Safe to re-run
+
+All of them. Every table creation is `create table if not exists`, every column
+addition is guarded by an existence check, and every backfill only fills rows
+that are still null — so re-running will not overwrite a model an administrator
+has since changed by hand, or move a completion time that is already recorded.
 
 ### Rolling back
 

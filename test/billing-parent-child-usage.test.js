@@ -53,6 +53,7 @@ function usedInterviews(count, { clientId, roleId, prefix }) {
     client_id: clientId,
     role_id: roleId,
     status: 'completed',
+    completed_at: new Date(start + i * 3600000).toISOString(),
     updated_at: new Date(start + i * 3600000).toISOString()
   }));
 }
@@ -259,7 +260,7 @@ test('the invoice item names the entity and the ledger is written against the pa
 
   assert.equal(result.applied, true);
   assert.equal(items.length, 1);
-  assert.match(items[0].description, /^Interviews — Downtown Office · Front Desk \(/);
+  assert.match(items[0].description, /^Interviews — Downtown Office · Front Desk \[open\] \(/);
   assert.equal(items[0].metadata.role_id, 'role_child');
   assert.equal(items[0].metadata.client_id, PARENT, 'the line belongs to the payer');
   assert.equal(items[0].customer, 'cus_1');

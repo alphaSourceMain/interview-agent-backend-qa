@@ -6,12 +6,12 @@
 // Monthly Enterprise clients need nothing here: their usage is added to the
 // platform-fee invoice each cycle by the invoice.created webhook. An annual
 // client only gets that invoice once a year, so their usage is raised as its own
-// invoice on the subscription anniversary day of each month.
+// invoice on the 1st of each month.
 
 const express = require('express');
 
 const { supabaseAdmin } = require('../../clients/supabase');
-const { createImmediateUsageInvoice, isAnniversaryToday } = require('../../services/usageBilling');
+const { createImmediateUsageInvoice } = require('../../services/usageBilling');
 const { secretsMatch } = require('../../services/secretCompare');
 
 const router = express.Router();
@@ -59,6 +59,15 @@ router.post('/billing/usage-invoices', async (req, res) => {
   const requestId = req.request_id || null
   const now = new Date()
 
+  // Enterprise bills on the 1st. Monthly clients are covered by the
+  // invoice.created hook; this exists only for annual ones, whose platform-fee
+  // invoice appears once a year. Scheduling stays daily and the handler decides,
+  // so a missed day is a missed run rather than a missed month.
+  if (now.getUTCDate() !== 1) {
+    console.log('usage_billing_cron_not_due', { request_id: requestId, utc_day: now.getUTCDate() })
+    return res.json({ ok: true, skipped: 'not_first_of_month', considered: 0, invoiced: 0, skipped_clients: 0, failed: 0, total_cents: 0, results: [] })
+  }
+
   try {
     const { rows: settings, error: settingsError } = await readAllPages(() => supabaseAdmin
       .from('client_plan_settings')
@@ -89,7 +98,7 @@ router.post('/billing/usage-invoices', async (req, res) => {
       clients.push(...rows)
     }
 
-    const due = clients.filter((client) => isAnniversaryToday(client, now))
+    const due = clients
 
     // Required here rather than at the top of the file so that mounting this
     // router does not construct the Stripe client, the way the other routes that
@@ -110,7 +119,7 @@ router.post('/billing/usage-invoices', async (req, res) => {
           stripe,
           clientId: client.id,
           customerId: client.stripe_customer_id || null,
-          periodEnd: now.toISOString(),
+          asOf: now.toISOString(),
           requestId,
           reason: 'monthly_cycle',
           now: now.toISOString()

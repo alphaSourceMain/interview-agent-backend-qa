@@ -55,12 +55,26 @@ function normalizeMoneyInput(value) {
   return `${Math.round(parsed * 100) / 100}`;
 }
 
-function normalizeWholeNumberInput(value) {
+function normalizeWholeNumberInput(value, { allowZero = false } = {}) {
   const raw = normalizeText(value);
   if (!raw) return '';
   const parsed = parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) return '';
+  if (!Number.isFinite(parsed) || parsed < (allowZero ? 0 : 1)) return '';
   return `${parsed}`;
+}
+
+// The first value the form actually sent. A numeric 0 is a value; an empty
+// string is not. `||` reads 0 as absent, which is why an Enterprise agreement
+// could not express a zero fee or "no included interviews per role" — both of
+// which are legitimate settings, the second meaning the client runs on their
+// pool and the meter alone.
+function firstSupplied(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined) continue;
+    if (typeof value === 'string' && value.trim() === '') continue;
+    return value;
+  }
+  return '';
 }
 
 function normalizeCentsInput(value) {
@@ -219,10 +233,18 @@ function normalizeMembershipAgreementInput(input = {}) {
     primary_admin_name: normalizeText(input.primary_admin_name || input.primaryAdmin),
     admin_email: normalizeText(input.admin_email || input.adminEmail).toLowerCase(),
     membership_tier: normalizeTier(input.membership_tier || input.membershipTier),
-    platform_fee: normalizeMoneyInput(input.platform_fee || input.platformFee || input.membership_fee || input.membershipFee),
-    per_role_fee: normalizeMoneyInput(input.per_role_fee || input.perRoleFee),
-    additional_interview_fee: normalizeMoneyInput(input.additional_interview_fee || input.additionalInterviewFee),
-    included_interviews_per_role: normalizeWholeNumberInput(input.included_interviews_per_role || input.includedInterviewsPerRole),
+    // Coerced to a string through firstSupplied: normalizeText reads a numeric 0
+    // as empty, and on Enterprise every one of these may legitimately be zero.
+    platform_fee: normalizeMoneyInput(String(firstSupplied(input.platform_fee, input.platformFee, input.membership_fee, input.membershipFee))),
+    per_role_fee: normalizeMoneyInput(String(firstSupplied(input.per_role_fee, input.perRoleFee))),
+    additional_interview_fee: normalizeMoneyInput(String(firstSupplied(input.additional_interview_fee, input.additionalInterviewFee))),
+    // Zero included interviews per role is a supported Enterprise setting: the
+    // client is then billed from the pool and the meter from the first
+    // interview.
+    included_interviews_per_role: normalizeWholeNumberInput(
+      String(firstSupplied(input.included_interviews_per_role, input.includedInterviewsPerRole)),
+      { allowZero: true }
+    ),
     // Coerced to a string first: normalizeText reads a numeric 0 as empty, and a
     // zero-cent usage price is a real price, not an absence.
     usage_interview_fee_cents: normalizeCentsInput(String(input.usage_interview_fee_cents ?? input.usageInterviewFeeCents ?? '')),

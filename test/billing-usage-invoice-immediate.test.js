@@ -3,8 +3,7 @@
 // On-demand usage invoices, and the monthly cron for annual Enterprise clients.
 //
 // Both spend money, so the guards are the point: the admin route will not raise
-// two invoices for one Idempotency-Key, and the cron picks exactly the clients
-// whose anniversary is today and nothing else.
+// two invoices for one Idempotency-Key, and the cron only acts on the 1st.
 //
 // Stripe, Supabase and auth are stubbed; no network.
 
@@ -57,6 +56,7 @@ function usedInterviews(count, { clientId = CLIENT, roleId = 'role_1', prefix = 
     client_id: clientId,
     role_id: roleId,
     status: 'completed',
+    completed_at: new Date(start + i * 3600000).toISOString(),
     updated_at: new Date(start + i * 3600000).toISOString()
   }));
 }
@@ -124,14 +124,14 @@ function loadService() {
   return require(usageBillingPath);
 }
 
-const { createImmediateUsageInvoice, isAnniversaryToday, anniversaryDayOfMonth } = loadService();
+const { createImmediateUsageInvoice } = loadService();
 
 test('an immediate invoice bills the unbilled usage and finalizes', async () => {
   const db = makeDb({ interviews: usedInterviews(4) });
   const stripe = makeStripe();
 
   const result = await createImmediateUsageInvoice({
-    db, stripe, clientId: CLIENT, periodEnd: NOW, reason: 'admin_request', now: NOW
+    db, stripe, clientId: CLIENT, asOf: NOW, reason: 'admin_request', now: NOW
   });
 
   assert.equal(result.invoice_id, 'in_1');
@@ -149,16 +149,15 @@ test('an immediate invoice bills the unbilled usage and finalizes', async () => 
 });
 
 test('a client with nothing unbilled is skipped without touching Stripe', async () => {
+  // Every interview completed after the month being billed.
   const db = makeDb({
-    planSettings: [{
-      client_id: CLIENT, plan_tier: 'enterprise', billing_model: 'usage',
-      included_interviews_per_role: 10, per_role_fee: 0,
-      usage_interview_fee_cents: 2500, rollover_days: 90
-    }]
+    interviews: usedInterviews(3).map((row) => ({
+      ...row, updated_at: '2026-09-20T00:00:00.000Z', completed_at: '2026-09-20T00:00:00.000Z'
+    }))
   });
   const stripe = makeStripe();
 
-  const result = await createImmediateUsageInvoice({ db, stripe, clientId: CLIENT, periodEnd: NOW, now: NOW });
+  const result = await createImmediateUsageInvoice({ db, stripe, clientId: CLIENT, asOf: NOW, now: NOW });
 
   assert.equal(result.skipped, true);
   assert.deepEqual(stripe.calls.invoices, [], 'an empty invoice must never be raised');
@@ -174,7 +173,7 @@ test('a client on another billing model is skipped', async () => {
   });
   const stripe = makeStripe();
 
-  const result = await createImmediateUsageInvoice({ db, stripe, clientId: CLIENT, periodEnd: NOW, now: NOW });
+  const result = await createImmediateUsageInvoice({ db, stripe, clientId: CLIENT, asOf: NOW, now: NOW });
 
   assert.equal(result.skipped, true);
   assert.equal(result.reason, 'billing_model');
@@ -186,7 +185,7 @@ test('a client with no Stripe customer is skipped rather than half invoiced', as
   });
   const stripe = makeStripe();
 
-  const result = await createImmediateUsageInvoice({ db, stripe, clientId: CLIENT, periodEnd: NOW, now: NOW });
+  const result = await createImmediateUsageInvoice({ db, stripe, clientId: CLIENT, asOf: NOW, now: NOW });
 
   assert.equal(result.skipped, true);
   assert.equal(result.reason, 'no_stripe_customer');
@@ -214,7 +213,7 @@ test('an invoice that ends up with no lines is discarded, not finalized', async 
   const stripe = makeStripe();
 
   const result = await createImmediateUsageInvoice({
-    db, stripe, clientId: CLIENT, periodEnd: NOW, reason: 'admin_request', now: NOW
+    db, stripe, clientId: CLIENT, asOf: NOW, reason: 'admin_request', now: NOW
   });
 
   assert.equal(result.skipped, true);
@@ -233,7 +232,7 @@ test('a failed discard is logged and still reports skipped rather than charging'
   let result;
   try {
     result = await createImmediateUsageInvoice({
-      db, stripe, clientId: CLIENT, periodEnd: NOW, reason: 'admin_request', now: NOW
+      db, stripe, clientId: CLIENT, asOf: NOW, reason: 'admin_request', now: NOW
     });
   } finally {
     console.error = originalError;
@@ -242,37 +241,6 @@ test('a failed discard is logged and still reports skipped rather than charging'
   assert.equal(result.skipped, true);
   assert.deepEqual(stripe.calls.finalized, [], 'a cleanup failure must not fall through to finalize');
   assert.ok(lines.find(([message]) => message === 'usage_invoice_discard_failed'));
-});
-
-// --- the anniversary ------------------------------------------------------
-
-test('the anniversary day comes from the subscription start', () => {
-  assert.equal(anniversaryDayOfMonth({ contract_start_at: '2025-03-17T00:00:00.000Z' }), 17);
-  assert.equal(
-    anniversaryDayOfMonth({ contract_start_at: null, current_term_end: '2026-06-09T00:00:00.000Z' }), 9,
-    'the term end is the fallback anchor'
-  );
-  assert.equal(anniversaryDayOfMonth({}), null);
-});
-
-test('a client is due only on its own anniversary day', () => {
-  const client = { contract_start_at: '2025-03-17T00:00:00.000Z' };
-  assert.equal(isAnniversaryToday(client, new Date('2026-09-17T08:00:00.000Z')), true);
-  assert.equal(isAnniversaryToday(client, new Date('2026-09-16T08:00:00.000Z')), false);
-  assert.equal(isAnniversaryToday(client, new Date('2026-09-18T08:00:00.000Z')), false);
-});
-
-test('a client anchored to the 31st runs on the last day of a shorter month', () => {
-  const client = { contract_start_at: '2025-01-31T00:00:00.000Z' };
-  assert.equal(isAnniversaryToday(client, new Date('2026-04-30T08:00:00.000Z')), true, 'April has 30 days');
-  assert.equal(isAnniversaryToday(client, new Date('2026-04-29T08:00:00.000Z')), false);
-  assert.equal(isAnniversaryToday(client, new Date('2026-02-28T08:00:00.000Z')), true, 'February 2026 has 28 days');
-  assert.equal(isAnniversaryToday(client, new Date('2026-03-31T08:00:00.000Z')), true, 'March has 31 days');
-  assert.equal(isAnniversaryToday(client, new Date('2026-03-30T08:00:00.000Z')), false);
-});
-
-test('a client with no anchor is never due', () => {
-  assert.equal(isAnniversaryToday({}, new Date(NOW)), false);
 });
 
 // --- the cron route --------------------------------------------------------
@@ -302,16 +270,36 @@ function withCronSecret(fn) {
 const runCron = (app, secret = CRON_SECRET) =>
   request(app).post('/internal/billing/usage-invoices').set('x-cron-secret', secret).send({});
 
+// The handler decides from the wall clock, so these run with it pinned to a 1st.
+const FIRST_OF_MONTH = new Date('2026-09-01T03:00:00.000Z');
+const SECOND_OF_MONTH = new Date('2026-09-02T03:00:00.000Z');
+
+function atFixedClock(fixed, fn) {
+  const RealDate = Date;
+  global.Date = class extends RealDate {
+    constructor(...args) {
+      if (!args.length) return new RealDate(fixed.getTime());
+      return new RealDate(...args);
+    }
+
+    static now() { return fixed.getTime(); }
+  };
+  return Promise.resolve(fn()).finally(() => { global.Date = RealDate; });
+}
+
+const onTheSecond = (fn) => atFixedClock(SECOND_OF_MONTH, fn);
+const onTheFirst = (fn) => atFixedClock(FIRST_OF_MONTH, fn);
+
 test('the cron refuses a wrong or missing secret', async () => {
-  await withCronSecret(async () => {
+  await withCronSecret(() => onTheFirst(async () => {
     const app = loadCron(makeDb(), makeStripe());
     assert.equal((await runCron(app, 'wrong-secret-value')).status, 403);
     assert.equal((await request(app).post('/internal/billing/usage-invoices').send({})).status, 403);
-  });
+  }));
 });
 
-test('the cron invoices an annual usage client on its anniversary', async () => {
-  await withCronSecret(async () => {
+test('the cron invoices an annual usage client on the 1st', async () => {
+  await withCronSecret(() => onTheFirst(async () => {
     const db = makeDb({
       clients: [{
         id: CLIENT, parent_client_id: null, name: 'Acme Dental Group',
@@ -329,11 +317,11 @@ test('the cron invoices an annual usage client on its anniversary', async () => 
     assert.equal(res.body.invoiced, 1);
     assert.equal(res.body.total_cents, 5000);
     assert.equal(stripe.calls.invoices[0].metadata.reason, 'monthly_cycle');
-  });
+  }));
 });
 
 test('monthly clients are excluded — their usage rides the cycle invoice', async () => {
-  await withCronSecret(async () => {
+  await withCronSecret(() => onTheFirst(async () => {
     const today = new Date();
     const anchor = `2025-01-${String(today.getUTCDate()).padStart(2, '0')}T00:00:00.000Z`;
     const db = makeDb({
@@ -349,11 +337,11 @@ test('monthly clients are excluded — their usage rides the cycle invoice', asy
 
     assert.equal(res.body.considered, 0);
     assert.deepEqual(stripe.calls.invoices, []);
-  });
+  }));
 });
 
 test('clients on other billing models are never considered', async () => {
-  await withCronSecret(async () => {
+  await withCronSecret(() => onTheFirst(async () => {
     const today = new Date();
     const anchor = `2025-01-${String(today.getUTCDate()).padStart(2, '0')}T00:00:00.000Z`;
     const db = makeDb({
@@ -374,32 +362,26 @@ test('clients on other billing models are never considered', async () => {
 
     assert.equal(res.body.considered, 0);
     assert.deepEqual(stripe.calls.invoices, []);
-  });
+  }));
 });
 
-test('a client whose anniversary is not today is not invoiced', async () => {
-  await withCronSecret(async () => {
-    const today = new Date();
-    const notToday = today.getUTCDate() === 1 ? 2 : 1;
-    const db = makeDb({
-      clients: [{
-        id: CLIENT, parent_client_id: null, stripe_customer_id: CUSTOMER,
-        billing_interval: 'annual',
-        contract_start_at: `2025-06-${String(notToday).padStart(2, '0')}T00:00:00.000Z`
-      }],
-      interviews: usedInterviews(3)
-    });
+test('the cron does nothing on the 2nd, or any other day', async () => {
+  await withCronSecret(() => onTheSecond(async () => {
+    // The schedule runs daily and the handler decides, so a missed day is a
+    // missed run rather than a missed month.
+    const db = makeDb({ interviews: usedInterviews(3) });
     const stripe = makeStripe();
 
     const res = await runCron(loadCron(db, stripe));
 
-    assert.equal(res.body.considered, 0);
-    assert.deepEqual(stripe.calls.invoices, []);
-  });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.skipped, 'not_first_of_month');
+    assert.deepEqual(stripe.calls.invoices, [], 'usage is only invoiced on the 1st');
+  }));
 });
 
 test('one failing client does not stop the rest of the run', async () => {
-  await withCronSecret(async () => {
+  await withCronSecret(() => onTheFirst(async () => {
     const today = new Date();
     const anchor = `2025-01-${String(today.getUTCDate()).padStart(2, '0')}T00:00:00.000Z`;
     const db = makeDb({
@@ -442,11 +424,11 @@ test('one failing client does not stop the rest of the run', async () => {
     assert.equal(res.body.total_cents, 7500);
     const failed = res.body.results.find((entry) => entry.status === 'failed');
     assert.equal(failed.client_id, 'client_bad');
-  });
+  }));
 });
 
 test('the cron pages past the row cap instead of billing only the first page', async () => {
-  await withCronSecret(async () => {
+  await withCronSecret(() => onTheFirst(async () => {
     // PostgREST returns at most 1,000 rows per request and the route pages at
     // 500, so a client beyond the first page must still be picked up.
     const today = new Date();
@@ -486,7 +468,7 @@ test('the cron pages past the row cap instead of billing only the first page', a
     assert.equal(res.body.considered, 1, 'the only annual client sits past the first page');
     assert.equal(res.body.invoiced, 1);
     assert.equal(stripe.calls.invoices[0].metadata.client_id, 'bulk_1100');
-  });
+  }));
 });
 
 test('the cron uses the same secret shape as the other internal routes', () => {

@@ -9,7 +9,7 @@ const { activatePublicPurchaseAgreementCheckout } = require('../../services/publ
 const { finalizePendingRolePurchase } = require('../../services/rolePurchaseFinalizer');
 const { requirePlanCapacity } = require('../../services/planCapacity');
 const { defaultBillingModelForPlanTier, resolveBillingModel } = require('../../services/billingModel');
-const { applyUsageToInvoice, findLastBilledPeriodEnd } = require('../../services/usageBilling');
+const { applyUsageToInvoice } = require('../../services/usageBilling');
 const { markPoolFailed, markPoolPaid } = require('../../services/interviewPool');
 const router = express.Router();
 
@@ -326,7 +326,7 @@ async function addUsageLinesToInvoice(invoice, requestId) {
   if (subscriptionId) {
     const { data, error } = await supabaseAdmin
       .from('clients')
-      .select('id,stripe_customer_id,contract_start_at')
+      .select('id,stripe_customer_id')
       .eq('stripe_subscription_id', subscriptionId)
       .maybeSingle();
     if (error) throw new Error(error.message || 'Usage billing client lookup failed');
@@ -335,7 +335,7 @@ async function addUsageLinesToInvoice(invoice, requestId) {
   if (!client && customerId) {
     const { data, error } = await supabaseAdmin
       .from('clients')
-      .select('id,stripe_customer_id,contract_start_at')
+      .select('id,stripe_customer_id')
       .eq('stripe_customer_id', customerId)
       .maybeSingle();
     if (error) throw new Error(error.message || 'Usage billing client lookup failed');
@@ -357,22 +357,18 @@ async function addUsageLinesToInvoice(invoice, requestId) {
     return;
   }
 
-  const periodEnd = toIsoFromUnixSeconds(
-    invoice?.lines?.data?.[0]?.period?.end ?? invoice?.period_end ?? null
-  );
-  const lastBilledPeriodEnd = await findLastBilledPeriodEnd({ db: supabaseAdmin, clientId: client.id });
-  const periodStart = lastBilledPeriodEnd
-    || client.contract_start_at
-    || toIsoFromUnixSeconds(invoice?.period_start ?? null);
-
+  // The period is the prior calendar month, decided by interviews.completed_at.
+  // Nothing here reads the invoice's own period or a previous ledger row.
+  //
+  // The month is anchored on when Stripe raised this invoice rather than on the
+  // wall clock, so a redelivery days later still bills the same month.
   const result = await applyUsageToInvoice({
     db: supabaseAdmin,
     stripe,
     clientId: client.id,
     customerId: customerId || client.stripe_customer_id || null,
     invoiceId,
-    periodStart,
-    periodEnd,
+    asOf: toIsoFromUnixSeconds(invoice?.created) || undefined,
     metadata: { stripe_invoice_id: invoiceId }
   });
 

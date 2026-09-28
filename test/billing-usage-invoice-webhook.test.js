@@ -33,6 +33,8 @@ const CUSTOMER = 'cus_1';
 const SUBSCRIPTION = 'sub_1';
 const INVOICE = 'in_1';
 const PERIOD_END_UNIX = 1788220800; // 2026-09-01T00:00:00Z
+// Stripe raises the cycle invoice on the 1st, so the prior month is August.
+const INVOICE_CREATED_UNIX = 1788220800;
 
 const UNIQUE_KEYS = {
   usage_billing_ledger: (row) => `interview:${row.interview_id}`
@@ -45,6 +47,7 @@ function usedInterviews(count, { roleId = 'role_1', prefix = 'iv' } = {}) {
     client_id: CLIENT,
     role_id: roleId,
     status: 'completed',
+    completed_at: new Date(start + i * 3600000).toISOString(),
     updated_at: new Date(start + i * 3600000).toISOString()
   }));
 }
@@ -93,11 +96,12 @@ function invoiceEvent({
   return {
     id: `evt_${Math.random().toString(16).slice(2)}`,
     type: 'invoice.created',
-    created: 1788220800,
+    created: INVOICE_CREATED_UNIX,
     data: {
       object: {
         id,
         object: 'invoice',
+        created: INVOICE_CREATED_UNIX,
         status,
         billing_reason: billingReason,
         customer,
@@ -164,7 +168,7 @@ test('a draft cycle invoice gets one usage item per role, and the ledger is stam
   assert.equal(byRole.role_1.currency, 'usd');
   assert.equal(byRole.role_1.invoice, INVOICE);
   assert.equal(byRole.role_1.customer, CUSTOMER);
-  assert.match(byRole.role_1.description, /^Interviews — Hygienist \(/);
+  assert.match(byRole.role_1.description, /^Interviews — Hygienist \[open\] \(August 2026\)$/);
   assert.equal(byRole.role_1.metadata.source, 'usage_billing');
   assert.equal(byRole.role_1.metadata.client_id, CLIENT);
   assert.equal(byRole.role_2.quantity, 2);
@@ -178,7 +182,7 @@ test('a draft cycle invoice gets one usage item per role, and the ledger is stam
   }
 });
 
-test('the period runs from the last billed period end', async () => {
+test('the period is the month before the invoice, whatever the ledger last said', async () => {
   const db = makeDb({
     interviews: usedInterviews(4),
     ledger: [{
@@ -194,6 +198,8 @@ test('the period runs from the last billed period end', async () => {
   const fresh = ledgerOf(db).filter((row) => row.stripe_invoice_id === INVOICE);
   assert.ok(fresh.length);
   assert.equal(fresh[0].period_start, '2026-08-01T00:00:00.000Z');
+  assert.equal(fresh[0].period_end, '2026-09-01T00:00:00.000Z',
+    'the month is read off invoice.created, not chained from the previous row');
 });
 
 test('redelivery of the same invoice adds nothing', async () => {
@@ -253,7 +259,12 @@ test('a client on any other billing model is ignored', async () => {
 });
 
 test('a usage client with nothing unbilled gets no items', async () => {
-  const db = makeDb({ included: 10, interviews: usedInterviews(3) });
+  // Nothing in the prior month: these completed after the invoice was raised.
+  const db = makeDb({
+    interviews: usedInterviews(3).map((row) => ({
+      ...row, updated_at: '2026-09-15T00:00:00.000Z', completed_at: '2026-09-15T00:00:00.000Z'
+    }))
+  });
   const { app, itemCalls } = loadApp(invoiceEvent(), db);
 
   assert.equal((await post(app)).status, 200);

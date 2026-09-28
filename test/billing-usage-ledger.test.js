@@ -76,6 +76,7 @@ function usedInterviews(count, { roleId = 'role_1', prefix = 'iv', from = '2026-
     client_id: CLIENT,
     role_id: roleId,
     status: 'completed',
+    completed_at: new Date(start + i * 86400000).toISOString(),
     updated_at: new Date(start + i * 86400000).toISOString()
   }));
 }
@@ -176,12 +177,15 @@ test('interviews after the period end wait for the next cycle', async () => {
   assert.deepEqual(usage.lines[0].interview_ids.sort(), ['iv_1', 'iv_2']);
 });
 
-test('the interviews chosen are the newest unbilled ones', async () => {
+test('the included count goes to the interviews that ran first', async () => {
+  // The allocation replays interviews in completion order, so the earliest two
+  // are the free ones and everything after them is metered. What an interview
+  // was paid by therefore never changes once it has run.
   const db = makeDb({ included: 2, interviews: usedInterviews(5) });
 
   const usage = await compute(db);
 
-  assert.deepEqual(usage.lines[0].interview_ids, ['iv_5', 'iv_4', 'iv_3']);
+  assert.deepEqual(usage.lines[0].interview_ids, ['iv_3', 'iv_4', 'iv_5']);
 });
 
 // --- not billing twice -----------------------------------------------------
@@ -282,13 +286,25 @@ test('a zero per-interview price produces lines that cost nothing', async () => 
   assert.equal(usage.total_cents, 0);
 });
 
-test('a client with no roles owes nothing', async () => {
-  const db = makeDb({ roles: [], interviews: usedInterviews(5) });
+test('a client with no roles and no interviews owes nothing', async () => {
+  const db = makeDb({ roles: [], interviews: [] });
 
   const usage = await compute(db);
 
   assert.deepEqual(usage.lines, []);
-  assert.equal(usage.reason, 'no_roles');
+  assert.equal(usage.reason, 'nothing_unbilled');
+});
+
+test('an interview whose role row is gone is still billed, under a plain title', async () => {
+  // Roles are not deleted in practice, but the interview happened and the money
+  // is real, so a missing role row must not make usage disappear.
+  const db = makeDb({ roles: [], interviews: usedInterviews(2) });
+
+  const usage = await compute(db);
+
+  assert.equal(usage.lines.length, 1);
+  assert.equal(usage.lines[0].quantity, 2);
+  assert.equal(usage.lines[0].role_title, 'Role');
 });
 
 test('the roles and interviews of another client are never included', async () => {

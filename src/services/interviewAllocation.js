@@ -57,8 +57,13 @@ function toIso(value) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
-// completed_at is the timestamp; updated_at stands in only for rows that predate
-// it, so ordering stays total and deterministic. The id breaks exact ties.
+// The timestamp entries are *ordered* by. completed_at is the real one;
+// updated_at stands in only for rows that predate the column, so ordering stays
+// total and deterministic. The id breaks exact ties.
+//
+// This is deliberately not what billing reads: a row with no completed_at has
+// no month, and billing must treat it as such rather than infer one from
+// updated_at, which on one completion path can predate the finish.
 function completionKey(row) {
   return toIso(row?.completed_at) || toIso(row?.updated_at) || '';
 }
@@ -115,7 +120,9 @@ function creditIsLiveAt(credit, completedAtIso) {
  *
  * @returns {{
  *   billing_model: string|null,
- *   entries: Array<{interview_id, role_id, client_id, completed_at, source, source_id}>,
+ *   entries: Array<{interview_id, role_id, client_id, completed_at, ordered_at, source, source_id}>,
+ *     completed_at is the column and may be null; ordered_at is what the replay
+ *     ordered by and always has a value.
  *   by_role: Map<string, {used, own, credit, pool, usage, own_remaining, drawn_from_revoked}>,
  *   totals: {used, own, credit, pool, usage, credit_balance, pool_remaining},
  *   credits: Array, pools: Array, entity_label_by_client: Map
@@ -128,6 +135,7 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
     by_role: new Map(),
     included_per_role: 0,
     allowance_by_role: new Map(),
+    usage_interview_fee_cents: null,
     totals: { used: 0, own: 0, credit: 0, pool: 0, usage: 0, credit_balance: 0, pool_remaining: 0 },
     credits: [],
     pools: [],
@@ -140,9 +148,11 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
   if (!billing.billing_model) return empty;
 
   const { familyIds, entityLabelById } = await loadFamily({ db, billingClientId });
-  const includedPerRole = billing.billing_model === USAGE_BILLING_MODEL
-    ? 0
-    : (parseWholeNonNegative(billing.included_interviews_per_role) ?? 0);
+  // Every model has a per-role included count, Enterprise included: on usage the
+  // included interviews are the free ones, and only what runs past them reaches
+  // the pool or the meter. Zeroing it here would bill an Enterprise client for
+  // interviews their agreement gives them.
+  const includedPerRole = parseWholeNonNegative(billing.included_interviews_per_role) ?? 0;
 
   const { data: roleRows, error: rolesError } = await db
     .from('roles')
@@ -240,7 +250,10 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
   for (const row of used) {
     const roleId = String(row?.role_id ?? '');
     const clientId = String(row?.client_id ?? '');
-    const completedAt = completionKey(row) || null;
+    // Ordering uses the fallback; completed_at stays exactly what the column
+    // says, so a row whose stamp failed reaches billing as unstamped.
+    const orderedAt = completionKey(row) || null;
+    const completedAt = toIso(row?.completed_at);
     const counters = roleOf(roleId);
     counters.used += 1;
 
@@ -252,7 +265,8 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
       counters.own += 1;
       entries.push({
         interview_id: String(row.id), role_id: roleId, client_id: clientId,
-        completed_at: completedAt, source: SOURCE_OWN, source_id: roleId
+        completed_at: completedAt, ordered_at: orderedAt,
+        source: SOURCE_OWN, source_id: roleId
       });
       continue;
     }
@@ -263,14 +277,15 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
       const credit = credits.find((candidate) => (
         String(candidate.client_id) === clientId
         && candidate.allocated < candidate.quantity
-        && creditIsLiveAt(candidate, completedAt)
+        && creditIsLiveAt(candidate, orderedAt)
       ));
       if (credit) {
         credit.allocated += 1;
         counters.credit += 1;
         entries.push({
           interview_id: String(row.id), role_id: roleId, client_id: clientId,
-          completed_at: completedAt, source: SOURCE_CREDIT, source_id: String(credit.id)
+          completed_at: completedAt, ordered_at: orderedAt,
+        source: SOURCE_CREDIT, source_id: String(credit.id)
         });
         continue;
       }
@@ -284,7 +299,8 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
         counters.pool += 1;
         entries.push({
           interview_id: String(row.id), role_id: roleId, client_id: clientId,
-          completed_at: completedAt, source: SOURCE_POOL, source_id: String(pool.id)
+          completed_at: completedAt, ordered_at: orderedAt,
+        source: SOURCE_POOL, source_id: String(pool.id)
         });
         continue;
       }
@@ -294,7 +310,8 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
     counters.usage += 1;
     entries.push({
       interview_id: String(row.id), role_id: roleId, client_id: clientId,
-      completed_at: completedAt, source: SOURCE_USAGE, source_id: null
+      completed_at: completedAt, ordered_at: orderedAt,
+        source: SOURCE_USAGE, source_id: null
     });
   }
 
@@ -342,6 +359,8 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
     // for every role, and the allowance is that plus anything bought for it.
     included_per_role: includedPerRole,
     allowance_by_role: allowanceByRole,
+    // What a metered interview costs, for the billing path.
+    usage_interview_fee_cents: parseWholeNonNegative(billing.usage_interview_fee_cents),
     totals,
     credits,
     pools,

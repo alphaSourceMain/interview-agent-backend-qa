@@ -298,7 +298,46 @@ test('Enterprise: the pool pays before anything is metered', async () => {
   assert.equal(result.totals.usage, 1);
 });
 
-test('Enterprise: a stored included count is ignored', async () => {
+test('Enterprise: included first, then the pool, then the meter', async () => {
+  // The order a usage client's interviews are paid for, in one run: two free on
+  // the role's included count, two out of the pool, the rest metered.
+  const db = makeDb({
+    planTier: 'enterprise', billingModel: 'usage', included: 2,
+    interviews: completed(5), pools: [pool({ quantity_purchased: 2 })]
+  });
+
+  const result = await allocate(db);
+
+  assert.deepEqual(sourcesFor(result), ['own', 'own', 'pool', 'pool', 'usage']);
+  assert.deepEqual(result.entries.map((entry) => entry.interview_id),
+    ['iv_1', 'iv_2', 'iv_3', 'iv_4', 'iv_5'], 'in completion order');
+  assert.equal(result.totals.own, 2);
+  assert.equal(result.totals.pool, 2);
+  assert.equal(result.totals.usage, 1);
+  assert.equal(result.totals.pool_remaining, 0);
+  assert.equal(result.by_role.get(ROLE).own_remaining, 0);
+});
+
+test('Enterprise: the included count is per role, and the pool is shared across them', async () => {
+  const db = makeDb({
+    planTier: 'enterprise', billingModel: 'usage', included: 1,
+    interviews: [
+      ...completed(2, { roleId: ROLE, prefix: 'a' }),
+      ...completed(2, { roleId: ROLE_2, prefix: 'b', from: '2026-09-02T00:00:00.000Z' })
+    ],
+    pools: [pool({ quantity_purchased: 1 })]
+  });
+
+  const result = await allocate(db);
+
+  assert.deepEqual(sourcesFor(result), ['own', 'pool', 'own', 'usage'],
+    'each role gets its one free interview; the single pooled one goes to whoever runs first');
+  assert.equal(result.totals.own, 2);
+  assert.equal(result.totals.pool, 1);
+  assert.equal(result.totals.usage, 1);
+});
+
+test('Enterprise: the included count is free before anything is metered', async () => {
   const db = makeDb({
     planTier: 'enterprise', billingModel: 'usage', included: 25,
     interviews: completed(2), pools: []
@@ -306,8 +345,8 @@ test('Enterprise: a stored included count is ignored', async () => {
 
   const result = await allocate(db);
 
-  assert.deepEqual(sourcesFor(result), ['usage', 'usage'],
-    'the per-role included count is not meaningful under this model');
+  assert.deepEqual(sourcesFor(result), ['own', 'own'],
+    'an Enterprise agreement gives each role an included count, and it is free');
 });
 
 test('Enterprise: a child role draws the parent pool', async () => {
@@ -387,7 +426,7 @@ test('allocation follows completion order, not insertion order', async () => {
   assert.equal(result.entries[1].source, 'credit');
 });
 
-test('a row with no completed_at falls back to updated_at rather than being dropped', async () => {
+test('a row with no completed_at is ordered by updated_at but stays unstamped', async () => {
   const db = makeDb({
     included: 5,
     interviews: [
@@ -397,8 +436,11 @@ test('a row with no completed_at falls back to updated_at rather than being drop
 
   const result = await allocate(db);
 
-  assert.equal(result.totals.used, 1);
-  assert.equal(result.entries[0].completed_at, '2026-09-01T00:00:00.000Z');
+  assert.equal(result.totals.used, 1, 'the interview is not dropped');
+  assert.equal(result.entries[0].ordered_at, '2026-09-01T00:00:00.000Z',
+    'ordering needs a value, so updated_at stands in');
+  assert.equal(result.entries[0].completed_at, null,
+    'billing must see that the completion stamp is missing, not a guess at it');
 });
 
 test('the same inputs give the same answer', async () => {

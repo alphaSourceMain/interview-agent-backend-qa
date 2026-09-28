@@ -329,10 +329,11 @@ test('an empty pool still reports no cap, so interviews carry on', async () => {
     'running out must never read as full — past the pool an interview is billed');
 });
 
-test('a usage client with a stored included count still ignores it', async () => {
+test('a usage client reports the included count its agreement gives it', async () => {
   const db = makeDb({ included: 25, pools: [pool({ quantity_purchased: 1 })] });
 
-  assert.equal((await availabilityFor(db)).included_interviews_per_role, 0);
+  assert.equal((await availabilityFor(db)).included_interviews_per_role, 25,
+    'the included count is free under Enterprise too, so it is not hidden');
 });
 
 test('legacy paid top-ups on a usage role are still counted', async () => {

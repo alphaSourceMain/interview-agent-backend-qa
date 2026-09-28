@@ -63,6 +63,19 @@ function isSuppliedValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== ''
 }
 
+/**
+ * The next 1st of the month at 00:00 UTC, as a Unix timestamp.
+ *
+ * A checkout on the 1st anchors to the *following* month: the current month has
+ * already begun, so anchoring to today would mean no proration and a cycle that
+ * starts in the past.
+ */
+function nextFirstOfMonthEpoch(nowMs) {
+  const now = Number.isFinite(nowMs) ? new Date(nowMs) : new Date();
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return Math.floor(next.getTime() / 1000);
+}
+
 function wantsEmbeddedCheckout(value) {
   if (value === true) return true
   const raw = String(value || '').trim().toLowerCase()
@@ -470,7 +483,20 @@ async function createSubscriptionCheckoutSession({
       : { allow_promotion_codes: true }),
     metadata: checkoutMetadata,
     subscription_data: {
-      metadata: checkoutMetadata
+      metadata: checkoutMetadata,
+      // Enterprise bills on the 1st, so a client gets one charge a month with
+      // the prior month's usage on it. The first invoice is prorated to that
+      // date. Both intervals anchor; Essentials and Pro are left alone.
+      //
+      // billing_cycle_anchor, not billing_cycle_anchor_config: the latter only
+      // reached Checkout in API version 2026-06-24, and this client pins
+      // 2023-10-16 (src/clients/stripe.js).
+      ...(normalizedPlanTier === 'enterprise'
+        ? {
+            billing_cycle_anchor: nextFirstOfMonthEpoch(nowMs),
+            proration_behavior: 'create_prorations'
+          }
+        : {})
     },
     ...(checkoutExpiresAtEpoch ? { expires_at: checkoutExpiresAtEpoch } : {})
   }

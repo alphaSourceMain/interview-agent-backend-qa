@@ -6,66 +6,27 @@
 // a price per interview. This module works out what is owed and records it; it
 // does not talk to Stripe.
 //
-// An interview is billable when it counts as used and reached that state at or
-// before the period end. The interviews schema has no completion timestamp — see
-// src/services/adminMetricsService.js:267 — so updated_at is the timestamp used.
-// It moves for unrelated writes too, which makes period attribution approximate;
-// the unique interview_id on the ledger is what actually prevents double
-// billing, so an interview landing in the next period is a timing difference,
-// never a duplicate charge.
+// What is owed is read from the allocation, which decides what paid for every
+// interview. Nothing here scans interviews or keeps a counter: the ledger is the
+// record of what was billed, written when Stripe asks for an invoice.
+//
+// The period is the prior calendar month, decided by interviews.completed_at.
+// The ledger's unique interview_id is what prevents double billing.
+//
+// A child client has no subscription of its own, so interviews run under a
+// child's roles are billed on the parent's invoice, tagged with the child's
+// entity label. Interview credits deliberately do not roll up that way: a credit
+// is earned by a role and stays with the client that owns it. See
+// review/BILLING-LOG.md.
 
-const { isUsedInterviewRow } = require('./roleInterviewAvailability');
-const { resolveBillingModel } = require('./billingModel');
+const { SOURCE_USAGE } = require('./interviewAllocation');
 
 const USAGE_BILLING_MODEL = 'usage';
-
-// The columns isUsedInterviewRow reads, plus what the ledger and ordering need.
-const INTERVIEW_COLUMNS = [
-  'id',
-  'role_id',
-  'updated_at',
-  'status',
-  'transcript_scores',
-  'interview_summary',
-  'has_substantive_response',
-  'failure_code',
-  'conversation_progress_state'
-].join(',');
 
 const EMPTY_USAGE = Object.freeze({ lines: [], total_cents: 0 });
 
 function emptyUsage(reason) {
   return { lines: [], total_cents: 0, reason };
-}
-
-/**
- * The clients whose usage this client pays for: itself and any child entities.
- *
- * Usage rolls up to whoever pays. A child entity has no Stripe customer and no
- * subscription of its own — it cannot be invoiced — so interviews run under a
- * child's roles are billed on the parent's invoice, tagged with the child's
- * entity label so the line is recognisable.
- *
- * Interview credits deliberately do not roll up: a credit is earned by a role
- * and stays with the client that owns it. See review/BILLING-LOG.md.
- */
-async function loadBillingFamily({ db, clientId } = {}) {
-  const parentId = String(clientId);
-  const { data: children, error } = await db
-    .from('clients')
-    .select('id,name,entity_label')
-    .eq('parent_client_id', parentId);
-  if (error) throw new Error(error.message || 'Usage billing entity lookup failed');
-
-  const familyIds = [parentId];
-  const entityLabelById = new Map();
-  for (const child of (children || [])) {
-    const childId = String(child?.id ?? '');
-    if (!childId || childId === parentId) continue;
-    familyIds.push(childId);
-    entityLabelById.set(childId, String(child?.entity_label || child?.name || '').trim() || null);
-  }
-  return { familyIds, entityLabelById };
 }
 
 function parseWholeNonNegative(value) {
@@ -82,114 +43,139 @@ function toIso(value) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
-// Newest first, so the interviews that land on this invoice are the most recent
-// ones. A row with no timestamp sorts last rather than being dropped.
-function byNewestFirst(left, right) {
-  const leftAt = toIso(left?.updated_at) || '';
-  const rightAt = toIso(right?.updated_at) || '';
-  if (leftAt === rightAt) return String(left?.id ?? '') < String(right?.id ?? '') ? 1 : -1;
-  return leftAt < rightAt ? 1 : -1;
+/** The prior calendar month in UTC, as [start, end). */
+function priorMonthBounds(asOf) {
+  const now = asOf instanceof Date ? asOf : new Date(asOf || Date.now());
+  const base = Number.isFinite(now.getTime()) ? now : new Date();
+  const start = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() - 1, 1));
+  const end = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 1));
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
+function monthLabel(startIso) {
+  const date = new Date(startIso);
+  if (!Number.isFinite(date.getTime())) return 'current period';
+  return `${date.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' })} ${date.getUTCFullYear()}`;
+}
+
+function normalizeRoleStatus(value) {
+  return String(value || '').trim().toLowerCase() === 'inactive' ? 'closed' : 'open';
 }
 
 /**
- * What this client owes for interviews beyond its included counts, up to periodEnd.
- * Only the usage model bills; every other model returns no lines.
+ * What this client owes, read from the allocation rather than scanned.
+ *
+ * Bills the prior calendar month. A used interview with **no completed_at** is
+ * billed on the invoice being built now rather than waiting: its stamp failed,
+ * so there is no month to wait for, and leaving it unbilled would lose it
+ * silently. The ledger's unique interview_id is what stops it being billed
+ * again, and the caller stamps completed_at afterwards so it behaves normally
+ * from then on.
  */
-async function computeUnbilledUsage({ db, clientId, periodEnd, now } = {}) {
+async function computeUnbilledUsage({ db, clientId, asOf, allocation = null } = {}) {
   if (!db || !clientId) return emptyUsage('invalid_request');
 
-  const billing = await resolveBillingModel({ db, clientId });
-  if (billing.billing_model !== USAGE_BILLING_MODEL) return emptyUsage('billing_model');
+  const resolved = allocation
+    || await require('./interviewAllocation').allocateInterviews({ db, billingClientId: clientId });
+  if (resolved.billing_model !== USAGE_BILLING_MODEL) return emptyUsage('billing_model');
 
-  const unitPriceCents = parseWholeNonNegative(billing.usage_interview_fee_cents);
+  const unitPriceCents = parseWholeNonNegative(resolved.usage_interview_fee_cents);
   if (unitPriceCents == null) return emptyUsage('no_usage_price');
 
-  const includedPerRole = parseWholeNonNegative(billing.included_interviews_per_role) ?? 0;
-  const cutoff = toIso(periodEnd) || toIso(now) || new Date().toISOString();
+  const { start, end } = priorMonthBounds(asOf);
 
-  const { familyIds, entityLabelById } = await loadBillingFamily({ db, clientId });
-
-  const { data: roleRows, error: rolesError } = await db
-    .from('roles')
-    .select('id,title,client_id')
-    .in('client_id', familyIds);
-  if (rolesError) throw new Error(rolesError.message || 'Usage billing role lookup failed');
-  if (!roleRows || !roleRows.length) return emptyUsage('no_roles');
-
-  const { data: interviewRows, error: interviewsError } = await db
-    .from('interviews')
-    .select(INTERVIEW_COLUMNS)
-    .in('client_id', familyIds)
-    .lte('updated_at', cutoff);
-  if (interviewsError) throw new Error(interviewsError.message || 'Usage billing interview lookup failed');
-
-  // Ledger rows are written against the payer, so reading the whole family is
-  // belt and braces rather than strictly required.
+  const familyIds = [String(clientId), ...[...resolved.entity_label_by_client.keys()]];
   const { data: ledgerRows, error: ledgerError } = await db
     .from('usage_billing_ledger')
-    .select('interview_id,role_id')
+    .select('interview_id')
     .in('client_id', familyIds);
   if (ledgerError) throw new Error(ledgerError.message || 'Usage billing ledger lookup failed');
+  const ledgered = new Set((ledgerRows || []).map((row) => String(row?.interview_id ?? '')));
 
-  const ledgeredInterviewIds = new Set();
-  const ledgeredCountByRole = new Map();
-  for (const row of (ledgerRows || [])) {
-    ledgeredInterviewIds.add(String(row?.interview_id ?? ''));
-    const roleId = String(row?.role_id ?? '');
-    ledgeredCountByRole.set(roleId, (ledgeredCountByRole.get(roleId) || 0) + 1);
-  }
+  const roleById = new Map((resolved.roles || []).map((role) => [String(role.id), role]));
 
-  const usedByRole = new Map();
-  for (const row of (interviewRows || [])) {
-    if (!isUsedInterviewRow(row)) continue;
-    const roleId = String(row?.role_id ?? '');
-    if (!usedByRole.has(roleId)) usedByRole.set(roleId, []);
-    usedByRole.get(roleId).push(row);
-  }
-
-  const lines = [];
+  const byRole = new Map();
+  const missingCompletedAt = [];
   let totalCents = 0;
-  for (const role of roleRows) {
-    const roleId = String(role?.id ?? '');
-    const usedRows = usedByRole.get(roleId) || [];
-    const alreadyLedgered = ledgeredCountByRole.get(roleId) || 0;
 
-    // Everything already on the ledger has been paid for, so it is deducted
-    // along with the included count rather than billed again.
-    const billable = Math.max(0, usedRows.length - includedPerRole - alreadyLedgered);
-    if (billable === 0) continue;
+  for (const entry of resolved.entries) {
+    if (entry.source !== SOURCE_USAGE) continue;
+    if (ledgered.has(String(entry.interview_id))) continue;
 
-    const candidates = usedRows
-      .filter((row) => !ledgeredInterviewIds.has(String(row?.id ?? '')))
-      .sort(byNewestFirst)
-      .slice(0, billable);
-    if (!candidates.length) continue;
+    const completedAt = entry.completed_at;
+    const isMissing = !completedAt;
+    if (!isMissing && !(completedAt >= start && completedAt < end)) continue;
+    if (isMissing) missingCompletedAt.push(entry);
 
-    const quantity = candidates.length;
-    const amountCents = quantity * unitPriceCents;
-    totalCents += amountCents;
-    lines.push({
-      role_id: roleId,
-      role_title: String(role?.title || '').trim() || 'Role',
-      // Null for the payer's own roles; set for a child entity's, so the line
-      // says which office or location ran the interviews.
-      entity_label: entityLabelById.get(String(role?.client_id ?? '')) || null,
-      quantity,
-      unit_price_cents: unitPriceCents,
-      amount_cents: amountCents,
-      interview_ids: candidates.map((row) => String(row.id))
-    });
+    const roleId = String(entry.role_id);
+    if (!byRole.has(roleId)) {
+      const role = roleById.get(roleId) || {};
+      byRole.set(roleId, {
+        role_id: roleId,
+        role_title: String(role.title || '').trim() || 'Role',
+        role_status: normalizeRoleStatus(role.status),
+        entity_label: resolved.entity_label_by_client.get(String(entry.client_id)) || null,
+        quantity: 0,
+        unit_price_cents: unitPriceCents,
+        amount_cents: 0,
+        interview_ids: []
+      });
+    }
+    const line = byRole.get(roleId);
+    line.quantity += 1;
+    line.amount_cents = line.quantity * unitPriceCents;
+    line.interview_ids.push(String(entry.interview_id));
+    totalCents += unitPriceCents;
   }
 
+  const lines = [...byRole.values()];
   if (!lines.length) return emptyUsage('nothing_unbilled');
-  return { lines, total_cents: totalCents };
+  return {
+    lines,
+    total_cents: totalCents,
+    period_start: start,
+    period_end: end,
+    month_label: monthLabel(start),
+    missing_completed_at: missingCompletedAt.map((entry) => ({
+      interview_id: String(entry.interview_id),
+      client_id: String(entry.client_id)
+    }))
+  };
 }
 
 /**
- * Writes one ledger row per interview on the given lines, leaving billed_at null
- * until the Stripe item exists. An interview already on the ledger is left alone,
- * so a retry re-attaches rather than double billing.
+ * Stamps completed_at on interviews that reached billing without one.
+ *
+ * Their completion stamp failed, so the billing time is the only defensible
+ * value. Each is logged so the failure can be investigated rather than buried.
  */
+async function stampMissingCompletedAt({ db, missing, billedAt } = {}) {
+  if (!db || !Array.isArray(missing) || !missing.length) return 0;
+  const stampedAt = toIso(billedAt) || new Date().toISOString();
+  let stamped = 0;
+  for (const row of missing) {
+    console.warn('usage_missing_completed_at', {
+      interview_id: row.interview_id,
+      client_id: row.client_id,
+      stamped_completed_at: stampedAt
+    });
+    const { error } = await db
+      .from('interviews')
+      .update({ completed_at: stampedAt })
+      .eq('id', row.interview_id)
+      .is('completed_at', null);
+    if (error) {
+      console.error('usage_missing_completed_at_stamp_failed', {
+        interview_id: row.interview_id,
+        error: error.message || error
+      });
+      continue;
+    }
+    stamped += 1;
+  }
+  return stamped;
+}
+
 async function recordUsageLines({ db, clientId, lines, stripeInvoiceId, periodStart, periodEnd } = {}) {
   if (!db || !clientId || !Array.isArray(lines) || !lines.length) return { inserted: 0, rows: [] };
 
@@ -231,21 +217,6 @@ async function listLedgerRowsForInvoice({ db, stripeInvoiceId } = {}) {
     .eq('stripe_invoice_id', stripeInvoiceId);
   if (error) throw new Error(error.message || 'Usage billing ledger lookup failed');
   return data || [];
-}
-
-/** The end of the last period this client was billed for, if any. */
-async function findLastBilledPeriodEnd({ db, clientId } = {}) {
-  if (!db || !clientId) return null;
-  const { data, error } = await db
-    .from('usage_billing_ledger')
-    .select('period_end')
-    .eq('client_id', clientId)
-    .not('period_end', 'is', null)
-    .order('period_end', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (error) throw new Error(error.message || 'Usage billing period lookup failed');
-  return toIso(data?.period_end);
 }
 
 /**
@@ -297,17 +268,6 @@ function linesFromLedgerRows(rows, roleMetaById) {
   return [...byRole.values()];
 }
 
-function periodLabel(periodStart, periodEnd) {
-  const format = (value) => {
-    const iso = toIso(value);
-    return iso ? iso.slice(0, 10) : null;
-  };
-  const start = format(periodStart);
-  const end = format(periodEnd);
-  if (start && end) return `${start} to ${end}`;
-  return end || start || 'current period';
-}
-
 /**
  * Adds one usage item per role to a Stripe invoice and records the ledger.
  *
@@ -320,7 +280,7 @@ function periodLabel(periodStart, periodEnd) {
  * Stripe failures are rethrown so the caller can let Stripe retry.
  */
 async function applyUsageToInvoice({
-  db, stripe, clientId, customerId, invoiceId, periodStart, periodEnd, metadata, now
+  db, stripe, clientId, customerId, invoiceId, asOf, metadata, now
 } = {}) {
   if (!db || !stripe || !clientId || !invoiceId) {
     return { applied: false, reason: 'invalid_request', items: 0, total_cents: 0 };
@@ -331,26 +291,33 @@ async function applyUsageToInvoice({
     return { applied: false, reason: 'already_billed', items: 0, total_cents: 0 };
   }
 
-  const { familyIds, entityLabelById } = await loadBillingFamily({ db, clientId });
-  const { data: roleRows, error: rolesError } = await db
-    .from('roles')
-    .select('id,title,client_id')
-    .in('client_id', familyIds);
-  if (rolesError) throw new Error(rolesError.message || 'Usage billing role lookup failed');
-  const roleMetaById = new Map((roleRows || []).map((role) => [String(role.id), {
+  const allocation = await require('./interviewAllocation')
+    .allocateInterviews({ db, billingClientId: clientId });
+  const roleMetaById = new Map((allocation.roles || []).map((role) => [String(role.id), {
     title: String(role.title || '').trim() || 'Role',
-    entity_label: entityLabelById.get(String(role.client_id ?? '')) || null
+    role_status: normalizeRoleStatus(role.status),
+    entity_label: allocation.entity_label_by_client.get(String(role.client_id ?? '')) || null
   }]));
 
   let lines;
+  let periodStart = null;
+  let periodEnd = null;
+  let billedLabel = monthLabel(priorMonthBounds(asOf).start);
+  let missingCompletedAt = [];
   if (existing.length) {
+    periodStart = existing[0]?.period_start || null;
+    periodEnd = existing[0]?.period_end || null;
     // Resume: bill exactly what the failed attempt reserved.
     lines = linesFromLedgerRows(existing.filter((row) => row.billed_at == null), roleMetaById);
   } else {
-    const usage = await computeUnbilledUsage({ db, clientId, periodEnd, now });
+    const usage = await computeUnbilledUsage({ db, clientId, asOf, allocation });
     if (!usage.lines.length) {
       return { applied: false, reason: usage.reason || 'nothing_unbilled', items: 0, total_cents: 0 };
     }
+    periodStart = usage.period_start;
+    periodEnd = usage.period_end;
+    billedLabel = usage.month_label;
+    missingCompletedAt = usage.missing_completed_at || [];
 
     // Bill exactly what this run reserved, never what it computed. The reserve
     // is an upsert that skips interviews already on the ledger, so a run that
@@ -368,7 +335,7 @@ async function applyUsageToInvoice({
 
   if (!lines.length) return { applied: false, reason: 'nothing_unbilled', items: 0, total_cents: 0 };
 
-  const label = periodLabel(periodStart, periodEnd);
+  const label = billedLabel;
   let items = 0;
   let totalCents = 0;
   for (const line of lines) {
@@ -379,8 +346,8 @@ async function applyUsageToInvoice({
       unit_amount: line.unit_price_cents,
       quantity: line.quantity,
       description: line.entity_label
-        ? `Interviews — ${line.entity_label} · ${line.role_title} (${label})`
-        : `Interviews — ${line.role_title} (${label})`,
+        ? `Interviews — ${line.entity_label} · ${line.role_title} [${line.role_status || roleMetaById.get(String(line.role_id))?.role_status || 'open'}] (${label})`
+        : `Interviews — ${line.role_title} [${line.role_status || roleMetaById.get(String(line.role_id))?.role_status || 'open'}] (${label})`,
       metadata: {
         client_id: clientId,
         role_id: line.role_id,
@@ -400,6 +367,11 @@ async function applyUsageToInvoice({
     totalCents += line.amount_cents;
   }
 
+  // Their completion stamp failed, so billing time is the only defensible value.
+  // Stamped after the ledger rows exist, so the unique interview_id is already
+  // guarding against a second charge.
+  await stampMissingCompletedAt({ db, missing: missingCompletedAt, billedAt: toIso(now) });
+
   return { applied: true, items, total_cents: totalCents, lines };
 }
 
@@ -411,13 +383,13 @@ async function applyUsageToInvoice({
  * the items and the ledger have something to attach to, then finalized.
  */
 async function createImmediateUsageInvoice({
-  db, stripe, clientId, customerId, periodEnd, periodStart, requestId, reason, now
+  db, stripe, clientId, customerId, asOf, requestId, reason, now
 } = {}) {
   if (!db || !stripe || !clientId) return { skipped: true, reason: 'invalid_request' };
 
   const { data: client, error: clientError } = await db
     .from('clients')
-    .select('id,stripe_customer_id,contract_start_at')
+    .select('id,stripe_customer_id')
     .eq('id', clientId)
     .maybeSingle();
   if (clientError) throw new Error(clientError.message || 'Usage invoice client lookup failed');
@@ -426,13 +398,9 @@ async function createImmediateUsageInvoice({
   const stripeCustomerId = String(customerId || client.stripe_customer_id || '').trim();
   if (!stripeCustomerId) return { skipped: true, reason: 'no_stripe_customer' };
 
-  const cutoff = toIso(periodEnd) || toIso(now) || new Date().toISOString();
-  const usage = await computeUnbilledUsage({ db, clientId, periodEnd: cutoff, now });
+  // Checked before creating an invoice, so an empty one is never raised.
+  const usage = await computeUnbilledUsage({ db, clientId, asOf });
   if (!usage.lines.length) return { skipped: true, reason: usage.reason || 'nothing_unbilled' };
-
-  const start = toIso(periodStart)
-    || await findLastBilledPeriodEnd({ db, clientId })
-    || toIso(client.contract_start_at);
 
   const invoice = await stripe.invoices.create({
     customer: stripeCustomerId,
@@ -454,8 +422,7 @@ async function createImmediateUsageInvoice({
     clientId,
     customerId: stripeCustomerId,
     invoiceId,
-    periodStart: start,
-    periodEnd: cutoff,
+    asOf,
     metadata: { reason: String(reason || 'admin_request') },
     now
   });
@@ -485,40 +452,15 @@ async function createImmediateUsageInvoice({
   };
 }
 
-/**
- * The day of the month an annual subscription renews on, from the only anchors
- * this schema stores. A client anchored to the 31st runs on the last day of a
- * shorter month rather than being skipped.
- */
-function anniversaryDayOfMonth(client) {
-  const anchor = toIso(client?.contract_start_at) || toIso(client?.current_term_end);
-  if (!anchor) return null;
-  return new Date(anchor).getUTCDate();
-}
-
-function daysInMonth(year, monthIndex) {
-  return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
-}
-
-function isAnniversaryToday(client, now) {
-  const day = anniversaryDayOfMonth(client);
-  if (day == null) return false;
-  const today = now instanceof Date ? now : new Date(now || Date.now());
-  if (!Number.isFinite(today.getTime())) return false;
-  const lastDay = daysInMonth(today.getUTCFullYear(), today.getUTCMonth());
-  return today.getUTCDate() === Math.min(day, lastDay);
-}
-
 module.exports = {
   EMPTY_USAGE,
   USAGE_BILLING_MODEL,
-  anniversaryDayOfMonth,
   applyUsageToInvoice,
-  createImmediateUsageInvoice,
-  isAnniversaryToday,
   computeUnbilledUsage,
-  findLastBilledPeriodEnd,
+  createImmediateUsageInvoice,
   listLedgerRowsForInvoice,
   markUsageLinesBilled,
-  recordUsageLines
+  priorMonthBounds,
+  recordUsageLines,
+  stampMissingCompletedAt
 };

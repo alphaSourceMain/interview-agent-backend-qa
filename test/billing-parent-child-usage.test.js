@@ -36,7 +36,8 @@ injectModule(sendgridPath, {
 });
 
 const { computeUnbilledUsage, applyUsageToInvoice } = require(path.join(ROOT, 'src', 'services', 'usageBilling.js'));
-const { listAvailableCredits } = require(path.join(ROOT, 'src', 'services', 'interviewCredits.js'));
+const { creditsFromAllocation } = require(path.join(ROOT, 'src', 'services', 'billingReadModel.js'));
+const { allocateInterviews } = require(path.join(ROOT, 'src', 'services', 'interviewAllocation.js'));
 
 const PARENT = 'client_parent';
 const CHILD = 'client_child';
@@ -434,16 +435,22 @@ test('credits do not roll up: a parent does not see a child credit', async () =>
   const db = makeDb({
     credits: [{
       id: 'credit_child', client_id: CHILD, source_role_id: 'role_child',
-      quantity: 5, remaining: 5, minted_at: '2026-08-01T00:00:00.000Z',
+      quantity: 5, minted_at: '2026-08-01T00:00:00.000Z',
       expires_at: '2026-12-01T00:00:00.000Z', revoked_at: null
     }]
   });
 
-  const parentCredits = await listAvailableCredits({ db, clientId: PARENT });
-  const childCredits = await listAvailableCredits({ db, clientId: CHILD });
+  // The allocation loads the whole family's credits, and the read model is what
+  // keeps each client to its own.
+  const allocation = await allocateInterviews({ db, billingClientId: PARENT });
+  const credits = creditsFromAllocation(allocation, { asOf: '2026-09-01T00:00:00.000Z' });
 
-  assert.deepEqual(parentCredits, [], 'a credit stays with the client whose role earned it');
-  assert.equal(childCredits.length, 1);
+  assert.deepEqual(
+    credits.items.filter((item) => String(item.client_id) === PARENT),
+    [],
+    'a credit stays with the client whose role earned it'
+  );
+  assert.equal(credits.items.filter((item) => String(item.client_id) === CHILD).length, 1);
 });
 
 test('the asymmetry is written down where someone will find it', () => {

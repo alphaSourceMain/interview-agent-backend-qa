@@ -303,12 +303,12 @@ timestamps, so alphabetical order is run order.
 | File | What it does |
 | --- | --- |
 | `20260921120000_billing_models.sql` | Adds `billing_model`, `usage_interview_fee_cents` and `rollover_days` to `client_plan_settings`, and backfills each existing client to the model its tier implies |
-| `20260921130000_interview_credits.sql` | Creates `interview_credits` and `interview_credit_draws`; adds `rollover_drawn_offset` to `roles` |
+| `20260921130000_interview_credits.sql` | Creates `interview_credits` — what was minted and when it lapses, with a partial unique index giving a closed role at most one live credit |
 | `20260921140000_usage_billing_ledger.sql` | Creates `usage_billing_ledger`, with a unique constraint on `interview_id` — the guard that stops an interview being billed twice |
 | `20260921150000_billing_idempotency_keys.sql` | Creates `billing_idempotency_keys`, for the `Idempotency-Key` contract on the money-spending admin routes |
 | `20260924120000_role_interview_purchase_failed_status.sql` | Widens the status check on `role_interview_purchases` to allow `failed`, which the code already wrote |
 | `20260925120000_enterprise_pool_discounts.sql` | Creates `enterprise_pool_discounts` and seeds the volume bands for pool pricing |
-| `20260925130000_client_interview_pools.sql` | Creates `client_interview_pools` and `client_interview_pool_draws` |
+| `20260925130000_client_interview_pools.sql` | Creates `client_interview_pools` — what was bought and whether it was paid for |
 | `20260926120000_interviews_completed_at.sql` | Adds `completed_at` to `interviews`, indexes `(client_id, completed_at)`, and backfills existing rows |
 
 ### Which of these touch tables this repository does not define
@@ -321,7 +321,6 @@ that touches one is changing a table whose access model is **not** visible here.
 | Migration | Foreign table it changes | What that means |
 | --- | --- | --- |
 | `20260921120000_billing_models.sql` | `client_plan_settings` | Adds three columns and backfills them. No change to who can read the table. |
-| `20260921130000_interview_credits.sql` | `roles` | Adds one column, `rollover_drawn_offset`. |
 | `20260926120000_interviews_completed_at.sql` | `interviews` | Adds one column and one index, and backfills it. |
 
 **`20260926120000_interviews_completed_at.sql` deliberately contains no RLS,

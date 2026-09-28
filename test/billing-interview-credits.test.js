@@ -25,8 +25,6 @@ require.cache[supabasePath] = {
 };
 
 const {
-  drawCredit,
-  listAvailableCredits,
   mintCreditForClosedRole,
   revokeCreditForReopenedRole,
   syncRoleCreditsForStatusChange
@@ -98,7 +96,10 @@ test('closing a Pro role mints its unused allowance', async () => {
   assert.equal(result.minted, true);
   assert.equal(result.quantity, 28, '30 included, 2 used');
   assert.equal(db.tables.interview_credits.length, 1);
-  assert.equal(db.tables.interview_credits[0].remaining, 28);
+  assert.equal(db.tables.interview_credits[0].quantity, 28,
+    'the quantity is the whole record of the credit; what is left of it is derived');
+  assert.equal(db.tables.interview_credits[0].remaining, undefined,
+    'no balance is stored, so none can fall out of step');
   assert.equal(db.tables.interview_credits[0].source_role_id, 'role_1');
 });
 
@@ -213,6 +214,12 @@ test('a role whose availability cannot be read mints nothing', async () => {
 });
 
 // --- revoking --------------------------------------------------------------
+//
+// Revoking no longer counts what was spent or writes an offset: the allocation
+// derives both by replaying the interviews charged to the credit. The rules
+// that used to live here — a revoked credit's spent interviews stay spent, and
+// the reopened role's own remaining is reduced by that many — are asserted in
+// test/billing-interview-allocation.test.js.
 
 test('reopening a role revokes its credit', async () => {
   const db = makeDb({ credits: [credit()] });
@@ -220,29 +227,22 @@ test('reopening a role revokes its credit', async () => {
   const result = await revokeCreditForReopenedRole({ db, roleId: 'role_1', now: NOW });
 
   assert.equal(result.revoked, true);
-  assert.equal(result.drawn_count, 0);
   assert.equal(db.tables.interview_credits[0].revoked_at, NOW);
 });
 
-test('credit already spent elsewhere is charged back to the reopened role', async () => {
-  const db = makeDb({ credits: [credit({ quantity: 5, remaining: 2 })] });
-
-  const result = await revokeCreditForReopenedRole({ db, roleId: 'role_1', now: NOW });
-
-  assert.equal(result.drawn_count, 3, '5 minted, 2 left, so 3 were spent');
-  assert.equal(db.tables.roles[0].rollover_drawn_offset, 3,
-    'the role gets its allowance back minus what other roles already used');
-});
-
-test('repeated close and reopen cycles accumulate the offset', async () => {
-  const db = makeDb({
-    credits: [credit({ quantity: 5, remaining: 3 })],
-    roles: [{ id: 'role_1', client_id: CLIENT, rollover_drawn_offset: 4 }]
-  });
+test('revoking records when, and nothing else', async () => {
+  const db = makeDb({ credits: [credit({ quantity: 5 })] });
 
   await revokeCreditForReopenedRole({ db, roleId: 'role_1', now: NOW });
 
-  assert.equal(db.tables.roles[0].rollover_drawn_offset, 6, '4 from an earlier cycle plus 2 from this one');
+  const stored = db.tables.interview_credits[0];
+  assert.equal(stored.quantity, 5, 'the credit is not rewritten, only marked');
+  assert.equal(stored.revoked_at, NOW);
+  assert.deepEqual(
+    db.calls.filter((call) => call.op !== 'select' && call.table === 'roles'),
+    [],
+    'no counter is written to the role'
+  );
 });
 
 test('reopening a role that never minted is a no-op', async () => {
@@ -250,161 +250,17 @@ test('reopening a role that never minted is a no-op', async () => {
 
   const result = await revokeCreditForReopenedRole({ db, roleId: 'role_1', now: NOW });
 
-  assert.deepEqual(result, { revoked: false, reason: 'no_credit', drawn_count: 0 });
-  assert.equal(db.tables.roles[0].rollover_drawn_offset, 0);
+  assert.deepEqual(result, { revoked: false, reason: 'no_credit' });
 });
 
 test('an already revoked credit is not revoked again', async () => {
-  const db = makeDb({ credits: [credit({ revoked_at: '2026-09-10T00:00:00.000Z', quantity: 5, remaining: 1 })] });
+  const db = makeDb({ credits: [credit({ revoked_at: '2026-09-10T00:00:00.000Z', quantity: 5 })] });
 
   const result = await revokeCreditForReopenedRole({ db, roleId: 'role_1', now: NOW });
 
   assert.equal(result.revoked, false);
-  assert.equal(db.tables.roles[0].rollover_drawn_offset, 0, 'the offset must not be charged twice');
-});
-
-// --- listing ---------------------------------------------------------------
-
-test('available credits are the live ones, soonest to expire first', async () => {
-  const db = makeDb({
-    credits: [
-      credit({ id: 'c_late', source_role_id: 'role_a', expires_at: '2026-12-01T00:00:00.000Z' }),
-      credit({ id: 'c_soon', source_role_id: 'role_b', expires_at: '2026-10-01T00:00:00.000Z' }),
-      credit({ id: 'c_expired', source_role_id: 'role_c', expires_at: '2026-09-01T00:00:00.000Z' }),
-      credit({ id: 'c_revoked', source_role_id: 'role_d', revoked_at: NOW }),
-      credit({ id: 'c_spent', source_role_id: 'role_e', remaining: 0 })
-    ]
-  });
-
-  const available = await listAvailableCredits({ db, clientId: CLIENT, now: NOW });
-
-  assert.deepEqual(available.map((c) => c.id), ['c_soon', 'c_late']);
-});
-
-test('the credits of another client are never listed', async () => {
-  const db = makeDb({
-    credits: [
-      credit({ id: 'c_mine' }),
-      credit({ id: 'c_theirs', client_id: 'client_2', source_role_id: 'role_x' })
-    ]
-  });
-
-  const available = await listAvailableCredits({ db, clientId: CLIENT, now: NOW });
-
-  assert.deepEqual(available.map((c) => c.id), ['c_mine']);
-});
-
-// --- drawing ---------------------------------------------------------------
-
-test('a draw takes one unit from the earliest-expiring credit', async () => {
-  const db = makeDb({
-    credits: [
-      credit({ id: 'c_late', source_role_id: 'role_a', remaining: 5, expires_at: '2026-12-01T00:00:00.000Z' }),
-      credit({ id: 'c_soon', source_role_id: 'role_b', remaining: 5, expires_at: '2026-10-01T00:00:00.000Z' })
-    ]
-  });
-
-  const result = await drawCredit({ db, clientId: CLIENT, roleId: 'role_2', interviewId: 'iv_1', now: NOW });
-
-  assert.equal(result.drawn, true);
-  assert.equal(result.credit_id, 'c_soon', 'spend what lapses first');
-  assert.equal(db.tables.interview_credits.find((c) => c.id === 'c_soon').remaining, 4);
-  assert.equal(db.tables.interview_credits.find((c) => c.id === 'c_late').remaining, 5);
-  assert.equal(db.tables.interview_credit_draws.length, 1);
-  assert.equal(db.tables.interview_credit_draws[0].interview_id, 'iv_1');
-});
-
-test('an exhausted credit is skipped for the next one', async () => {
-  const db = makeDb({
-    credits: [
-      credit({ id: 'c_spent', source_role_id: 'role_a', remaining: 0, expires_at: '2026-10-01T00:00:00.000Z' }),
-      credit({ id: 'c_live', source_role_id: 'role_b', remaining: 2, expires_at: '2026-11-01T00:00:00.000Z' })
-    ]
-  });
-
-  const result = await drawCredit({ db, clientId: CLIENT, roleId: 'role_2', interviewId: 'iv_1', now: NOW });
-
-  assert.equal(result.credit_id, 'c_live');
-});
-
-test('drawing twice for the same interview spends one unit', async () => {
-  const db = makeDb({ credits: [credit({ remaining: 5 })] });
-
-  const first = await drawCredit({ db, clientId: CLIENT, roleId: 'role_2', interviewId: 'iv_1', now: NOW });
-  const second = await drawCredit({ db, clientId: CLIENT, roleId: 'role_2', interviewId: 'iv_1', now: NOW });
-
-  assert.equal(first.drawn, true);
-  assert.equal(second.drawn, false);
-  assert.equal(second.reason, 'already_drawn');
-  assert.equal(db.tables.interview_credits[0].remaining, 4, 'a late transcript must not draw again');
-  assert.equal(db.tables.interview_credit_draws.length, 1);
-});
-
-test('a client with no credits draws nothing', async () => {
-  const db = makeDb();
-
-  const result = await drawCredit({ db, clientId: CLIENT, roleId: 'role_2', interviewId: 'iv_1', now: NOW });
-
-  assert.deepEqual(result, { drawn: false, reason: 'no_credits' });
-  assert.deepEqual(db.tables.interview_credit_draws, []);
-});
-
-test('an expired credit cannot be drawn', async () => {
-  const db = makeDb({ credits: [credit({ expires_at: '2026-09-01T00:00:00.000Z' })] });
-
-  const result = await drawCredit({ db, clientId: CLIENT, roleId: 'role_2', interviewId: 'iv_1', now: NOW });
-
-  assert.equal(result.drawn, false);
-  assert.equal(result.reason, 'no_credits');
-});
-
-test('a credit taken by someone else between the read and the write is not over-spent', async () => {
-  // Stages a concurrent draw on the first credit, so the conditional decrement
-  // matches no row and the draw has to move on.
-  let staged = false;
-  const db = makeDb({
-    credits: [
-      credit({ id: 'c_soon', source_role_id: 'role_a', remaining: 1, expires_at: '2026-10-01T00:00:00.000Z' }),
-      credit({ id: 'c_late', source_role_id: 'role_b', remaining: 4, expires_at: '2026-11-01T00:00:00.000Z' })
-    ],
-    beforeUpdate(table, patch, rows) {
-      if (staged || table !== 'interview_credits' || !rows.length) return;
-      if (rows[0].id !== 'c_soon') return;
-      staged = true;
-      rows[0].remaining = 0;
-    }
-  });
-
-  const result = await drawCredit({ db, clientId: CLIENT, roleId: 'role_2', interviewId: 'iv_1', now: NOW });
-
-  assert.equal(result.drawn, true);
-  assert.equal(result.credit_id, 'c_late', 'the contended credit is left alone');
-  assert.equal(db.tables.interview_credits.find((c) => c.id === 'c_soon').remaining, 0,
-    'the concurrent draw keeps its unit');
-  assert.equal(db.tables.interview_credits.find((c) => c.id === 'c_late').remaining, 3);
-  assert.equal(db.tables.interview_credit_draws.length, 1, 'exactly one unit left the client');
-});
-
-test('a revoked credit cannot be drawn even if it is read first', async () => {
-  const db = makeDb({ credits: [credit({ revoked_at: NOW })] });
-
-  const result = await drawCredit({ db, clientId: CLIENT, roleId: 'role_2', interviewId: 'iv_1', now: NOW });
-
-  assert.equal(result.drawn, false);
-});
-
-test('a draw needs a client, a role and an interview', async () => {
-  const db = makeDb({ credits: [credit()] });
-
-  for (const args of [
-    { clientId: '', roleId: 'role_2', interviewId: 'iv_1' },
-    { clientId: CLIENT, roleId: '', interviewId: 'iv_1' },
-    { clientId: CLIENT, roleId: 'role_2', interviewId: '' }
-  ]) {
-    const result = await drawCredit({ db, ...args, now: NOW });
-    assert.deepEqual(result, { drawn: false, reason: 'invalid_request' });
-  }
-  assert.deepEqual(db.tables.interview_credit_draws, []);
+  assert.equal(db.tables.interview_credits[0].revoked_at, '2026-09-10T00:00:00.000Z',
+    'the first revocation time stands');
 });
 
 // --- the route hook --------------------------------------------------------

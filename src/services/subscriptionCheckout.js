@@ -401,7 +401,6 @@ async function createSubscriptionCheckoutSession({
         .insert({
           client_id: client.id,
           quantity_purchased: quote.quantity,
-          quantity_remaining: 0,
           unit_price_cents: quote.unit_price_cents,
           discount_pct: quote.discount_pct,
           total_cents: quote.total_cents,

@@ -147,7 +147,8 @@ test('the pending pool row is reserved before the session is created', async () 
   assert.equal(row.id, result.interviewPoolId);
   assert.equal(row.status, 'pending');
   assert.equal(row.quantity_purchased, 30);
-  assert.equal(row.quantity_remaining, 0, 'nothing is spendable until it is paid');
+  assert.equal(row.quantity_remaining, undefined,
+    'nothing stores a balance; pending status is what makes it unspendable');
   assert.equal(row.unit_price_cents, 2500);
   assert.equal(Number(row.discount_pct), 5);
   assert.equal(row.total_cents, 71250, '30 x 2500 less 5%');
@@ -264,8 +265,8 @@ test('a settled pool checkout makes the interviews spendable', async () => {
   assert.equal((await post(loadWebhook(poolEvent(), db))).status, 200);
 
   const row = db.tables.client_interview_pools[0];
-  assert.equal(row.status, 'paid');
-  assert.equal(row.quantity_remaining, 30);
+  assert.equal(row.status, 'paid', 'paid is what makes the interviews spendable');
+  assert.equal(row.quantity_purchased, 30);
   assert.equal(row.stripe_payment_intent_id, 'pi_1');
 });
 

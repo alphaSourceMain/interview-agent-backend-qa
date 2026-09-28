@@ -79,13 +79,12 @@ function makeDb({
     role_interview_purchases: purchases,
     interviews,
     roles: [
-      { id: ROLE, client_id: CLIENT, title: 'Hygienist', rollover_drawn_offset: drawnOffset, interview_limit_notified_at: null },
+      { id: ROLE, client_id: CLIENT, title: 'Hygienist', interview_limit_notified_at: null },
       // The role a credit was minted from, so the reopened-role reduction has a
       // role to land on.
-      { id: 'role_other', client_id: CLIENT, title: 'Front Desk', rollover_drawn_offset: 0, interview_limit_notified_at: null }
+      { id: 'role_other', client_id: CLIENT, title: 'Front Desk', interview_limit_notified_at: null }
     ],
-    interview_credits: credits,
-    interview_credit_draws: draws
+    interview_credits: credits
   }, { unique: UNIQUE_KEYS });
 }
 
@@ -134,18 +133,26 @@ test('an Essentials client sees exactly the numbers it saw before credits existe
     own_remaining_interviews: 4,
     credit_interviews: 0,
     pool_remaining_interviews: 0,
-    rollover_drawn_offset: 0,
+    credit_drawn_offset: 0,
     billing_model: 'fixed'
   });
 });
 
-test('an Essentials client is not charged a stray offset even if one is stored', async () => {
-  const db = makeDb({ planTier: 'basic', billingModel: 'fixed', included: 5, drawnOffset: 3 });
+test('an Essentials role is never reduced by a credit, because it has none', async () => {
+  // Under the rollover model a revoked credit reduces the role that minted it.
+  // An Essentials client has no credits at all, so nothing can reduce a role.
+  const db = makeDb({
+    planTier: 'basic', billingModel: 'fixed', included: 5,
+    credits: [credit({
+      id: 'c_stray', source_role_id: ROLE, quantity: 5,
+      minted_at: '2026-09-01T00:00:00.000Z', revoked_at: '2026-09-20T00:00:00.000Z'
+    })]
+  });
 
   const availability = await availabilityFor(db);
 
-  assert.equal(availability.remaining_interviews, 5, 'the offset belongs to the rollover model only');
-  assert.equal(availability.rollover_drawn_offset, 0);
+  assert.equal(availability.remaining_interviews, 5, 'credits belong to the rollover model only');
+  assert.equal(availability.credit_drawn_offset, 0);
 });
 
 test('an Enterprise client sees no credits', async () => {
@@ -235,7 +242,7 @@ test('a reopened role gives back its allowance minus what other roles already sp
 
   const availability = await getRoleInterviewAvailability({ db, roleId: 'role_other', clientId: CLIENT });
 
-  assert.equal(availability.rollover_drawn_offset, 2, 'two of its credit were spent before revocation');
+  assert.equal(availability.credit_drawn_offset, 2, 'two of its credit were spent before revocation');
   assert.equal(availability.own_remaining_interviews, 8, '10 included less the 2 already spent elsewhere');
 });
 
@@ -279,7 +286,7 @@ test('every error path still answers with nulls, including the new keys', async 
       own_remaining_interviews: null,
       credit_interviews: null,
       pool_remaining_interviews: null,
-      rollover_drawn_offset: null,
+      credit_drawn_offset: null,
       billing_model: null
     });
   }

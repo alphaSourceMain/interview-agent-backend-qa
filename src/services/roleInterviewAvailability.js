@@ -71,7 +71,7 @@ const UNRESOLVED_AVAILABILITY = Object.freeze({
   own_remaining_interviews: null,
   credit_interviews: null,
   pool_remaining_interviews: null,
-  rollover_drawn_offset: null,
+  credit_drawn_offset: null,
   billing_model: null
 });
 
@@ -136,7 +136,7 @@ async function getRoleInterviewAvailability({ db, roleId, clientId, allocation =
     own_remaining_interviews: counters.own_remaining,
     credit_interviews: billingModel === ROLLOVER_BILLING_MODEL ? resolved.totals.credit_balance : 0,
     pool_remaining_interviews: billingModel === USAGE_BILLING_MODEL ? resolved.totals.pool_remaining : 0,
-    rollover_drawn_offset: counters.drawn_from_revoked,
+    credit_drawn_offset: counters.drawn_from_revoked,
     billing_model: billingModel
   };
 }

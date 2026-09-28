@@ -101,8 +101,7 @@ async function loadFamily({ db, billingClientId }) {
  *
  * Revocation is not retroactive. Interviews already allocated to a credit before
  * it was revoked stay allocated, and the count of those is what reduces the
- * reopened role's own remaining — which is what `roles.rollover_drawn_offset`
- * used to store.
+ * reopened role's own remaining. This is derived here; nothing stores it.
  */
 function creditIsLiveAt(credit, completedAtIso) {
   if (!completedAtIso) return false;
@@ -316,7 +315,7 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
   }
 
   // Interviews charged to a credit that was later revoked are what reduce the
-  // reopened role's own remaining — the number rollover_drawn_offset stored.
+  // reopened role's own remaining.
   const revokedCreditIds = new Set(
     credits.filter((credit) => toIso(credit.revoked_at)).map((credit) => String(credit.id))
   );

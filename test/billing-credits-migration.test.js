@@ -2,9 +2,11 @@
 
 // The interview-credits migration, asserted as text.
 //
-// The two invariants that matter most are structural: one live credit per closed
-// role, and one draw per interview. Both are enforced by indexes rather than by
-// application code, so they are pinned here.
+// The invariant that matters most is structural and enforced by an index rather
+// than by application code: one live credit per closed role. The other thing
+// pinned here is an absence — a credit stores what it was minted with and
+// nothing about what is left of it, because that is derived from the interviews
+// charged to it. A balance column would be a second source of truth.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -14,14 +16,12 @@ const { test } = require('node:test');
 const MIGRATION = path.join(__dirname, '..', 'supabase', 'migrations', '20260921130000_interview_credits.sql');
 const sql = fs.readFileSync(MIGRATION, 'utf8');
 
-test('both tables are created idempotently', () => {
+test('the table is created idempotently', () => {
   assert.match(sql, /create table if not exists public\.interview_credits/i);
-  assert.match(sql, /create table if not exists public\.interview_credit_draws/i);
 });
 
-test('a credit cannot be minted with a non-positive quantity or a negative balance', () => {
+test('a credit cannot be minted with a non-positive quantity', () => {
   assert.match(sql, /constraint interview_credits_quantity_check check \(quantity > 0\)/i);
-  assert.match(sql, /constraint interview_credits_remaining_check check \(remaining >= 0\)/i);
 });
 
 test('a credit records where it came from and when it lapses', () => {
@@ -38,34 +38,28 @@ test('a closed role can hold only one live credit', () => {
   );
 });
 
-test('an interview can be drawn for exactly once', () => {
-  assert.match(sql, /interview_id uuid not null unique/i,
-    'a redelivered event or a late transcript must not spend twice');
+test('nothing stores what is left of a credit', () => {
+  assert.doesNotMatch(sql, /\bremaining\b/i,
+    'a balance column would drift from the interviews it is meant to describe');
+  assert.doesNotMatch(sql, /interview_credit_draws/i,
+    'which interviews a credit paid for is derived, not recorded');
+  assert.doesNotMatch(sql, /rollover_drawn_offset/i,
+    'the reopened role reduction is derived from the revoked credit, not stored on the role');
 });
 
-test('a draw points at the credit it came from and dies with it', () => {
-  assert.match(sql, /credit_id uuid not null references public\.interview_credits\(id\) on delete cascade/i);
+test('the migration changes no table this repository does not define', () => {
+  assert.doesNotMatch(sql, /alter table public\.roles/i,
+    'public.roles carries an access model from outside this repository');
 });
 
-test('the indexes the lookups need are present', () => {
+test('the index the credit lookup needs is present', () => {
   assert.match(sql, /create index if not exists interview_credits_client_expires_at_idx[\s\S]*?\(client_id, expires_at\)/i);
-  assert.match(sql, /create index if not exists interview_credit_draws_role_id_idx[\s\S]*?\(role_id\)/i);
 });
 
-test('roles gains the drawn offset behind an existence check', () => {
-  assert.match(
-    sql,
-    /column_name = 'rollover_drawn_offset'[\s\S]{0,200}?add column rollover_drawn_offset integer not null default 0/i,
-    'public.roles is not created by any migration here, so the column add must be guarded'
-  );
-});
-
-test('both tables are row-level secured and service-role only', () => {
+test('the table is row-level secured and service-role only', () => {
   assert.match(sql, /alter table public\.interview_credits enable row level security/i);
-  assert.match(sql, /alter table public\.interview_credit_draws enable row level security/i);
   assert.match(sql, /revoke all privileges on table public\.interview_credits\s*\n?from public, anon, authenticated/i);
-  assert.match(sql, /revoke all privileges on table public\.interview_credit_draws\s*\n?from public, anon, authenticated/i);
-  assert.match(sql, /grant select, insert, update, delete on table[\s\S]*?public\.interview_credits,[\s\S]*?public\.interview_credit_draws[\s\S]*?to service_role/i);
+  assert.match(sql, /grant select, insert, update, delete on table public\.interview_credits[\s\S]*?to service_role/i);
 });
 
 test('the migration grants nothing to anon or authenticated', () => {

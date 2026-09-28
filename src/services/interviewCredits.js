@@ -6,21 +6,18 @@
 // it is minted as a credit the client can spend on any other role until it
 // expires. Reopening the role gives its own allowance back, so the credit is
 // revoked — but anything already spent from it cannot be taken back from the
-// clients who spent it, so that amount is recorded against the role instead.
+// roles that spent it, so the reopened role's own allowance is reduced by that
+// much instead.
 //
-// Every draw is one row keyed by interview_id, so a redelivered event or a late
-// transcript cannot spend the same interview twice.
+// Nothing here spends a credit. What a credit has left, and which interviews
+// were charged to it, is worked out at read time by interviewAllocation from the
+// interviews themselves — so there is no balance to keep in step and no draw
+// row to reconcile.
 
 const { getRoleInterviewAvailability } = require('./roleInterviewAvailability');
 const { resolveBillingModel } = require('./billingModel');
 
 const ROLLOVER_BILLING_MODEL = 'rollover';
-const DRAW_QUANTITY = 1;
-
-// A conditional decrement can lose to a concurrent draw on the same credit. One
-// extra pass over freshly read credits is enough to absorb that without letting a
-// contended credit spin.
-const DRAW_PASSES = 2;
 
 function isUniqueViolation(error) {
   const code = String(error?.code || '').trim();
@@ -56,7 +53,7 @@ function parseWholeNonNegative(value) {
 async function findLiveCreditForRole(db, roleId) {
   const { data, error } = await db
     .from('interview_credits')
-    .select('id,client_id,source_role_id,quantity,remaining,minted_at,expires_at,revoked_at')
+    .select('id,client_id,source_role_id,quantity,minted_at,expires_at,revoked_at')
     .eq('source_role_id', roleId)
     .is('revoked_at', null)
     .maybeSingle();
@@ -97,11 +94,10 @@ async function mintCreditForClosedRole({ db, clientId, roleId, closedAt, now } =
       client_id: clientId,
       source_role_id: roleId,
       quantity: leftover,
-      remaining: leftover,
       minted_at: mintedAt,
       expires_at: expiresAt
     })
-    .select('id,client_id,source_role_id,quantity,remaining,minted_at,expires_at,revoked_at')
+    .select('id,client_id,source_role_id,quantity,minted_at,expires_at,revoked_at')
     .maybeSingle();
 
   if (error) {
@@ -116,197 +112,29 @@ async function mintCreditForClosedRole({ db, clientId, roleId, closedAt, now } =
   return { minted: true, credit: data, quantity: leftover, expires_at: expiresAt };
 }
 
-// Revokes a reopened role's credit. Draws already taken from it stay spent, so
-// the count is added to the role's offset and the role's own allowance is
-// reduced by that much for as long as the role stays open.
+// Revokes a reopened role's credit.
+//
+// Interviews already charged to the credit stay charged: the allocation works
+// out how many those were by replaying them, and reduces the reopened role's
+// own remaining by that much. Nothing is counted or stored here.
 async function revokeCreditForReopenedRole({ db, roleId, now } = {}) {
-  if (!db || !roleId) return { revoked: false, reason: 'invalid_request', drawn_count: 0 };
+  if (!db || !roleId) return { revoked: false, reason: 'no_credit' };
 
   const credit = await findLiveCreditForRole(db, roleId);
-  if (!credit) return { revoked: false, reason: 'no_credit', drawn_count: 0 };
+  if (!credit) return { revoked: false, reason: 'no_credit' };
 
-  const drawnCount = Math.max(0, Number(credit.quantity || 0) - Number(credit.remaining || 0));
   const revokedAt = nowIso(now);
-
-  const { data: revoked, error: revokeError } = await db
+  const { data: revoked, error } = await db
     .from('interview_credits')
     .update({ revoked_at: revokedAt, updated_at: revokedAt })
     .eq('id', credit.id)
     .is('revoked_at', null)
     .select('id')
     .maybeSingle();
-  if (revokeError) throw new Error(revokeError.message || 'Interview credit revoke failed');
-  if (!revoked) return { revoked: false, reason: 'already_revoked', drawn_count: 0 };
+  if (error) throw new Error(error.message || 'Interview credit revoke failed');
+  if (!revoked) return { revoked: false, reason: 'already_revoked' };
 
-  if (drawnCount > 0) {
-    // Offsets accumulate: a role can be closed and reopened more than once, and
-    // each cycle's spent credit stays spent.
-    const { data: role, error: roleError } = await db
-      .from('roles')
-      .select('rollover_drawn_offset')
-      .eq('id', roleId)
-      .maybeSingle();
-    if (roleError) throw new Error(roleError.message || 'Role offset lookup failed');
-
-    const currentOffset = parseWholeNonNegative(role?.rollover_drawn_offset) ?? 0;
-    const { error: offsetError } = await db
-      .from('roles')
-      .update({ rollover_drawn_offset: currentOffset + drawnCount })
-      .eq('id', roleId);
-    if (offsetError) throw new Error(offsetError.message || 'Role offset update failed');
-  }
-
-  return { revoked: true, credit_id: credit.id, drawn_count: drawnCount };
-}
-
-// Credits the client can spend right now, soonest to expire first.
-async function listAvailableCredits({ db, clientId, now } = {}) {
-  if (!db || !clientId) return [];
-
-  const { data, error } = await db
-    .from('interview_credits')
-    .select('id,client_id,source_role_id,quantity,remaining,minted_at,expires_at')
-    .eq('client_id', clientId)
-    .is('revoked_at', null)
-    .gt('remaining', 0)
-    .gt('expires_at', nowIso(now))
-    .order('expires_at', { ascending: true });
-  if (error) throw new Error(error.message || 'Interview credit list failed');
-  return data || [];
-}
-
-async function findDrawForInterview(db, interviewId) {
-  const { data, error } = await db
-    .from('interview_credit_draws')
-    .select('id,credit_id,interview_id')
-    .eq('interview_id', interviewId)
-    .maybeSingle();
-  if (error) throw new Error(error.message || 'Interview credit draw lookup failed');
-  return data || null;
-}
-
-// Takes one interview from the earliest-expiring credit the client still has.
-// The decrement is conditional on the value that was read, so a concurrent draw
-// loses rather than over-spending the credit.
-async function drawCredit({ db, clientId, roleId, interviewId, now } = {}) {
-  if (!db || !clientId || !roleId || !interviewId) {
-    return { drawn: false, reason: 'invalid_request' };
-  }
-
-  const existingDraw = await findDrawForInterview(db, interviewId);
-  if (existingDraw) {
-    return { drawn: false, reason: 'already_drawn', credit_id: existingDraw.credit_id };
-  }
-
-  let sawContention = false;
-  for (let pass = 0; pass < DRAW_PASSES; pass += 1) {
-    const credits = await listAvailableCredits({ db, clientId, now });
-    if (!credits.length) return { drawn: false, reason: 'no_credits' };
-
-    sawContention = false;
-    for (const credit of credits) {
-      const remaining = parseWholeNonNegative(credit.remaining);
-      if (remaining == null || remaining <= 0) continue;
-
-      const decrementedAt = nowIso(now);
-      const { data: decremented, error: decrementError } = await db
-        .from('interview_credits')
-        .update({ remaining: remaining - 1, updated_at: decrementedAt })
-        .eq('id', credit.id)
-        .eq('remaining', remaining)
-        .is('revoked_at', null)
-        .select('id')
-        .maybeSingle();
-      if (decrementError) throw new Error(decrementError.message || 'Interview credit draw failed');
-      if (!decremented) {
-        // Someone else moved this credit between the read and the write.
-        sawContention = true;
-        continue;
-      }
-
-      const { error: drawError } = await db
-        .from('interview_credit_draws')
-        .insert({
-          credit_id: credit.id,
-          client_id: clientId,
-          role_id: roleId,
-          interview_id: interviewId,
-          quantity: DRAW_QUANTITY,
-          drawn_at: decrementedAt
-        });
-
-      if (drawError) {
-        // The interview was drawn for concurrently. Give the unit straight back
-        // rather than leaving the client short.
-        await db
-          .from('interview_credits')
-          .update({ remaining, updated_at: decrementedAt })
-          .eq('id', credit.id)
-          .eq('remaining', remaining - 1);
-        if (isUniqueViolation(drawError)) {
-          return { drawn: false, reason: 'already_drawn', credit_id: credit.id };
-        }
-        throw new Error(drawError.message || 'Interview credit draw failed');
-      }
-
-      return { drawn: true, credit_id: credit.id, remaining: remaining - 1 };
-    }
-
-    if (!sawContention) break;
-  }
-
-  return { drawn: false, reason: sawContention ? 'contended' : 'no_credits' };
-}
-
-// Spends a credit for an interview the role's own allowance did not cover.
-//
-// Called once an interview has become "used", with the availability computed
-// after that write. A role spends its own allowance first; only the interviews
-// past it reach a credit. Because isUsedInterviewRow can flip from false to true
-// when a late transcript arrives, the draw is keyed on interview_id and cannot
-// run twice for the same interview.
-async function drawCreditForUsedInterview({ db, clientId, roleId, interviewId, availability, now } = {}) {
-  if (!db || !clientId || !roleId || !interviewId) return { drawn: false, reason: 'invalid_request' };
-  if (availability?.billing_model !== ROLLOVER_BILLING_MODEL) {
-    return { drawn: false, reason: 'billing_model' };
-  }
-
-  const included = parseWholeNonNegative(availability.included_interviews_per_role);
-  const purchased = parseWholeNonNegative(availability.purchased_interviews);
-  const used = parseWholeNonNegative(availability.used_interviews);
-  const offset = parseWholeNonNegative(availability.rollover_drawn_offset) ?? 0;
-  if (included == null || purchased == null || used == null) {
-    return { drawn: false, reason: 'availability_unavailable' };
-  }
-
-  // The role's own allowance, ignoring credits entirely. An interview inside it
-  // costs nothing extra.
-  if (used <= included + purchased - offset) return { drawn: false, reason: 'own_allowance' };
-
-  return drawCredit({ db, clientId, roleId, interviewId, now });
-}
-
-// Called by the two paths that write an interview into a used state, right after
-// availability is recomputed. A credit is an accounting side effect of the
-// interview, never a reason to fail handling it, so failures are logged and
-// swallowed. Returns the remaining count adjusted for a draw, so the caller's
-// limit notification is not one behind.
-async function syncInterviewCreditDraw({ db, clientId, roleId, interviewId, availability, now } = {}) {
-  const remaining = availability?.remaining_interviews;
-  try {
-    const result = await drawCreditForUsedInterview({ db, clientId, roleId, interviewId, availability, now });
-    if (!result.drawn) return { ...result, remaining_interviews: remaining };
-    const adjusted = Number.isFinite(Number(remaining)) ? Math.max(0, Number(remaining) - 1) : remaining;
-    return { ...result, remaining_interviews: adjusted };
-  } catch (e) {
-    console.error('interview_credit_draw_failed', {
-      client_id: clientId || null,
-      role_id: roleId || null,
-      interview_id: interviewId || null,
-      error: e?.message || String(e)
-    });
-    return { drawn: false, reason: 'error', remaining_interviews: remaining };
-  }
+  return { revoked: true, credit_id: credit.id };
 }
 
 // Called by both role-status routes after the status change has been written.
@@ -335,11 +163,7 @@ async function syncRoleCreditsForStatusChange({ db, clientId, roleId, status, cl
 
 module.exports = {
   ROLLOVER_BILLING_MODEL,
-  drawCredit,
-  drawCreditForUsedInterview,
-  listAvailableCredits,
   mintCreditForClosedRole,
   revokeCreditForReopenedRole,
-  syncInterviewCreditDraw,
   syncRoleCreditsForStatusChange
 };

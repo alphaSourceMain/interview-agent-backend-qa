@@ -132,7 +132,7 @@ test('no-substantive interviews do not consume role capacity', async () => {
     own_remaining_interviews: 7,
     credit_interviews: 0,
     pool_remaining_interviews: 0,
-    rollover_drawn_offset: 0,
+    credit_drawn_offset: 0,
     billing_model: 'fixed',
   });
 

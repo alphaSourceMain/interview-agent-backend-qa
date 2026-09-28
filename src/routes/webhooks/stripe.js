@@ -118,7 +118,15 @@ function normalizeBillingInterval(raw, fallback = null) {
   return null;
 }
 
+// A value that was never sent. Number(null) and Number('') are both 0, so
+// without this check an absent price or count reads as a deliberate zero — and
+// a client gets provisioned with a figure nobody chose.
+function isAbsent(raw) {
+  return raw == null || (typeof raw === 'string' && raw.trim() === '');
+}
+
 function parseMoneyValue(raw, options = {}) {
+  if (isAbsent(raw)) return null;
   const allowZero = options.allowZero !== false;
   const n = Number(raw);
   if (!Number.isFinite(n)) return null;
@@ -127,7 +135,12 @@ function parseMoneyValue(raw, options = {}) {
   return rounded;
 }
 
+// Returns null for a missing value as well as an unusable one. Zero is a real
+// answer — an Enterprise client may legitimately include no interviews per role
+// — so the caller must tell the two apart, which it cannot do if absence is
+// silently 0.
 function parseWholeNumber(raw, options = {}) {
+  if (isAbsent(raw)) return null;
   const allowZero = options.allowZero !== false;
   const n = Number(raw);
   if (!Number.isFinite(n) || !Number.isInteger(n)) return null;
@@ -242,7 +255,14 @@ async function upsertClientPlanSettingsFromSubscription(subscription, clientId, 
       if (includedInterviewsPerRole === null) missingFields.push('included_interviews_per_role');
       if (additionalInterviewFee === null) missingFields.push('additional_interview_fee');
 
-      const err = new Error(`Enterprise plan settings metadata missing: ${missingFields.join(', ') || 'unknown'}`);
+      // Permanent: the metadata is fixed on the subscription, so every redelivery
+      // would fail the same way. Acknowledged with the reason recorded, rather
+      // than retried until Stripe gives up.
+      const err = permanentFailure(
+        `Enterprise plan settings metadata missing or unusable: ${missingFields.join(', ') || 'unknown'}. `
+        + 'Each must be present; zero is allowed for included_interviews_per_role, per_role_fee '
+        + 'and additional_interview_fee, but absent is not.'
+      );
       err.code = 'enterprise_plan_settings_metadata_missing';
       err.missing_fields = missingFields;
       err.client_id = clientId;

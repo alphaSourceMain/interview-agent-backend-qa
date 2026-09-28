@@ -46,9 +46,9 @@ test('the env var and cron path in the document are the ones the route uses', ()
 
 test('every billing migration on disk is listed, and every listed one exists', () => {
   const migrations = fs.readdirSync(path.join(ROOT, 'supabase', 'migrations'))
-    .filter((name) => /^2026092[0-9]\d{6}_(billing_models|interview_credits|usage_billing_ledger|billing_idempotency_keys|role_interview_purchase_failed_status|enterprise_pool_discounts|client_interview_pools|interviews_completed_at)\.sql$/.test(name));
+    .filter((name) => /^2026092[0-9]\d{6}_(billing_models|interview_credits|usage_billing_ledger|billing_idempotency_keys|role_interview_purchase_failed_status|enterprise_pool_discounts|client_interview_pools|interviews_completed_at|client_plan_settings_money_units)\.sql$/.test(name));
 
-  assert.equal(migrations.length, 8, 'expected the eight billing migrations');
+  assert.equal(migrations.length, 9, 'expected the nine billing migrations');
   for (const name of migrations) {
     assert.match(doc, new RegExp(name.replace(/\./g, '\\.')), `${name} must be listed in the document`);
   }

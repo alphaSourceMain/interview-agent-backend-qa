@@ -310,6 +310,7 @@ timestamps, so alphabetical order is run order.
 | `20260925120000_enterprise_pool_discounts.sql` | Creates `enterprise_pool_discounts` and seeds the volume bands for pool pricing |
 | `20260925130000_client_interview_pools.sql` | Creates `client_interview_pools` — what was bought and whether it was paid for |
 | `20260926120000_interviews_completed_at.sql` | Adds `completed_at` to `interviews`, indexes `(client_id, completed_at)`, and backfills existing rows |
+| `20260927120000_client_plan_settings_money_units.sql` | Comments only: records which `client_plan_settings` money columns are dollars and which are cents, and that a zero included count is a setting. Changes no column and no value |
 
 ### Which of these touch tables this repository does not define
 
@@ -322,6 +323,7 @@ that touches one is changing a table whose access model is **not** visible here.
 | --- | --- | --- |
 | `20260921120000_billing_models.sql` | `client_plan_settings` | Adds three columns and backfills them. No change to who can read the table. |
 | `20260926120000_interviews_completed_at.sql` | `interviews` | Adds one column and one index, and backfills it. |
+| `20260927120000_client_plan_settings_money_units.sql` | `client_plan_settings` | Comments only. No column, value or access changes. |
 
 **`20260926120000_interviews_completed_at.sql` deliberately contains no RLS,
 `grant` or `revoke` statement**, and a test asserts it never gains one.

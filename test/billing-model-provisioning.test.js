@@ -10,6 +10,7 @@
 const assert = require('node:assert/strict');
 const express = require('express');
 const path = require('node:path');
+const fs = require('node:fs');
 const { test } = require('node:test');
 const request = require('supertest');
 
@@ -28,8 +29,10 @@ function injectModule(filename, exports) {
 function makeDb() {
   const client = { id: 'client_1', parent_client_id: null, stripe_subscription_id: null };
   const upserts = [];
+  const processed = [];
   return {
     upserts,
+    processed,
     from(table) {
       const filters = {};
       const query = {
@@ -42,7 +45,10 @@ function makeDb() {
         not() { return query; },
         order() { return query; },
         limit() { return query; },
-        update() { return query; },
+        update(row) {
+          if (table === 'billing_events') processed.push(row);
+          return query;
+        },
         insert() { return Promise.resolve({ error: null }); },
         delete() { return query; },
         upsert(row) {
@@ -186,4 +192,104 @@ test('the existing plan settings fields are unchanged by the new column', async 
     max_interview_minutes: 12,
     billing_model: 'rollover'
   });
+});
+
+// --- a required figure that was never sent ---------------------------------
+//
+// Number(null) and Number('') are both 0, so an absent count or price used to
+// reach client_plan_settings as a deliberate zero. Zero is a real Enterprise
+// setting — no included interviews, billed from the pool and the meter — so
+// absence and zero must not arrive looking the same.
+
+// The webhook records why it gave up on the dedupe row, which is where an
+// operator looks after a client is not provisioned.
+const missingMetadataDetail = (db) =>
+  db.processed.map((row) => String(row?.error || '')).join(' ');
+
+test('a missing included count is refused, not read as zero', async () => {
+  const metadata = {
+    source: 'admin_subscription_checkout', client_id: 'client_1',
+    plan_tier: 'enterprise', billing_interval: 'monthly', ...ENTERPRISE_FEES
+  };
+  delete metadata.included_interviews_per_role;
+  const { app, db } = loadApp(subscriptionEvent(metadata));
+
+  const res = await post(app);
+
+  assert.equal(res.status, 200, 'a permanent failure is acknowledged, not retried');
+  assert.deepEqual(db.upserts, [], 'nothing is provisioned from a figure nobody chose');
+  assert.match(missingMetadataDetail(db), /included_interviews_per_role/,
+    'the reason names the field that was missing');
+});
+
+test('an empty included count is refused the same way', async () => {
+  const { app, db } = loadApp(subscriptionEvent({
+    source: 'admin_subscription_checkout', client_id: 'client_1',
+    plan_tier: 'enterprise', billing_interval: 'monthly',
+    ...ENTERPRISE_FEES, included_interviews_per_role: '   '
+  }));
+
+  assert.equal((await post(app)).status, 200);
+  assert.deepEqual(db.upserts, []);
+  assert.match(missingMetadataDetail(db), /included_interviews_per_role/);
+});
+
+test('an included count of zero is a setting and provisions normally', async () => {
+  const { app, db } = loadApp(subscriptionEvent({
+    source: 'admin_subscription_checkout', client_id: 'client_1',
+    plan_tier: 'enterprise', billing_interval: 'monthly',
+    ...ENTERPRISE_FEES, included_interviews_per_role: '0'
+  }));
+
+  assert.equal((await post(app)).status, 200);
+  assert.equal(db.upserts.length, 1);
+  assert.equal(db.upserts[0].included_interviews_per_role, 0,
+    'nought included means billed from the pool and the meter from the first interview');
+});
+
+test('an included count of a number provisions that number', async () => {
+  const { app, db } = loadApp(subscriptionEvent({
+    source: 'admin_subscription_checkout', client_id: 'client_1',
+    plan_tier: 'enterprise', billing_interval: 'monthly',
+    ...ENTERPRISE_FEES, included_interviews_per_role: '25'
+  }));
+
+  assert.equal((await post(app)).status, 200);
+  assert.equal(db.upserts[0].included_interviews_per_role, 25);
+});
+
+test('a missing fee is refused too, and every missing field is named', async () => {
+  const metadata = {
+    source: 'admin_subscription_checkout', client_id: 'client_1',
+    plan_tier: 'enterprise', billing_interval: 'monthly', ...ENTERPRISE_FEES
+  };
+  delete metadata.per_role_fee;
+  delete metadata.additional_interview_fee;
+  const { app, db } = loadApp(subscriptionEvent(metadata));
+
+  assert.equal((await post(app)).status, 200);
+  assert.deepEqual(db.upserts, []);
+  const detail = missingMetadataDetail(db);
+  assert.match(detail, /per_role_fee/);
+  assert.match(detail, /additional_interview_fee/);
+});
+
+test('a fee of zero is kept, because an Enterprise fee may be nothing', async () => {
+  const { app, db } = loadApp(subscriptionEvent({
+    source: 'admin_subscription_checkout', client_id: 'client_1',
+    plan_tier: 'enterprise', billing_interval: 'monthly',
+    ...ENTERPRISE_FEES, per_role_fee: '0', additional_interview_fee: '0'
+  }));
+
+  assert.equal((await post(app)).status, 200);
+  assert.equal(db.upserts[0].per_role_fee, 0);
+  assert.equal(db.upserts[0].additional_interview_fee, 0);
+});
+
+test('the refusal is permanent, so Stripe is not asked to retry it forever', () => {
+  const source = fs.readFileSync(path.join(ROOT, 'src', 'routes', 'webhooks', 'stripe.js'), 'utf8');
+  const at = source.indexOf("err.code = 'enterprise_plan_settings_metadata_missing'");
+  assert.notEqual(at, -1);
+  assert.match(source.slice(Math.max(0, at - 600), at), /permanentFailure\(/,
+    'the metadata on a subscription does not change between redeliveries');
 });

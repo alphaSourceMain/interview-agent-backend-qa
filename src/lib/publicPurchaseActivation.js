@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const { supabaseAdmin } = require('./supabaseClient');
 const { requireParentClient } = require('./clientBillingScope');
 const {
@@ -44,6 +45,14 @@ function cleanText(value) {
 
 function lowerEmail(value) {
   return cleanText(value).toLowerCase();
+}
+
+function stablePurchaseClientId(intentId) {
+  const bytes = crypto.createHash('sha256').update(`alphascreen:public-purchase-client:${cleanText(intentId)}`).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function getTemplateSnapshot(agreement) {
@@ -238,6 +247,7 @@ async function sendWelcomeEmailOnce({
   buyerEmail,
   buyerName,
   sendWelcomeEmail,
+  assertFence = async () => {},
   logger,
   nowIso
 }) {
@@ -262,6 +272,7 @@ async function sendWelcomeEmailOnce({
   }
 
   try {
+    await assertFence();
     const firstName = cleanText(intent?.buyer_first_name) || cleanText(buyerName).split(/\s+/).filter(Boolean)[0] || '';
     logger.info?.('[public-purchase-activation] welcome_email_attempting', {
       email: redactEmail(buyerEmail),
@@ -304,6 +315,7 @@ async function sendWelcomeEmailOnce({
     }
     return status;
   } catch (error) {
+    if (error?.code === 'activation_fence_lost') throw error;
     try {
       await updateWelcomeEmailLedger({
         db,
@@ -648,7 +660,8 @@ async function ensureBuyerAccountSetup({
   requestId,
   logger,
   ensureRecovery,
-  sendRecoveryEmail
+  sendRecoveryEmail,
+  assertFence = async () => {}
 }) {
   const buyerEmail = lowerEmail(intent?.buyer_email || agreement?.admin_email);
   if (!buyerEmail) {
@@ -669,6 +682,7 @@ async function ensureBuyerAccountSetup({
   let userId = cleanText(existingAuthUser?.id);
 
   if (!userId) {
+    await assertFence();
     const ensured = await ensureRecovery({
       email: buyerEmail,
       redirectTo,
@@ -680,6 +694,7 @@ async function ensureBuyerAccountSetup({
 
     const actionLink = cleanText(ensured?.actionLink);
     if (actionLink) {
+      await assertFence();
       try {
         const emailResult = await sendRecoveryEmail(buyerEmail, actionLink, buyerName);
         setupEmailStatus = emailResult?.statusCode === 202
@@ -711,6 +726,7 @@ async function ensureBuyerAccountSetup({
     throw err;
   }
 
+  await assertFence();
   const membership = await upsertBuyerMembership({
     db,
     clientId,
@@ -776,14 +792,55 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     fallbackBillingInterval: options.fallbackBillingInterval
   });
 
-  const clientId = await ensureLinkedClient({
-    db,
-    agreement,
-    intent,
-    planKey,
-    billingInterval,
-    fallbackClientId: options.fallbackClientId
-  });
+  const assertFence = options.assertActivationFence || (async () => {});
+  const claimKey = cleanText(options.activationClaimKey);
+  let clientId;
+  if (intent?.id && claimKey) {
+    await assertFence();
+    const linkedClientId = cleanText(agreement.client_id || intent.client_id || options.fallbackClientId);
+    const proposedClientId = linkedClientId || stablePurchaseClientId(intent.id);
+    const paidDate = new Date(paidAt);
+    if (!Number.isFinite(paidDate.getTime())) throw new Error('Invalid public purchase payment timestamp');
+    const renewalDate = new Date(Date.UTC(
+      paidDate.getUTCFullYear() + 1,
+      paidDate.getUTCMonth(),
+      paidDate.getUTCDate()
+    )).toISOString().slice(0, 10);
+    const { data: prepared, error: prepareError } = await db.rpc('complete_public_purchase_activation', {
+      p_agreement_id: agreementId,
+      p_claim_key: claimKey,
+      p_paid_at: paidAt,
+      p_checkout_session_id: checkoutSessionId || null,
+      p_client_id: proposedClientId,
+      p_create_client: !linkedClientId,
+      p_plan_key: planKey,
+      p_billing_interval: billingInterval,
+      p_term_start: paidDate.toISOString().slice(0, 10),
+      p_renewal_date: renewalDate
+    });
+    if (prepareError) throw new Error(prepareError.message || 'Public purchase completion failed');
+    if (prepared?.status !== 'completed' || !prepared.client_id) {
+      const err = new Error(`Public purchase completion refused: ${prepared?.status || 'unknown'}`);
+      err.code = prepared?.status || 'public_purchase_completion_refused';
+      throw err;
+    }
+    clientId = cleanText(prepared.client_id);
+    agreement.client_id = clientId;
+    intent.client_id = clientId;
+    intent.status = 'completed';
+    intent.activated_at = cleanText(prepared.paid_at) || paidAt;
+    agreement.checkout_status = 'paid';
+    agreement.checkout_paid_at = cleanText(prepared.paid_at) || paidAt;
+  } else {
+    clientId = await ensureLinkedClient({
+      db,
+      agreement,
+      intent,
+      planKey,
+      billingInterval,
+      fallbackClientId: options.fallbackClientId
+    });
+  }
   const { data: existingClientState, error: existingClientStateErr } = await db
     .from('clients')
     .select('id,billing_status,subscription_status')
@@ -826,13 +883,15 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     }
   }
   if (checkoutSessionId && !agreement.checkout_session_id) agreementPaidPayload.checkout_session_id = checkoutSessionId;
-  const { error: agreementUpdateErr } = await db
-    .from('membership_agreements')
-    .update(agreementPaidPayload)
-    .eq('id', agreementId);
-  if (agreementUpdateErr) throw new Error(agreementUpdateErr.message || 'Agreement checkout status update failed');
+  if (!claimKey) {
+    const { error: agreementUpdateErr } = await db
+      .from('membership_agreements')
+      .update(agreementPaidPayload)
+      .eq('id', agreementId);
+    if (agreementUpdateErr) throw new Error(agreementUpdateErr.message || 'Agreement checkout status update failed');
+  }
 
-  if (intent?.id) {
+  if (intent?.id && !claimKey) {
     const intentPayload = {
       status: 'completed',
       client_id: clientId,
@@ -875,6 +934,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     fallbackCustomerId: options.fallbackCustomerId,
     fallbackSubscriptionId: options.fallbackSubscriptionId
   });
+  await assertFence();
   const { error: clientUpdateErr } = await db
     .from('clients')
     .update(clientActivationPayload)
@@ -886,11 +946,13 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     planKey,
     billingInterval
   });
+  await assertFence();
   const { error: settingsErr } = await db
     .from('client_plan_settings')
     .upsert(planSettingsPayload, { onConflict: 'client_id' });
   if (settingsErr) throw new Error(settingsErr.message || 'Client plan settings upsert failed');
 
+  await assertFence();
   const firstRoleCreditStatus = await createFirstRolePrepayCredit({
     db,
     agreement,
@@ -904,6 +966,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     logger
   });
 
+  await assertFence();
   const setup = await ensureBuyerAccountSetup({
     db,
     authAdmin,
@@ -913,7 +976,8 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     requestId: options.requestId || null,
     logger,
     ensureRecovery,
-    sendRecoveryEmail
+    sendRecoveryEmail,
+    assertFence
   });
   let welcomeEmailStatus = 'not_sent';
   const buyerEmail = lowerEmail(intent?.buyer_email || agreement?.admin_email);
@@ -931,6 +995,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
   });
   const shouldSendWelcome = publicPurchaseWelcomeEligible;
   if (shouldSendWelcome) {
+    await assertFence();
     try {
       welcomeEmailStatus = await sendWelcomeEmailOnce({
         db,
@@ -940,10 +1005,12 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
         buyerEmail,
         buyerName,
         sendWelcomeEmail,
+        assertFence,
         logger,
         nowIso: activationPaidAt
       });
     } catch (error) {
+      if (error?.code === 'activation_fence_lost') throw error;
       welcomeEmailStatus = 'ledger_unavailable';
       logger.error?.('[public-purchase-activation] welcome_email_ledger_failed', {
         email: redactEmail(buyerEmail),
@@ -957,6 +1024,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
 
   let salesWonDeliveryStatus = 'not_applicable';
   if (cleanText(intent?.channel).toLowerCase() === 'sales_assisted' && intent?.id) {
+    await assertFence();
     try {
       const delivery = await enqueueSalesWonDelivery(intent.id, { db });
       salesWonDeliveryStatus = delivery.status;

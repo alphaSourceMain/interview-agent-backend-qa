@@ -1,5 +1,6 @@
 // routes/webhookStripe.js
 const express = require('express');
+const crypto = require('node:crypto');
 const Stripe = require('stripe');
 const { supabaseAdmin } = require('../src/lib/supabaseClient');
 const { requireParentClient } = require('../src/lib/clientBillingScope');
@@ -297,6 +298,35 @@ async function markAgreementCheckoutPaid(agreementId, options = {}) {
     db
   );
   if (!claim.proceed) return claim.result;
+  let heartbeatTimer = null;
+  let fenceLost = false;
+  let heartbeatPending = Promise.resolve();
+  const fenceError = (message) => {
+    const error = new Error(message || 'Purchase activation fence was lost');
+    error.code = 'activation_fence_lost';
+    return error;
+  };
+  const heartbeat = async () => {
+    if (!claim.claimed || fenceLost) return;
+    const { data, error } = await db.rpc('heartbeat_public_purchase_activation', {
+      p_intent_id: claim.intentId,
+      p_claim_key: claim.key
+    });
+    if (error || data !== true) {
+      fenceLost = true;
+      throw fenceError(error?.message);
+    }
+  };
+  const assertFence = async () => {
+    if (fenceLost) throw fenceError();
+    await heartbeat();
+  };
+  if (claim.claimed) {
+    heartbeatTimer = setInterval(() => {
+      heartbeatPending = heartbeatPending.then(heartbeat).catch(() => { fenceLost = true; });
+    }, 30000);
+    heartbeatTimer.unref?.();
+  }
   try {
     const activate = options.activate || activatePublicPurchaseAgreementCheckout;
     const result = await activate({
@@ -310,17 +340,18 @@ async function markAgreementCheckoutPaid(agreementId, options = {}) {
       fallbackPlanTier: options.fallbackPlanTier || null,
       fallbackBillingInterval: options.fallbackBillingInterval || null,
       requestId: options.requestId || null,
+      activationClaimKey: claim.claimed ? claim.key : null,
+      activationIntentId: claim.claimed ? claim.intentId : null,
+      assertActivationFence: assertFence,
       db
     });
-    if (claim.claimed && result?.ok !== true) {
-      await releaseAgreementPurchaseActivationClaim(claim.intentId, claim.key, db);
-    }
     return result;
   } catch (error) {
-    if (claim.claimed) {
-      await releaseAgreementPurchaseActivationClaim(claim.intentId, claim.key, db);
-    }
     throw error;
+  } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    await heartbeatPending;
+    if (claim.claimed) await releaseAgreementPurchaseActivationClaim(claim.intentId, claim.key, db);
   }
 }
 
@@ -331,79 +362,59 @@ function isInitialAgreementCheckoutInvoice(eventType, metadataSource, agreementI
     String(billingReason || '').trim().toLowerCase() === 'subscription_create';
 }
 
+async function isRetryableAgreementActivationEvent(event) {
+  const object = event?.data?.object || {};
+  if (event?.type === 'checkout.session.completed') {
+    const metadata = object.metadata || {};
+    return ['paid', 'no_payment_required'].includes(String(object.payment_status || '').toLowerCase()) &&
+      String(metadata.source || '').toLowerCase() === 'agreement_checkout' &&
+      Boolean(String(metadata.agreement_id || '').trim());
+  }
+  if (event?.type !== 'invoice.payment_succeeded' || object.billing_reason !== 'subscription_create') return false;
+  let metadata = object.metadata || {};
+  if ((!metadata.source || !metadata.agreement_id) && pickId(object.subscription)) {
+    const subscription = await stripe.subscriptions.retrieve(pickId(object.subscription));
+    metadata = { ...(subscription?.metadata || {}), ...metadata };
+  }
+  return isInitialAgreementCheckoutInvoice(
+    event.type,
+    String(metadata.source || '').toLowerCase(),
+    String(metadata.agreement_id || '').trim(),
+    object.billing_reason
+  );
+}
+
+function requireAgreementActivationResult(result) {
+  if (result?.ok === true) return;
+  if (['purchase_canceled', 'agreement_superseded'].includes(result?.status)) return;
+  const error = new Error(`Agreement checkout activation incomplete: ${result?.status || 'unknown'}`);
+  error.code = result?.status || 'agreement_activation_incomplete';
+  throw error;
+}
+
 async function claimAgreementPurchaseActivation(agreementId, checkoutSessionId, db = supabaseAdmin) {
   const normalizedAgreementId = String(agreementId || '').trim();
   if (!normalizedAgreementId) return { proceed: false, result: { ok: false, status: 'agreement_missing' } };
-  const { data: intent, error: lookupError } = await db
-    .from('public_purchase_intents')
-    .select('id,status,activated_at,canceled_at,activation_claimed_at,activation_claim_key')
-    .eq('agreement_id', normalizedAgreementId)
-    .maybeSingle();
-  if (lookupError) throw new Error(lookupError.message || 'Public purchase intent lookup failed');
-  if (!intent) return { proceed: true, claimed: false };
-
-  const status = String(intent.status || '').trim().toLowerCase();
-  if (status === 'canceled' || intent.canceled_at) {
-    return {
-      proceed: false,
-      result: { ok: false, status: 'purchase_canceled', purchase_intent_id: intent.id }
-    };
-  }
-  if (status === 'completed' && intent.activated_at) return { proceed: true, claimed: false };
-
-  const key = String(checkoutSessionId || '').trim() || `agreement:${normalizedAgreementId}`;
-  const claimedAt = new Date().toISOString();
-  const { data: claimedIntent, error: claimError } = await db
-    .from('public_purchase_intents')
-    .update({ activation_claimed_at: claimedAt, activation_claim_key: key, updated_at: claimedAt })
-    .eq('id', intent.id)
-    .eq('agreement_id', normalizedAgreementId)
-    .neq('status', 'canceled')
-    .is('canceled_at', null)
-    .is('activation_claimed_at', null)
-    .select('id')
-    .maybeSingle();
-  if (claimError) throw new Error(claimError.message || 'Purchase activation claim failed');
-  if (claimedIntent) {
-    return { proceed: true, claimed: true, intentId: intent.id, key };
-  }
-
-  const { data: latest, error: latestError } = await db
-    .from('public_purchase_intents')
-    .select('id,agreement_id,status,activated_at,canceled_at,activation_claimed_at,activation_claim_key')
-    .eq('id', intent.id)
-    .maybeSingle();
-  if (latestError) throw new Error(latestError.message || 'Purchase activation state lookup failed');
-  const latestStatus = String(latest?.status || '').trim().toLowerCase();
-  if (latestStatus === 'completed' && latest?.activated_at) return { proceed: true, claimed: false };
-  if (latestStatus === 'canceled' || latest?.canceled_at) {
-    return {
-      proceed: false,
-      result: { ok: false, status: 'purchase_canceled', purchase_intent_id: intent.id }
-    };
-  }
-  if (latest?.agreement_id && String(latest.agreement_id).trim() !== normalizedAgreementId) {
-    return {
-      proceed: false,
-      result: { ok: false, status: 'agreement_superseded', purchase_intent_id: intent.id }
-    };
-  }
-  return {
-    proceed: false,
-    result: { ok: false, status: 'activation_in_progress', purchase_intent_id: intent.id }
-  };
+  const key = `${String(checkoutSessionId || '').trim() || `agreement:${normalizedAgreementId}`}:${crypto.randomUUID()}`;
+  const { data, error } = await db.rpc('claim_public_purchase_activation', {
+    p_agreement_id: normalizedAgreementId,
+    p_claim_key: key
+  });
+  if (error) throw new Error(error.message || 'Purchase activation claim failed');
+  if (data?.status === 'claimed') return { proceed: true, claimed: true, intentId: data.intent_id, key };
+  return { proceed: false, result: {
+    ok: false,
+    status: data?.status || 'activation_claim_failed',
+    purchase_intent_id: data?.intent_id || null
+  } };
 }
 
 async function releaseAgreementPurchaseActivationClaim(intentId, claimKey, db = supabaseAdmin) {
   if (!intentId || !claimKey) return;
-  const { error } = await db
-    .from('public_purchase_intents')
-    .update({ activation_claimed_at: null, activation_claim_key: null, updated_at: new Date().toISOString() })
-    .eq('id', intentId)
-    .eq('activation_claim_key', claimKey)
-    .neq('status', 'completed')
-    .select('id')
-    .maybeSingle();
+  const { error } = await db.rpc('release_public_purchase_activation', {
+    p_intent_id: intentId,
+    p_claim_key: claimKey
+  });
   if (error) console.error('stripe_webhook_activation_claim_release_failed', {
     purchase_intent_id: intentId,
     error: error.message || String(error)
@@ -443,6 +454,12 @@ router.post('/', async (req, res) => {
   }
 
   const eventObject = event?.data?.object || null;
+  let retryableAgreementEvent = false;
+  try {
+    retryableAgreementEvent = await isRetryableAgreementActivationEvent(event);
+  } catch (error) {
+    return res.status(503).json({ error: 'server_error', code: 'AGREEMENT_EVENT_CLASSIFICATION_FAILED', request_id });
+  }
   const { error: insertErr } = await supabaseAdmin
     .from('billing_events')
     .insert({
@@ -453,25 +470,40 @@ router.post('/', async (req, res) => {
 
   if (insertErr) {
     if (isUniqueViolation(insertErr)) {
-      return res.status(200).json({ ok: true });
+      if (!retryableAgreementEvent) return res.status(200).json({ ok: true });
+      const { data: priorEvent, error: priorEventError } = await supabaseAdmin
+        .from('billing_events')
+        .select('processed_ok')
+        .eq('stripe_event_id', event.id)
+        .maybeSingle();
+      if (priorEventError || !priorEvent) {
+        return res.status(503).json({ error: 'server_error', code: 'BILLING_EVENT_REENTRY_LOOKUP_FAILED', request_id });
+      }
+      if (priorEvent.processed_ok === true) return res.status(200).json({ ok: true });
+      // An incomplete verified paid agreement event may re-enter. The fenced
+      // claim below serializes it with another retry or the initial invoice.
+    } else {
+      return res.status(500).json({
+        error: 'server_error',
+        code: 'BILLING_EVENT_INSERT_FAILED',
+        detail: insertErr.message,
+        hint: insertErr.hint || null,
+        request_id
+      });
     }
-    return res.status(500).json({
-      error: 'server_error',
-      code: 'BILLING_EVENT_INSERT_FAILED',
-      detail: insertErr.message,
-      hint: insertErr.hint || null,
-      request_id
-    });
   }
 
   const markProcessed = async (processed_ok, errorText = null) => {
-    await supabaseAdmin
+    let query = supabaseAdmin
       .from('billing_events')
       .update({
         processed_ok,
         error: errorText
       })
       .eq('stripe_event_id', event.id);
+    if (!processed_ok) query = query.neq('processed_ok', true);
+    const { error } = await query;
+    if (error) throw new Error(error.message || 'Billing event status update failed');
   };
 
   try {
@@ -781,7 +813,7 @@ router.post('/', async (req, res) => {
         }
 
         if (isPaidAgreementCheckout) {
-          await markAgreementCheckoutPaid(metadataAgreementId, {
+          const activation = await markAgreementCheckoutPaid(metadataAgreementId, {
             checkoutSessionId: pickId(eventObject?.id) || null,
             paidAt: toIsoFromUnixSeconds(event?.created) || new Date().toISOString(),
             subscription: checkoutSubscription || (subscriptionId ? await stripe.subscriptions.retrieve(subscriptionId) : null),
@@ -792,6 +824,7 @@ router.post('/', async (req, res) => {
             fallbackBillingInterval: metadataBillingInterval,
             requestId: request_id
           });
+          requireAgreementActivationResult(activation);
         }
       }
     } else if (event.type === 'invoice.payment_succeeded' || event.type === 'invoice.payment_failed') {
@@ -876,7 +909,7 @@ router.post('/', async (req, res) => {
       }
 
       if (isAgreementCheckoutInvoice) {
-        await markAgreementCheckoutPaid(metadataAgreementId, {
+        const activation = await markAgreementCheckoutPaid(metadataAgreementId, {
           paidAt: toIsoFromUnixSeconds(event?.created) || new Date().toISOString(),
           subscription: invoiceSubscription || null,
           fallbackCustomerId: customerId,
@@ -886,6 +919,7 @@ router.post('/', async (req, res) => {
           fallbackBillingInterval: metadataBillingInterval,
           requestId: request_id
         });
+        requireAgreementActivationResult(activation);
       }
 
       if (customerId && !isManagedSubscriptionInvoice && !isAgreementCheckoutInvoice) {
@@ -922,7 +956,14 @@ router.post('/', async (req, res) => {
     await markProcessed(true, null);
     return res.status(200).json({ ok: true });
   } catch (err) {
-    await markProcessed(false, String(err?.message || err || 'processing_failed'));
+    try {
+      await markProcessed(false, String(err?.message || err || 'processing_failed'));
+    } catch (markError) {
+      console.error('stripe_webhook_event_status_failed', { event_id: event.id, error: markError.message });
+    }
+    if (retryableAgreementEvent) {
+      return res.status(503).json({ error: 'server_error', code: 'AGREEMENT_ACTIVATION_RETRY_REQUIRED', request_id });
+    }
     return res.status(200).json({ ok: true });
   }
 });

@@ -1078,30 +1078,16 @@ function createSalesRouter(options = {}) {
           if (code !== 'resource_missing') throw error
         }
       }
-      const now = nowIso()
-      const { data: updated, error } = await db
-        .from('public_purchase_intents')
-        .update({ status: 'canceled', canceled_at: now, updated_at: now })
-        .eq('id', intent.id)
-        .eq('created_by_user_id', req.salesRep.user_id)
-        .neq('status', 'completed')
-        .is('activated_at', null)
-        .is('activation_claimed_at', null)
-        .select(INTENT_COLUMNS)
-        .maybeSingle()
+      const { data: cancellation, error } = await db.rpc('cancel_sales_assisted_purchase', {
+        p_intent_id: intent.id,
+        p_agreement_id: agreement?.id || null,
+        p_user_id: req.salesRep.user_id
+      })
       if (error) throw makeSalesError(503, 'deal_cancel_failed', 'The unpaid transaction could not be canceled.')
-      if (!updated) throw makeSalesError(409, 'agreement_already_paid', 'Payment completed while cancellation was being processed. An administrator must review this deal.')
-      if (agreement?.id) {
-        const { data: voidedAgreement, error: voidError } = await db
-          .from('membership_agreements')
-          .update({ status: 'voided', is_current: false, updated_at: now })
-          .eq('id', agreement.id)
-          .neq('checkout_status', 'paid')
-          .select('id')
-          .maybeSingle()
-        if (voidError) throw makeSalesError(503, 'agreement_void_failed', 'The transaction was canceled, but the agreement could not be voided.')
-        if (!voidedAgreement) throw makeSalesError(409, 'agreement_already_paid', 'Payment completed while cancellation was being processed. An administrator must review this deal.')
+      if (cancellation?.status !== 'canceled' || !cancellation.intent) {
+        throw makeSalesError(409, 'agreement_already_paid', 'Payment completed while cancellation was being processed. An administrator must review this deal.')
       }
+      const updated = cancellation.intent
       await event(intent.id, req.salesRep.user_id, 'deal_canceled')
       const body = { deal: safeDeal(updated, { ...(agreement || {}), status: 'voided' }), message: 'The unpaid transaction was canceled.' }
       await finishIdempotency(req.salesRep.user_id, routeKey, key, 200, body)

@@ -705,6 +705,46 @@ test('duplicate public purchase webhook activation does not resend welcome email
   assert.equal(db.emailDeliveryEvents.filter((row) => row.email_category === 'public_purchase_welcome').length, 1)
 })
 
+test('duplicate new-buyer activation generates and sends the initial setup link only once', async () => {
+  const db = makeDb('basic', 'monthly')
+  const users = []
+  const authAdmin = makeAuthAdmin(users)
+  let recoveryCalls = 0
+  let setupEmailCalls = 0
+  const options = {
+    db,
+    authAdmin,
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('monthly'),
+    requireParentClient: async () => ({ ok: true }),
+    ensureRecovery: async () => {
+      recoveryCalls += 1
+      users.push({ id: 'user-new-buyer', email: BUYER_EMAIL })
+      return {
+        userId: 'user-new-buyer',
+        method: 'createUser',
+        actionLink: 'https://setup.example/recovery-token'
+      }
+    },
+    sendRecoveryEmail: async () => {
+      setupEmailCalls += 1
+      return { statusCode: 202 }
+    },
+    sendWelcomeEmail: async () => ({ statusCode: 202 }),
+    logger: { error() {}, warn() {}, info() {} }
+  }
+
+  const first = await activatePublicPurchaseAgreementCheckout(options)
+  const second = await activatePublicPurchaseAgreementCheckout(options)
+  assert.equal(first.setup_email_status, 'sent')
+  assert.equal(second.setup_email_status, 'not_sent_existing_user')
+  assert.equal(recoveryCalls, 1)
+  assert.equal(setupEmailCalls, 1)
+  assert.equal(authAdmin.calls.filter((call) => call?.type === 'recovery').length, 0)
+})
+
 test('hosted-like public purchase activation sends welcome when webhook pre-activated client', async () => {
   const db = makeDb('basic', 'monthly')
   db.clients[0].billing_status = 'active'
@@ -838,7 +878,7 @@ test('public purchase activation does not log setup action links', async () => {
   assert.doesNotMatch(JSON.stringify(logEntries), /recovery-token|setup\.example/)
 })
 
-test('checkout return state provides direct setup URL even when setup email failed', async () => {
+test('checkout return state never exposes or generates a recovery link when setup email failed', async () => {
   const db = makeDb('basic', 'monthly')
   const logEntries = []
 
@@ -870,12 +910,13 @@ test('checkout return state provides direct setup URL even when setup email fail
   assert.doesNotMatch(JSON.stringify(activation), /recovery-token|setup\.example/)
   assert.doesNotMatch(JSON.stringify(logEntries), /recovery-token|setup\.example/)
 
-  const status = await resolvePublicCheckoutReturnState({
+  const authAdmin = makeAuthAdmin(
+    [{ id: 'user-new-buyer', email: BUYER_EMAIL }],
+    { actionLink: 'https://qa.alphasourceai.com/pwreset?token_hash=direct-after-email-failure&type=recovery' }
+  )
+  const statuses = await Promise.all([1, 2, 3].map(() => resolvePublicCheckoutReturnState({
     db,
-    authAdmin: makeAuthAdmin(
-      [{ id: 'user-new-buyer', email: BUYER_EMAIL }],
-      { actionLink: 'https://qa.alphasourceai.com/pwreset?token_hash=direct-after-email-failure&type=recovery' }
-    ),
+    authAdmin,
     sessionId: 'cs_test_public',
     fallbackClientId: CLIENT_ID,
     agreementId: AGREEMENT_ID,
@@ -883,11 +924,15 @@ test('checkout return state provides direct setup URL even when setup email fail
       warn(...args) { logEntries.push(args) },
       error(...args) { logEntries.push(args) }
     }
-  })
+  })))
 
-  assert.equal(status.status, 'password_required')
-  assert.equal(status.password_setup_required, true)
-  assert.match(status.set_password_url, /direct-after-email-failure/)
+  for (const status of statuses) {
+    assert.equal(status.status, 'password_required')
+    assert.equal(status.password_setup_required, true)
+    assert.equal(status.set_password_url, undefined)
+    assert.equal(status.direct_setup_available, undefined)
+  }
+  assert.equal(authAdmin.calls.filter((call) => call?.type === 'recovery').length, 0)
   assert.doesNotMatch(JSON.stringify(logEntries), /direct-after-email-failure|recovery-token|setup\.example/)
 })
 
@@ -916,8 +961,8 @@ test('checkout return state reads webhook state and does not activate pending ro
   })
   assert.equal(passwordRequiredStatus.status, 'password_required')
   assert.equal(passwordRequiredStatus.password_setup_required, true)
-  assert.equal(passwordRequiredStatus.direct_setup_available, true)
-  assert.match(passwordRequiredStatus.set_password_url, /\/pwreset\?token_hash=direct-setup-token/)
+  assert.equal(passwordRequiredStatus.direct_setup_available, undefined)
+  assert.equal(passwordRequiredStatus.set_password_url, undefined)
   assert.doesNotMatch(JSON.stringify(passwordRequiredStatus), /buyer_email|company_legal_name|raw_payload|sk_test|sk_live/i)
 
   const emailFallbackStatus = await resolvePublicCheckoutReturnState({
@@ -931,9 +976,9 @@ test('checkout return state reads webhook state and does not activate pending ro
     agreementId: AGREEMENT_ID,
     logger: { warn() {}, error() {} }
   })
-  assert.equal(emailFallbackStatus.status, 'setup_email_sent')
+  assert.equal(emailFallbackStatus.status, 'password_required')
   assert.equal(emailFallbackStatus.password_setup_required, true)
-  assert.equal(emailFallbackStatus.setup_email_sent, true)
+  assert.equal(emailFallbackStatus.setup_email_sent, undefined)
   assert.equal(emailFallbackStatus.set_password_url, undefined)
 
   const readyDb = makeDb('pro', 'annual', {

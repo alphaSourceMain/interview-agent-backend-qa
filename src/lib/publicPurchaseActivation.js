@@ -372,7 +372,7 @@ async function loadPublicPurchaseIntent(db, agreement) {
   if (snapshotIntentId) {
     const { data, error } = await db
       .from('public_purchase_intents')
-      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,activated_at,canceled_at,activation_claimed_at,activation_claim_key,expires_at,created_at,updated_at')
+      .select('id,status,protocol,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,activated_at,canceled_at,activation_claimed_at,activation_claim_key,expires_at,created_at,updated_at')
       .eq('id', snapshotIntentId)
       .maybeSingle();
     if (error) throw new Error(error.message || 'Public purchase intent lookup failed');
@@ -382,7 +382,7 @@ async function loadPublicPurchaseIntent(db, agreement) {
   if (!agreementId) return null;
   const { data, error } = await db
     .from('public_purchase_intents')
-    .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,activated_at,canceled_at,activation_claimed_at,activation_claim_key,expires_at,created_at,updated_at')
+    .select('id,status,protocol,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,activated_at,canceled_at,activation_claimed_at,activation_claim_key,expires_at,created_at,updated_at')
     .eq('agreement_id', agreementId)
     .maybeSingle();
   if (error) throw new Error(error.message || 'Public purchase intent lookup failed');
@@ -661,7 +661,8 @@ async function ensureBuyerAccountSetup({
   logger,
   ensureRecovery,
   sendRecoveryEmail,
-  assertFence = async () => {}
+  assertFence = async () => {},
+  activationClaimKey = null
 }) {
   const buyerEmail = lowerEmail(intent?.buyer_email || agreement?.admin_email);
   if (!buyerEmail) {
@@ -727,13 +728,23 @@ async function ensureBuyerAccountSetup({
   }
 
   await assertFence();
-  const membership = await upsertBuyerMembership({
-    db,
-    clientId,
-    email: buyerEmail,
-    name: buyerName,
-    userId
-  });
+  let membership;
+  if (intent?.id && activationClaimKey) {
+    const { data, error } = await db.rpc('ensure_public_purchase_buyer_member', {
+      p_intent_id: intent.id,
+      p_claim_key: activationClaimKey,
+      p_user_id: userId,
+      p_name: buyerName
+    });
+    if (error || !['created', 'existing', 'updated'].includes(data?.status)) {
+      const failure = new Error(error?.message || `Buyer membership refused: ${data?.status || 'unknown'}`);
+      failure.code = data?.status || error?.code || 'member_rpc_failed';
+      throw failure;
+    }
+    membership = data;
+  } else {
+    membership = await upsertBuyerMembership({ db, clientId, email: buyerEmail, name: buyerName, userId });
+  }
 
   return {
     auth_status: authStatus,
@@ -742,6 +753,73 @@ async function ensureBuyerAccountSetup({
     member_role: membership.role,
     setup_email_status: setupEmailStatus
   };
+}
+
+async function sendFencedWelcomeEmail({ db, intent, agreement, clientId, buyerEmail, buyerName,
+  claimKey, sendWelcomeEmail, assertFence, logger }) {
+  await assertFence();
+  const { data: reservation, error: reserveError } = await db.rpc('reserve_public_purchase_welcome', {
+    p_intent_id: intent.id, p_claim_key: claimKey
+  });
+  if (reserveError) throw new Error(reserveError.message || 'Welcome reservation failed');
+  if (reservation?.status !== 'reserved') {
+    if (['sent', 'skipped', 'manual_suppressed', 'sending'].includes(reservation?.status)) {
+      return reservation.status === 'sent' ? 'already_sent' : reservation.status;
+    }
+    const error = new Error(`Welcome reservation refused: ${reservation?.status || 'unknown'}`);
+    error.code = reservation?.status || 'welcome_reservation_refused';
+    throw error;
+  }
+  await assertFence();
+  const { data: begun, error: beginError } = await db.rpc('begin_public_purchase_welcome', {
+    p_intent_id: intent.id, p_claim_key: claimKey
+  });
+  if (beginError || begun?.status !== 'sending' || !begun?.send_token) {
+    const error = new Error(beginError?.message || `Welcome begin refused: ${begun?.status || 'unknown'}`);
+    error.code = begun?.status || 'welcome_begin_refused';
+    throw error;
+  }
+  // Once `sending` commits, timeout, crash, or an unknown provider response
+  // remains ambiguous. It is never converted to an automatic retry.
+  const finish = async (result, response) => {
+    const { data, error } = await db.rpc('finish_public_purchase_welcome', {
+      p_intent_id: intent.id, p_send_token: begun.send_token,
+      p_result: result, p_response: response
+    });
+    if (error || data?.status !== result) {
+      const failure = new Error(error?.message || `Welcome finish refused: ${data?.status || 'unknown'}`);
+      failure.code = data?.status || 'welcome_finish_failed';
+      throw failure;
+    }
+  };
+  // An explicit false from the lease check prevents the provider call; the
+  // ledger stays ambiguous until an operator confirms no send occurred.
+  await assertFence();
+  try {
+    const firstName = cleanText(intent.buyer_first_name) || cleanText(buyerName).split(/\s+/)[0] || '';
+    const result = await sendWelcomeEmail(buyerEmail, {
+      firstName, recipientName: buyerName, clientId,
+      agreementId: agreement.id, purchaseIntentId: intent.id
+    });
+    if (result?.statusCode === 202) {
+      await finish('sent', 'status:202');
+      return 'sent';
+    }
+    if (result?.skipped === true) {
+      await finish('skipped', 'email_skipped');
+      return 'skipped';
+    }
+    // An unclassified response is not a definitive provider rejection.
+    logger.warn?.('[public-purchase-activation] welcome_email_ambiguous', {
+      purchase_intent_id: intent.id, status_code: result?.statusCode || null
+    });
+    return 'sending';
+  } catch (error) {
+    logger.error?.('[public-purchase-activation] welcome_email_ambiguous', {
+      purchase_intent_id: intent.id, error: error?.message || String(error)
+    });
+    return 'sending';
+  }
 }
 
 async function activatePublicPurchaseAgreementCheckout(options = {}) {
@@ -794,6 +872,11 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
 
   const assertFence = options.assertActivationFence || (async () => {});
   const claimKey = cleanText(options.activationClaimKey);
+  if (intent?.id && cleanText(intent.protocol) === 'fenced_v2' && !claimKey) {
+    const error = new Error('Fenced public purchase requires an activation claim');
+    error.code = 'activation_claim_required';
+    throw error;
+  }
   let clientId;
   if (intent?.id && claimKey) {
     await assertFence();
@@ -843,7 +926,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
   }
   const { data: existingClientState, error: existingClientStateErr } = await db
     .from('clients')
-    .select('id,billing_status,subscription_status')
+    .select('id,billing_status,subscription_status,contract_start_at,contract_end_at,current_term_end')
     .eq('id', clientId)
     .maybeSingle();
   if (existingClientStateErr) throw new Error(existingClientStateErr.message || 'Client activation state lookup failed');
@@ -864,6 +947,95 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     throw err;
   }
   const billingClientId = cleanText(parentGuard.clientId || clientId) || clientId;
+
+  if (intent?.id && claimKey) {
+    if (cleanText(intent.protocol) !== 'fenced_v2') {
+      const error = new Error('Historical purchase requires manual tail reconciliation');
+      error.code = 'billing_protocol_manual_review';
+      throw error;
+    }
+    const clientPayload = buildClientActivationPayload({
+      agreement, subscription: options.subscription, planKey, billingInterval,
+      fallbackCustomerId: options.fallbackCustomerId,
+      fallbackSubscriptionId: options.fallbackSubscriptionId
+    });
+    // A retry without Stripe's original start timestamp must not invent a new
+    // digest from the current wall clock.
+    clientPayload.contract_start_at = cleanText(existingClientState?.contract_start_at) ||
+      toIsoFromUnixSeconds(options.subscription?.start_date) || activationPaidAt;
+    clientPayload.contract_end_at = cleanText(existingClientState?.contract_end_at) ||
+      addMonthsToIso(clientPayload.contract_start_at, 12);
+    clientPayload.current_term_end = cleanText(existingClientState?.current_term_end) ||
+      clientPayload.current_term_end || clientPayload.contract_end_at;
+    const planPayload = buildAlphaScreenPlanSettingsPayload({ clientId, planKey, billingInterval });
+    if (!planPayload) throw new Error('Public purchase plan settings are invalid');
+    const credit = getFirstRolePrepaySnapshot(packageSnapshot);
+    const creditSelected = credit?.selected === true;
+    await assertFence();
+    const { data: billing, error: billingError } = await db.rpc('apply_public_purchase_billing', {
+      p_intent_id: intent.id,
+      p_claim_key: claimKey,
+      p_client_id: clientId,
+      p_billing_client_id: billingClientId,
+      p_stripe_customer_id: clientPayload.stripe_customer_id,
+      p_stripe_subscription_id: clientPayload.stripe_subscription_id,
+      p_subscription_status: clientPayload.subscription_status,
+      p_billing_status: clientPayload.billing_status,
+      p_billing_interval: clientPayload.billing_interval,
+      p_plan_tier: clientPayload.plan_tier,
+      p_current_term_end: clientPayload.current_term_end,
+      p_cancel_at_term_end: clientPayload.cancel_at_term_end,
+      p_auto_renew: clientPayload.auto_renew,
+      p_cancel_effective_at: clientPayload.cancel_effective_at,
+      p_contract_start_at: clientPayload.contract_start_at,
+      p_contract_end_at: clientPayload.contract_end_at,
+      p_platform_fee: planPayload.platform_fee,
+      p_per_role_fee: planPayload.per_role_fee,
+      p_included_interviews_per_role: planPayload.included_interviews_per_role,
+      p_additional_interview_fee: planPayload.additional_interview_fee,
+      p_max_interview_minutes: planPayload.max_interview_minutes,
+      p_credit_selected: creditSelected,
+      p_credit_type: creditSelected ? credit.credit_type : null,
+      p_credit_normal_role_fee_cents: creditSelected ? credit.normal_role_fee_cents : null,
+      p_credit_discounted_amount_cents: creditSelected ? credit.discounted_credit_amount_cents : null,
+      p_credit_discount_percent: creditSelected ? credit.discount_percent : null,
+      p_credit_non_refundable: creditSelected ? credit.non_refundable === true : null,
+      p_credit_expires: creditSelected ? credit.expires === true : null
+    });
+    if (billingError || !['applied', 'already_applied'].includes(billing?.status)) {
+      const error = new Error(billingError?.message || `Billing refused: ${billing?.status || 'unknown'}`);
+      error.code = billing?.status || billingError?.code || 'billing_rpc_failed';
+      throw error;
+    }
+    await assertFence();
+    const setup = await ensureBuyerAccountSetup({
+      db, authAdmin, clientId, agreement, intent, requestId: options.requestId || null,
+      logger, ensureRecovery, sendRecoveryEmail, assertFence,
+      activationClaimKey: claimKey
+    });
+    const buyerEmail = lowerEmail(intent.buyer_email);
+    const buyerName = buildBuyerName(intent, agreement) || buyerEmail;
+    const welcomeEmailStatus = await sendFencedWelcomeEmail({
+      db, intent, agreement, clientId, buyerEmail, buyerName, claimKey,
+      sendWelcomeEmail, assertFence, logger
+    });
+    let salesWonDeliveryStatus = 'not_applicable';
+    if (cleanText(intent.channel).toLowerCase() === 'sales_assisted') {
+      await assertFence();
+      const delivery = await enqueueSalesWonDelivery(intent.id, { db });
+      salesWonDeliveryStatus = delivery.status;
+    }
+    return {
+      ok: true, agreement_id: agreementId, purchase_intent_id: intent.id,
+      client_id: clientId, plan_key: planKey, billing_interval: billingInterval,
+      plan_settings: planPayload, member_status: setup.member_status,
+      member_role: setup.member_role, auth_status: setup.auth_status,
+      setup_email_status: setup.setup_email_status,
+      welcome_email_status: welcomeEmailStatus,
+      first_role_credit_status: creditSelected ? (billing.status === 'applied' ? 'created' : 'already_created') : 'not_selected',
+      sales_won_delivery_status: salesWonDeliveryStatus
+    };
+  }
 
   const agreementPaidPayload = {
     checkout_status: 'paid',

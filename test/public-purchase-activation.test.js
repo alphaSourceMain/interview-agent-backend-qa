@@ -392,6 +392,73 @@ test('public purchase webhook activation provisions Essential and Pro monthly/an
   }
 })
 
+test('fenced purchase uses only transactional tail RPCs and does not resend welcome', async () => {
+  const db = makeDb('basic', 'monthly')
+  db.purchaseIntents[0].protocol = 'fenced_v2'
+  const rpcCalls = []
+  let welcomeStatus = null
+  let welcomeSends = 0
+  db.rpc = async (name, args) => {
+    rpcCalls.push({ name, args })
+    if (name === 'complete_public_purchase_activation') {
+      db.membershipAgreements[0].checkout_status = 'paid'
+      db.membershipAgreements[0].checkout_paid_at = '2026-06-23T12:00:00.000Z'
+      return { data: { status: 'completed', client_id: CLIENT_ID, paid_at: '2026-06-23T12:00:00.000Z' }, error: null }
+    }
+    if (name === 'apply_public_purchase_billing') {
+      assert.equal(args.p_intent_id, INTENT_ID)
+      assert.equal(args.p_claim_key, 'synthetic-fence')
+      return { data: { status: 'applied' }, error: null }
+    }
+    if (name === 'ensure_public_purchase_buyer_member') {
+      return { data: { status: 'created', role: 'manager' }, error: null }
+    }
+    if (name === 'reserve_public_purchase_welcome') {
+      return { data: { status: welcomeStatus || 'reserved' }, error: null }
+    }
+    if (name === 'begin_public_purchase_welcome') {
+      welcomeStatus = 'sending'
+      return { data: { status: 'sending', send_token: '50000000-0000-4000-8000-000000000001' }, error: null }
+    }
+    if (name === 'finish_public_purchase_welcome') {
+      welcomeStatus = args.p_result
+      return { data: { status: args.p_result }, error: null }
+    }
+    throw new Error(`Unexpected RPC: ${name}`)
+  }
+  const inputs = {
+    db, authAdmin: makeAuthAdmin([{ id: '40000000-0000-4000-8000-000000000001', email: BUYER_EMAIL }]),
+    agreementId: AGREEMENT_ID, activationClaimKey: 'synthetic-fence',
+    checkoutSessionId: 'cs_test_public', paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('monthly'),
+    requireParentClient: async () => ({ ok: true }),
+    assertActivationFence: async () => {},
+    sendWelcomeEmail: async () => { welcomeSends += 1; return { statusCode: 202 } },
+    logger: { info() {}, warn() {}, error() {} }
+  }
+  const first = await activatePublicPurchaseAgreementCheckout(inputs)
+  const second = await activatePublicPurchaseAgreementCheckout(inputs)
+  assert.equal(first.ok, true)
+  assert.equal(first.welcome_email_status, 'sent')
+  assert.equal(second.welcome_email_status, 'already_sent')
+  assert.equal(welcomeSends, 1)
+  assert.deepEqual(db.updates, [])
+  assert.deepEqual(db.upserts, [])
+  assert.deepEqual(db.inserts, [])
+  assert.ok(rpcCalls.some((call) => call.name === 'apply_public_purchase_billing'))
+  assert.ok(rpcCalls.some((call) => call.name === 'ensure_public_purchase_buyer_member'))
+})
+
+test('fenced purchase without a claim refuses before all writes', async () => {
+  const db = makeDb('basic', 'monthly')
+  db.purchaseIntents[0].protocol = 'fenced_v2'
+  await assert.rejects(
+    activatePublicPurchaseAgreementCheckout({ db, agreementId: AGREEMENT_ID }),
+    { code: 'activation_claim_required' }
+  )
+  assert.equal(db.updates.length + db.upserts.length + db.inserts.length, 0)
+})
+
 test('public purchase webhook activation does not reactivate a canceled sales intent', async () => {
   const db = makeDb('basic', 'monthly', { source: 'sales_assisted' })
   db.purchaseIntents[0].status = 'canceled'

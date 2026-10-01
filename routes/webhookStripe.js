@@ -300,7 +300,14 @@ async function markAgreementCheckoutPaid(agreementId, options = {}) {
   if (!claim.proceed) return claim.result;
   let heartbeatTimer = null;
   let fenceLost = false;
-  let heartbeatPending = Promise.resolve();
+  let fenceQueue = Promise.resolve();
+  const serializeFenceOperation = (operation) => {
+    const pending = fenceQueue.then(operation);
+    // Keep the queue usable after a transient provider/network failure;
+    // only an explicit false heartbeat proves the lease was lost.
+    fenceQueue = pending.catch(() => {});
+    return pending;
+  };
   const fenceError = (message) => {
     const error = new Error(message || 'Purchase activation fence was lost');
     error.code = 'activation_fence_lost';
@@ -312,18 +319,35 @@ async function markAgreementCheckoutPaid(agreementId, options = {}) {
       p_intent_id: claim.intentId,
       p_claim_key: claim.key
     });
-    if (error || data !== true) {
+    if (data === false) {
       fenceLost = true;
-      throw fenceError(error?.message);
+      throw fenceError();
+    }
+    if (error || data !== true) {
+      const failure = new Error(error?.message || 'Purchase activation fence could not be verified');
+      failure.code = 'activation_fence_unverified';
+      throw failure;
     }
   };
   const assertFence = async () => {
     if (fenceLost) throw fenceError();
-    await heartbeat();
+    await serializeFenceOperation(heartbeat);
   };
+  const fencedDb = claim.claimed ? new Proxy(db, {
+    get(target, key) {
+      if (key === 'rpc') return (name, args) => serializeFenceOperation(() => target.rpc(name, args));
+      const value = target[key];
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  }) : db;
   if (claim.claimed) {
     heartbeatTimer = setInterval(() => {
-      heartbeatPending = heartbeatPending.then(heartbeat).catch(() => { fenceLost = true; });
+      serializeFenceOperation(heartbeat).catch((error) => {
+        console.warn('stripe_webhook_activation_heartbeat_unverified', {
+          purchase_intent_id: claim.intentId,
+          code: error?.code || null
+        });
+      });
     }, 30000);
     heartbeatTimer.unref?.();
   }
@@ -343,15 +367,16 @@ async function markAgreementCheckoutPaid(agreementId, options = {}) {
       activationClaimKey: claim.claimed ? claim.key : null,
       activationIntentId: claim.claimed ? claim.intentId : null,
       assertActivationFence: assertFence,
-      db
+      db: fencedDb
     });
     return result;
   } catch (error) {
     throw error;
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
-    await heartbeatPending;
+    await fenceQueue;
     if (claim.claimed) await releaseAgreementPurchaseActivationClaim(claim.intentId, claim.key, db);
+    if (fenceLost) throw fenceError();
   }
 }
 
@@ -909,6 +934,11 @@ router.post('/', async (req, res) => {
       }
 
       if (isAgreementCheckoutInvoice) {
+        // Checkout and invoice can arrive in either order. Use the same Stripe
+        // subscription snapshot for the first billing digest on both paths.
+        if (subscriptionId && !invoiceSubscription) {
+          invoiceSubscription = await stripe.subscriptions.retrieve(subscriptionId);
+        }
         const activation = await markAgreementCheckoutPaid(metadataAgreementId, {
           paidAt: toIsoFromUnixSeconds(event?.created) || new Date().toISOString(),
           subscription: invoiceSubscription || null,

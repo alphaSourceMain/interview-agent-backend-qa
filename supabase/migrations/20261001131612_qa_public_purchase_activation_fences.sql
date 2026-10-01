@@ -45,6 +45,60 @@ alter table public.public_purchase_intents
     or (billing_applied_at is not null and billing_apply_digest ~ '^[a-f0-9]{64}$')
   );
 
+-- Claim freshness must be sampled after waiting for the intent lock. An old
+-- pre-lock clock can otherwise steal a lease refreshed during the wait.
+create or replace function public.claim_public_purchase_activation(
+  p_agreement_id uuid, p_claim_key text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_intent public.public_purchase_intents%rowtype;
+  v_agreement public.membership_agreements%rowtype;
+  v_now timestamptz;
+begin
+  perform set_config('lock_timeout', '10s', true);
+  if p_claim_key is null or length(p_claim_key) < 32 then
+    raise exception using errcode = '22023', message = 'invalid_activation_fence';
+  end if;
+  select * into v_intent from public.public_purchase_intents
+  where agreement_id = p_agreement_id for update;
+  if not found then
+    return jsonb_build_object('status', 'purchase_intent_missing');
+  end if;
+  v_now := clock_timestamp();
+  select * into v_agreement from public.membership_agreements
+  where id = p_agreement_id for update;
+  if not found or v_agreement.superseded_by_agreement_id is not null
+    or v_agreement.status in ('superseded', 'voided') then
+    return jsonb_build_object('status', 'agreement_superseded', 'intent_id', v_intent.id);
+  end if;
+  if v_intent.status = 'canceled' or v_intent.canceled_at is not null then
+    return jsonb_build_object('status', 'purchase_canceled', 'intent_id', v_intent.id);
+  end if;
+  if v_intent.protocol = 'legacy_complete' then
+    return jsonb_build_object('status', 'historical_complete', 'intent_id', v_intent.id);
+  end if;
+  if v_intent.activation_claimed_at is not null
+    and v_intent.activation_claimed_at >= v_now - interval '5 minutes' then
+    return jsonb_build_object('status', 'activation_in_progress', 'intent_id', v_intent.id);
+  end if;
+  update public.public_purchase_intents
+  set activation_claimed_at = v_now, activation_claim_key = p_claim_key,
+      updated_at = v_now
+  where id = v_intent.id and protocol = 'fenced_v2';
+  return jsonb_build_object('status', 'claimed', 'intent_id', v_intent.id);
+end;
+$$;
+
+revoke all on function public.claim_public_purchase_activation(uuid, text)
+  from public, anon, authenticated;
+grant execute on function public.claim_public_purchase_activation(uuid, text)
+  to service_role;
+
 -- Preserve the existing completion contract while making the shared-client
 -- lock order intent -> agreement -> client explicit. The prior version read
 -- the existing client without a row lock.
@@ -103,10 +157,16 @@ begin
     or p_billing_interval not in ('monthly', 'annual')
     or p_plan_key is distinct from v_intent.selected_plan_key
     or p_billing_interval is distinct from v_intent.selected_billing_cadence
+    or coalesce(nullif(btrim(v_intent.stripe_checkout_session_id), ''),
+      nullif(btrim(p_checkout_session_id), '')) is null
     or (nullif(btrim(v_intent.stripe_checkout_session_id), '') is not null
       and nullif(btrim(p_checkout_session_id), '') is not null
       and nullif(btrim(p_checkout_session_id), '') is distinct from
-        nullif(btrim(v_intent.stripe_checkout_session_id), '')) then
+        nullif(btrim(v_intent.stripe_checkout_session_id), ''))
+    or (nullif(btrim(v_agreement.checkout_session_id), '') is not null
+      and nullif(btrim(v_agreement.checkout_session_id), '') is distinct from
+        coalesce(nullif(btrim(v_intent.stripe_checkout_session_id), ''),
+          nullif(btrim(p_checkout_session_id), ''))) then
     raise exception using errcode = '22023', message = 'invalid_activation_input';
   end if;
 
@@ -258,14 +318,8 @@ begin
 
   select * into v_client from public.clients
   where id = p_client_id for update;
-  if not found or p_billing_client_id is null then
+  if not found or p_billing_client_id is distinct from p_client_id then
     return jsonb_build_object('status', 'billing_client_missing');
-  end if;
-  if p_billing_client_id <> p_client_id then
-    perform 1 from public.clients where id = p_billing_client_id;
-    if not found then
-      return jsonb_build_object('status', 'billing_parent_missing');
-    end if;
   end if;
 
   if p_plan_tier not in ('basic', 'pro')
@@ -276,6 +330,8 @@ begin
     or p_subscription_status not in ('active', 'trialing')
     or p_stripe_customer_id is null or length(btrim(p_stripe_customer_id)) not between 3 and 255
     or p_stripe_subscription_id is null or length(btrim(p_stripe_subscription_id)) not between 3 and 255
+    or p_stripe_customer_id is distinct from btrim(p_stripe_customer_id)
+    or p_stripe_subscription_id is distinct from btrim(p_stripe_subscription_id)
     or p_cancel_at_term_end is null or p_auto_renew is null
     or p_contract_start_at is null or p_contract_end_at is null or p_current_term_end is null
     or not isfinite(p_contract_start_at) or not isfinite(p_contract_end_at)
@@ -340,12 +396,16 @@ begin
   v_digest := encode(extensions.digest(convert_to(jsonb_build_array(
     'fenced_v2', p_intent_id::text, p_client_id::text,
     p_stripe_customer_id, p_stripe_subscription_id, p_subscription_status,
-    p_billing_status, p_billing_interval, p_plan_tier, p_current_term_end,
-    p_cancel_at_term_end, p_auto_renew, p_cancel_effective_at,
-    p_contract_start_at, p_contract_end_at,
-    p_client_id::text, p_plan_tier, p_billing_interval, p_platform_fee,
-    p_per_role_fee, p_included_interviews_per_role,
-    p_additional_interview_fee, p_max_interview_minutes,
+    p_billing_status, p_billing_interval, p_plan_tier,
+    to_char(p_current_term_end at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+    p_cancel_at_term_end, p_auto_renew,
+    to_char(p_cancel_effective_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+    to_char(p_contract_start_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+    to_char(p_contract_end_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+    p_client_id::text, p_plan_tier, p_billing_interval,
+    p_platform_fee::numeric(20,4), p_per_role_fee::numeric(20,4),
+    p_included_interviews_per_role,
+    p_additional_interview_fee::numeric(20,4), p_max_interview_minutes,
     v_credit_tuple
   )::text, 'UTF8'), 'sha256'), 'hex');
 
@@ -514,7 +574,7 @@ begin
   if v_intent.status is distinct from 'completed'
     or v_intent.canceled_at is not null
     or v_intent.agreement_id is null or v_intent.client_id is null
-    or v_intent.protocol not in ('fenced_v2', 'legacy_complete') then
+    or v_intent.protocol is distinct from 'fenced_v2' then
     return jsonb_build_object('status', 'purchase_tail_manual_review');
   end if;
 

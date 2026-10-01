@@ -63,6 +63,7 @@ declare
   v_before_client jsonb;
   v_before_plan jsonb;
   v_before_credit jsonb;
+  v_time_zone text := current_setting('TimeZone');
 begin
   v_result := public.synthetic_apply_qa_billing();
   if v_result->>'status' <> 'applied' then
@@ -82,6 +83,16 @@ begin
   if v_result->>'status' <> 'already_applied' then
     raise exception 'consumed_credit_replay_failed: %', v_result;
   end if;
+  perform set_config('TimeZone', 'Pacific/Honolulu', true);
+  v_result := public.synthetic_apply_qa_billing();
+  if v_result->>'status' <> 'already_applied' then
+    raise exception 'timezone_changed_digest: %', v_result;
+  end if;
+  if jsonb_build_array(299::numeric(20,4))::text is distinct from
+     jsonb_build_array(299.00::numeric(20,4))::text then
+    raise exception 'numeric_scale_not_canonical';
+  end if;
+  perform set_config('TimeZone', v_time_zone, true);
   if v_before_client is distinct from (select to_jsonb(c) from public.clients c)
     or v_before_plan is distinct from (select to_jsonb(p) from public.client_plan_settings p)
     or v_before_credit is distinct from (select to_jsonb(c) from public.client_role_credits c) then
@@ -103,3 +114,19 @@ begin
   end if;
 end;
 $$;
+
+begin;
+update public.public_purchase_intents set protocol='legacy_complete'
+where id='30000000-0000-4000-8000-000000000001';
+do $$
+declare v_result jsonb;
+begin
+  v_result := public.claim_public_purchase_activation(
+    '20000000-0000-4000-8000-000000000001',
+    'synthetic-legacy-claim-0000000000000001');
+  if v_result->>'status' <> 'historical_complete' then
+    raise exception 'legacy_claim_was_allowed: %', v_result;
+  end if;
+end;
+$$;
+rollback;

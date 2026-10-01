@@ -411,7 +411,7 @@ async function isRetryableAgreementActivationEvent(event) {
 
 function requireAgreementActivationResult(result) {
   if (result?.ok === true) return;
-  if (['purchase_canceled', 'agreement_superseded'].includes(result?.status)) return;
+  if (['purchase_canceled', 'agreement_superseded', 'historical_complete'].includes(result?.status)) return;
   const error = new Error(`Agreement checkout activation incomplete: ${result?.status || 'unknown'}`);
   error.code = result?.status || 'agreement_activation_incomplete';
   throw error;

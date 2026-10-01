@@ -63,6 +63,23 @@ $$;
 rollback;
 
 begin;
+update public.public_purchase_intents set protocol='legacy_complete'
+where id='30000000-0000-4000-8000-000000000001';
+do $$
+declare v_result jsonb;
+begin
+  v_result := public.ensure_public_purchase_buyer_member(
+    '30000000-0000-4000-8000-000000000001', 'synthetic-claim',
+    '40000000-0000-4000-8000-000000000001', 'Synthetic Buyer'
+  );
+  if v_result->>'status' <> 'purchase_tail_manual_review' then
+    raise exception 'legacy_member_rpc_was_allowed: %', v_result;
+  end if;
+end;
+$$;
+rollback;
+
+begin;
 update public.public_purchase_intents
 set activation_claimed_at=clock_timestamp()-interval '6 minutes'
 where id='30000000-0000-4000-8000-000000000001';

@@ -418,7 +418,8 @@ test('fenced purchase uses only transactional tail RPCs and does not resend welc
     }
     if (name === 'begin_public_purchase_welcome') {
       welcomeStatus = 'sending'
-      return { data: { status: 'sending', send_token: '50000000-0000-4000-8000-000000000001' }, error: null }
+      return { data: { status: 'sending', send_token: '50000000-0000-4000-8000-000000000001',
+        buyer_email: BUYER_EMAIL, client_id: CLIENT_ID, agreement_id: AGREEMENT_ID }, error: null }
     }
     if (name === 'finish_public_purchase_welcome') {
       welcomeStatus = args.p_result
@@ -456,6 +457,15 @@ test('fenced purchase without a claim refuses before all writes', async () => {
     activatePublicPurchaseAgreementCheckout({ db, agreementId: AGREEMENT_ID }),
     { code: 'activation_claim_required' }
   )
+  assert.equal(db.updates.length + db.upserts.length + db.inserts.length, 0)
+})
+
+test('historical completed purchase cannot enter unfenced legacy writes', async () => {
+  const db = makeDb('basic', 'monthly')
+  db.purchaseIntents[0].protocol = 'legacy_complete'
+  db.purchaseIntents[0].status = 'completed'
+  const result = await activatePublicPurchaseAgreementCheckout({ db, agreementId: AGREEMENT_ID })
+  assert.equal(result.status, 'historical_complete')
   assert.equal(db.updates.length + db.upserts.length + db.inserts.length, 0)
 })
 

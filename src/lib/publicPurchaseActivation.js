@@ -779,6 +779,13 @@ async function sendFencedWelcomeEmail({ db, intent, agreement, clientId, buyerEm
     error.code = begun?.status || 'welcome_begin_refused';
     throw error;
   }
+  if (lowerEmail(begun.buyer_email) !== buyerEmail ||
+    cleanText(begun.client_id) !== clientId ||
+    cleanText(begun.agreement_id) !== cleanText(agreement.id)) {
+    const error = new Error('Locked welcome recipient or purchase context changed');
+    error.code = 'welcome_context_mismatch';
+    throw error;
+  }
   // Once `sending` commits, timeout, crash, or an unknown provider response
   // remains ambiguous. It is never converted to an automatic retry.
   const finish = async (result, response) => {
@@ -845,6 +852,9 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
   if (!agreement) return { ok: false, status: 'agreement_not_found' };
 
   const intent = await loadPublicPurchaseIntent(db, agreement);
+  if (intent?.id && cleanText(intent.protocol) === 'legacy_complete') {
+    return { ok: false, status: 'historical_complete', purchase_intent_id: intent.id };
+  }
   if (cleanText(agreement.superseded_by_agreement_id) || (intent?.agreement_id && cleanText(intent.agreement_id) !== agreementId)) {
     logger.warn?.('[public-purchase-activation] superseded_agreement_payment_requires_review', {
       agreement_id: agreementId,

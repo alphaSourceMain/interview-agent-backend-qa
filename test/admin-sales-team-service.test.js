@@ -142,9 +142,7 @@ function providerFake() {
     if (/\/users\//.test(url)) {
       const userId = url.split('/').pop();
       if (userId !== state.user.id) state.user = { id: userId, email: 'winner@alphasourceai.com', phone: '+13035550002', active: true, roles: { type: 'account', role: 'user', locationIds: ['location-1'] } };
-      if (options.method === 'GET') return { ok: true, status: 200, json: async () => ({ user: { ...state.user } }) };
-      state.user.phone = JSON.parse(options.body).phone;
-      state.writes.push({ type: 'user', userId, phone: state.user.phone });
+      assert.equal(options.method, 'GET', 'GHL user profile must remain read-only');
       return { ok: true, status: 200, json: async () => ({ user: { ...state.user } }) };
     }
     const id = url.split('/').pop();
@@ -302,14 +300,15 @@ test('generated Grok prompt uses the rep name and never exposes delivery mechani
   assert.match(prompt, /Essential and Pro memberships/);
 });
 
-test('apply updates all GHL routes before one v2 database transaction', async () => {
+test('apply updates only managed GHL values before one v2 database transaction', async () => {
   const db = makeDb();
   const provider = providerFake();
   const result = await applySalesTeamMember({ db, memberId: member.id, actorId: '99999999-9999-4999-8999-999999999999', env: applyEnv, fetchImpl: provider.fetchImpl });
   assert.equal(result.item.member.status, 'active');
-  assert.equal(provider.state.user.phone, member.mobile_phone_e164);
+  assert.equal(provider.state.user.phone, '+13035550000');
   assert.equal(provider.state.values['mobile-value-1'].value, member.mobile_phone_e164);
   assert.equal(provider.state.values['user-value-1'].value, member.ghl_user_id);
+  assert.ok(provider.state.writes.every((write) => write.type === 'value'));
   assert.equal(db.calls[0].name, 'apply_sales_team_configuration_v2');
   assert.equal(db.calls[0].args.p_replace_team_member_id, null);
   assert.equal(db.calls[0].args.p_handoff_token_sha256, 'a'.repeat(64));
@@ -378,7 +377,7 @@ test('exact incumbent confirmation performs atomic replacement and retains old a
   assert.ok(db.tables.sales_team_members.find((row) => row.id === incumbent.id));
 });
 
-test('database rejection restores the prior GHL route and user phone', async () => {
+test('database rejection restores the prior GHL values without changing the user phone', async () => {
   const db = makeDb({ applyError: { message: 'sales_team_draft_stale' } });
   const provider = providerFake();
   await assert.rejects(applySalesTeamMember({ db, memberId: member.id, env: applyEnv, fetchImpl: provider.fetchImpl }), (error) => error.code === 'sales_team_draft_stale');
@@ -418,10 +417,10 @@ test('a concurrent database winner is reconciled into GHL instead of being overw
   const provider = providerFake();
   await assert.rejects(applySalesTeamMember({ db, memberId: member.id, env: applyEnv, fetchImpl: provider.fetchImpl }), (error) => error.code === 'sales_team_assignment_conflict');
   assert.equal(provider.state.user.id, winner.ghl_user_id);
-  assert.equal(provider.state.user.phone, winner.mobile_phone_e164);
+  assert.equal(provider.state.user.phone, '+13035550002');
   assert.equal(provider.state.values['mobile-value-1'].value, winner.mobile_phone_e164);
   assert.equal(provider.state.values['user-value-1'].value, winner.ghl_user_id);
-  assert.ok(provider.state.writes.some((write) => write.type === 'user' && write.userId === member.ghl_user_id && write.phone === '+13035550000'));
+  assert.ok(provider.state.writes.every((write) => write.type === 'value'));
 });
 
 test('line setup returns to pending when either managed GHL routing value changes', async () => {

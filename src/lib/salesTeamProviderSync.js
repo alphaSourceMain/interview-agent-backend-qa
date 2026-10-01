@@ -119,16 +119,6 @@ async function readGhlUser(config, userId, expectedEmail, fetchImpl) {
   return { id: userId, phone: normalizeUsPhone(user?.phone), email };
 }
 
-async function writeGhlUserPhone(config, userId, phone, fetchImpl) {
-  const result = await jsonRequest(`https://services.leadconnectorhq.com/users/${encodeURIComponent(userId)}`, {
-    method: 'PUT', headers: ghlHeaders(config.token, true), body: JSON.stringify({ phone }),
-  }, fetchImpl);
-  const user = ghlUserFrom(result.body);
-  if (!result.ok || user?.id !== userId || normalizeUsPhone(user?.phone) !== normalizeUsPhone(phone)) {
-    throw Object.assign(new Error('GHL user phone update failed'), { providerCode: `ghl_user_phone_write_${result.status || 'failed'}` });
-  }
-}
-
 async function restoreGhlRouting(change, env, fetchImpl = global.fetch) {
   const ready = ghlConfiguration(change.record, env);
   if (ready.error) return ready.error;
@@ -137,7 +127,6 @@ async function restoreGhlRouting(change, env, fetchImpl = global.fetch) {
   const writes = [
     () => previous.userValue && writeCustomValue(config, previous.userValue, fetchImpl),
     () => previous.mobileValue && writeCustomValue(config, previous.mobileValue, fetchImpl),
-    () => previous.user?.id && writeGhlUserPhone(config, previous.user.id, previous.user.phone || '', fetchImpl),
   ];
   let failed = false;
   for (const write of writes) {
@@ -168,7 +157,6 @@ async function applyGhlRouting(record, target, env, fetchImpl = global.fetch) {
       throw Object.assign(new Error('GHL custom value name mismatch'), { providerCode: 'ghl_custom_value_name_mismatch' });
     }
     writeAttempted = true;
-    await writeGhlUserPhone(config, userId, mobile, fetchImpl);
     await writeCustomValue(config, { id: config.mobileValueId, name: previous.mobileValue.name, value: mobile }, fetchImpl);
     await writeCustomValue(config, { id: config.userValueId, name: previous.userValue.name, value: userId }, fetchImpl);
     return { status: 'synced', reference: `${config.mobileValueId}:${config.userValueId}`, previous };
@@ -177,7 +165,7 @@ async function applyGhlRouting(record, target, env, fetchImpl = global.fetch) {
       const restored = await restoreGhlRouting({ record, previous }, env, fetchImpl);
       if (restored.status !== 'synced') return providerFailure('ghl_restore_failed', 'GHL did not confirm the requested routing change or restore every prior value. Review this line before retrying.');
     }
-    return providerFailure(error?.providerCode || 'ghl_sync_unavailable', 'GHL did not confirm the representative, mobile forwarding, and line routing updates.');
+    return providerFailure(error?.providerCode || 'ghl_sync_unavailable', 'GHL did not confirm the SMS recipient and line assignment updates.');
   }
 }
 

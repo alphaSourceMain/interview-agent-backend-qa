@@ -123,7 +123,8 @@ test('Slack delivery uses a bot token, fixed channel ID, and stable client messa
   }, {
     env: {
       SLACK_SALES_WON_BOT_TOKEN: 'xoxb-test-token',
-      SLACK_SALES_WON_CHANNEL_ID: 'C123SALES'
+      SLACK_SALES_WON_CHANNEL_ID: 'C123SALES',
+      SALES_WON_TEAM_CHANNEL_ENABLED: 'true'
     },
     fetchImpl: async (url, request) => {
       captured = { url, request, body: JSON.parse(request.body) };
@@ -142,7 +143,8 @@ test('Slack rate-limit response preserves retry timing without exposing credenti
     postSlackMessage({ id: DELIVERY_ID, payload: {} }, {
       env: {
         SLACK_SALES_WON_BOT_TOKEN: 'xoxb-test-token',
-        SLACK_SALES_WON_CHANNEL_ID: 'C123SALES'
+        SLACK_SALES_WON_CHANNEL_ID: 'C123SALES',
+        SALES_WON_TEAM_CHANNEL_ENABLED: 'true'
       },
       fetchImpl: async () => fakeSlackResponse({ ok: false, error: 'ratelimited' }, {
         ok: false,
@@ -155,12 +157,22 @@ test('Slack rate-limit response preserves retry timing without exposing credenti
   assert.equal(retryDelaySeconds(1, { retryAfterSeconds: 45 }), 45);
 });
 
+test('shared sales-won channel is off by default and makes no network request', async () => {
+  let called = false;
+  await assert.rejects(postSlackMessage({ id: DELIVERY_ID, event_type: 'sales_won', payload: {} }, {
+    env: { SLACK_SALES_WON_BOT_TOKEN: 'xoxb-test-token', SLACK_SALES_WON_CHANNEL_ID: 'C123SALES' },
+    fetchImpl: async () => { called = true; return fakeSlackResponse({ ok: true }); }
+  }), (error) => error.code === 'slack_team_channel_disabled' && error.retryable === false);
+  assert.equal(called, false);
+});
+
 test('permanent Slack configuration errors fail without repeated retries', async () => {
   await assert.rejects(
     postSlackMessage({ id: DELIVERY_ID, payload: {} }, {
       env: {
         SLACK_SALES_WON_BOT_TOKEN: 'xoxb-test-token',
-        SLACK_SALES_WON_CHANNEL_ID: 'C123SALES'
+        SLACK_SALES_WON_CHANNEL_ID: 'C123SALES',
+        SALES_WON_TEAM_CHANNEL_ENABLED: 'true'
       },
       fetchImpl: async () => fakeSlackResponse({ ok: false, error: 'invalid_auth' })
     }),

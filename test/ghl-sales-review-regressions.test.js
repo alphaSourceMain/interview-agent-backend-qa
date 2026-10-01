@@ -326,6 +326,27 @@ test('Won retry re-runs signed-and-paid predicates before any provider write', a
   assert.equal(providerCalls, 0);
 });
 
+test('shared sales-won channel is only enqueued after explicit environment opt-in', async () => {
+  const intent = {
+    id: INTENT_ID, status: 'completed', channel: 'sales_assisted',
+    activated_at: '2026-09-22T12:00:00.000Z', client_id: 'client_qa'
+  };
+  const db = new MemoryDb({
+    public_purchase_intents: [intent],
+    clients: [{ id: 'client_qa', billing_status: 'active', subscription_status: 'active' }],
+    sales_reps: [], sales_integration_deliveries: []
+  });
+  const disabled = await enqueueSalesWonDelivery(INTENT_ID, { db, env: {} });
+  assert.equal(disabled.enqueued, false);
+  assert.equal(db.tables.sales_integration_deliveries.length, 0);
+  const enabled = await enqueueSalesWonDelivery(INTENT_ID, {
+    db, env: { SALES_WON_TEAM_CHANNEL_ENABLED: 'true' }
+  });
+  assert.equal(enabled.team, true);
+  assert.equal(db.tables.sales_integration_deliveries.length, 1);
+  assert.equal(db.tables.sales_integration_deliveries[0].event_type, 'sales_won');
+});
+
 test('GHL reconciliation skips 100 binding-less completed intents and enqueues the newer eligible sale', async () => {
   const intents = Array.from({ length: 101 }, (_, index) => ({
     id: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,

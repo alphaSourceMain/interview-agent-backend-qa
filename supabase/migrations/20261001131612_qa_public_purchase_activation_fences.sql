@@ -1,6 +1,5 @@
--- DRAFT QA-only activation-fence migration. Do not apply until the matching
--- backend, welcome/member RPCs, disposable concurrency tests, webhook drain,
--- and final exact-candidate Grok review are complete.
+-- QA-only activation-fence release candidate. Apply only under the reviewed
+-- webhook-drain, exact-count, migration, backend-deploy, and readback sequence.
 begin;
 
 alter table public.public_purchase_intents

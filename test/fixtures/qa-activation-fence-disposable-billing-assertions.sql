@@ -23,13 +23,17 @@ insert into public.public_purchase_intents (
   true, 'first_role_prepay', 39900, 35900, 10, 'cs_synthetic_qa', 'buyer@example.invalid'
 );
 
-create function public.synthetic_apply_qa_billing(p_cancel_at_term_end boolean default false, p_intent_id uuid default '30000000-0000-4000-8000-000000000001')
+create function public.synthetic_apply_qa_billing(
+  p_cancel_at_term_end boolean default false,
+  p_intent_id uuid default '30000000-0000-4000-8000-000000000001',
+  p_billing_client_id uuid default '10000000-0000-4000-8000-000000000001'
+)
 returns jsonb language sql as $$
   select public.apply_public_purchase_billing(
     p_intent_id => p_intent_id,
     p_claim_key => 'synthetic-claim',
     p_client_id => '10000000-0000-4000-8000-000000000001',
-    p_billing_client_id => '10000000-0000-4000-8000-000000000001',
+    p_billing_client_id => p_billing_client_id,
     p_stripe_customer_id => 'cus_synthetic_qa',
     p_stripe_subscription_id => 'sub_synthetic_qa',
     p_subscription_status => 'active',
@@ -111,6 +115,13 @@ begin
   v_result := public.synthetic_apply_qa_billing(false, '00000000-0000-4000-8000-000000000001');
   if v_result->>'status' <> 'billing_protocol_manual_review' then
     raise exception 'legacy_protocol_wrote_or_passed: %', v_result;
+  end if;
+  v_result := public.synthetic_apply_qa_billing(
+    false, '30000000-0000-4000-8000-000000000001',
+    '99999999-9999-4999-8999-999999999999'
+  );
+  if v_result->>'status' <> 'billing_client_missing' then
+    raise exception 'foreign_billing_parent_accepted: %', v_result;
   end if;
 end;
 $$;

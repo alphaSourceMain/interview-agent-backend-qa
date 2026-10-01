@@ -964,6 +964,19 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
       error.code = 'billing_protocol_manual_review';
       throw error;
     }
+    if (billingClientId !== clientId) {
+      const error = new Error('Public purchase must bill its own parent client');
+      error.code = 'billing_parent_mismatch';
+      throw error;
+    }
+    const subscriptionStartAt = toIsoFromUnixSeconds(options.subscription?.start_date) ||
+      toIsoFromUnixSeconds(options.subscription?.created);
+    if (!pickId(options.subscription?.id) || !subscriptionStartAt ||
+      !LIVE_SUBSCRIPTION_STATUSES.has(cleanText(options.subscription?.status).toLowerCase())) {
+      const error = new Error('A live Stripe subscription snapshot is required for fenced activation');
+      error.code = 'activation_subscription_snapshot_missing';
+      throw error;
+    }
     const clientPayload = buildClientActivationPayload({
       agreement, subscription: options.subscription, planKey, billingInterval,
       fallbackCustomerId: options.fallbackCustomerId,
@@ -972,7 +985,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     // A retry without Stripe's original start timestamp must not invent a new
     // digest from the current wall clock.
     clientPayload.contract_start_at = cleanText(existingClientState?.contract_start_at) ||
-      toIsoFromUnixSeconds(options.subscription?.start_date) || activationPaidAt;
+      subscriptionStartAt;
     clientPayload.contract_end_at = cleanText(existingClientState?.contract_end_at) ||
       addMonthsToIso(clientPayload.contract_start_at, 12);
     clientPayload.current_term_end = cleanText(existingClientState?.current_term_end) ||

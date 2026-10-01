@@ -113,6 +113,12 @@ function slackConfiguration(env = process.env) {
   };
 }
 
+function teamSalesWonChannelEnabled(env = process.env) {
+  // The shared channel has a broader audience than the QA test rep. Opt in
+  // only after its recipients are reviewed for the target environment.
+  return cleanText(env.SALES_WON_TEAM_CHANNEL_ENABLED, 10).toLowerCase() === 'true';
+}
+
 function validSlackUserId(value) {
   return /^[UW][A-Z0-9]{8,20}$/.test(cleanText(value, 24));
 }
@@ -193,6 +199,7 @@ async function recordTerminalGhlReconciliationState(db, intent, code) {
 
 async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
   const db = options.db || supabaseAdmin;
+  const env = options.env || process.env;
   const intent = options.intent || await loadSalesWonIntent(db, purchaseIntentId);
   if (!intent?.id) return { enqueued: false, status: 'intent_not_found' };
   if (
@@ -210,7 +217,7 @@ async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
   const rep = await loadSalesRep(db, intent.created_by_user_id);
   const payload = buildSalesWonPayload(intent, rep);
   const rows = [];
-  if (!intent.sales_won_enqueued_at) {
+  if (!intent.sales_won_enqueued_at && teamSalesWonChannelEnabled(env)) {
     rows.push({
       integration: SLACK_INTEGRATION,
       event_type: SALES_WON_EVENT_TYPE,
@@ -285,16 +292,18 @@ async function enqueueSalesWonDelivery(purchaseIntentId, options = {}) {
 
 async function reconcileSalesWonDeliveries(options = {}) {
   const db = options.db || supabaseAdmin;
+  const env = options.env || process.env;
   const limit = Math.max(1, Math.min(Number(options.limit || MAX_RECONCILE_ROWS), MAX_RECONCILE_ROWS));
-  const { data: teamRows, error: teamError } = await db
-    .from('public_purchase_intents')
-    .select('id')
-    .eq('channel', 'sales_assisted')
-    .eq('status', 'completed')
-    .not('activated_at', 'is', null)
-    .is('sales_won_enqueued_at', null)
-    .order('activated_at', { ascending: true })
-    .limit(limit);
+  const { data: teamRows, error: teamError } = teamSalesWonChannelEnabled(env)
+    ? await db.from('public_purchase_intents')
+      .select('id')
+      .eq('channel', 'sales_assisted')
+      .eq('status', 'completed')
+      .not('activated_at', 'is', null)
+      .is('sales_won_enqueued_at', null)
+      .order('activated_at', { ascending: true })
+      .limit(limit)
+    : { data: [], error: null };
   if (teamError) throw new Error(teamError.message || 'Sales-won reconciliation lookup failed');
 
   const { data: repRows, error: repError } = await db
@@ -338,7 +347,7 @@ async function reconcileSalesWonDeliveries(options = {}) {
   for (const purchaseIntentId of candidateIds) {
     summary.scanned += 1;
     try {
-      const result = await enqueueSalesWonDelivery(purchaseIntentId, { db, logger: options.logger });
+      const result = await enqueueSalesWonDelivery(purchaseIntentId, { db, env, logger: options.logger });
       if (result.enqueued) summary.enqueued += 1;
       else if (result.status === 'already_enqueued') summary.existing += 1;
       else if (result.status === 'activation_pending') summary.pending_activation += 1;
@@ -366,6 +375,12 @@ async function postSlackMessage(delivery, options = {}) {
   }
   if (typeof fetchImpl !== 'function') throw new Error('Fetch implementation unavailable.');
   const isRepDm = delivery.event_type === SALES_WON_REP_DM_EVENT_TYPE;
+  if (!isRepDm && !teamSalesWonChannelEnabled(env)) {
+    const error = new Error('Shared sales-won channel is not enabled for this environment.');
+    error.code = 'slack_team_channel_disabled';
+    error.retryable = false;
+    throw error;
+  }
   const slackUserId = cleanText(delivery.payload?.slack_user_id, 24);
   if (isRepDm && !validSlackUserId(slackUserId)) {
     const error = new Error('Slack member ID is invalid.');
@@ -555,7 +570,7 @@ async function processSalesIntegrationDeliveries(options = {}) {
   const db = options.db || supabaseAdmin;
   const logger = options.logger || console;
   const env = options.env || process.env;
-  const reconciliation = await reconcileSalesWonDeliveries({ db, logger, limit: options.reconcileLimit });
+  const reconciliation = await reconcileSalesWonDeliveries({ db, env, logger, limit: options.reconcileLimit });
   const slackConfig = slackConfiguration(env);
   const ghlConfig = ghlSalesConfiguration(env);
   const ghlConfigured = ghlConfig.configured && ghlConfig.syncEnabled;

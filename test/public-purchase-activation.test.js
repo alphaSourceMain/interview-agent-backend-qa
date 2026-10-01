@@ -408,6 +408,7 @@ test('fenced purchase uses only transactional tail RPCs and does not resend welc
     if (name === 'apply_public_purchase_billing') {
       assert.equal(args.p_intent_id, INTENT_ID)
       assert.equal(args.p_claim_key, 'synthetic-fence')
+      assert.equal(args.p_contract_start_at, new Date(1782172800 * 1000).toISOString())
       return { data: { status: 'applied' }, error: null }
     }
     if (name === 'ensure_public_purchase_buyer_member') {
@@ -431,7 +432,7 @@ test('fenced purchase uses only transactional tail RPCs and does not resend welc
     db, authAdmin: makeAuthAdmin([{ id: '40000000-0000-4000-8000-000000000001', email: BUYER_EMAIL }]),
     agreementId: AGREEMENT_ID, activationClaimKey: 'synthetic-fence',
     checkoutSessionId: 'cs_test_public', paidAt: '2026-06-23T12:00:00.000Z',
-    subscription: makeSubscription('monthly'),
+    subscription: { ...makeSubscription('monthly'), start_date: undefined, created: 1782172800 },
     requireParentClient: async () => ({ ok: true }),
     assertActivationFence: async () => {},
     sendWelcomeEmail: async () => { welcomeSends += 1; return { statusCode: 202 } },
@@ -467,6 +468,29 @@ test('historical completed purchase cannot enter unfenced legacy writes', async 
   const result = await activatePublicPurchaseAgreementCheckout({ db, agreementId: AGREEMENT_ID })
   assert.equal(result.status, 'historical_complete')
   assert.equal(db.updates.length + db.upserts.length + db.inserts.length, 0)
+})
+
+test('fenced billing refuses a mismatched parent or missing stable subscription', async () => {
+  for (const scenario of ['different_parent', 'missing_subscription']) {
+    const db = makeDb('basic', 'monthly')
+    db.purchaseIntents[0].protocol = 'fenced_v2'
+    const calls = []
+    db.rpc = async (name) => {
+      calls.push(name)
+      if (name !== 'complete_public_purchase_activation') throw new Error('Billing RPC must not be reached')
+      return { data: { status: 'completed', client_id: CLIENT_ID, paid_at: '2026-06-23T12:00:00.000Z' }, error: null }
+    }
+    await assert.rejects(activatePublicPurchaseAgreementCheckout({
+      db, agreementId: AGREEMENT_ID, activationClaimKey: 'synthetic-fence',
+      paidAt: '2026-06-23T12:00:00.000Z',
+      subscription: scenario === 'missing_subscription' ? null : makeSubscription('monthly'),
+      requireParentClient: async () => ({ ok: true,
+        clientId: scenario === 'different_parent' ? '99999999-9999-4999-8999-999999999999' : CLIENT_ID }),
+      assertActivationFence: async () => {}
+    }), { code: scenario === 'different_parent' ? 'billing_parent_mismatch' : 'activation_subscription_snapshot_missing' })
+    assert.deepEqual(calls, ['complete_public_purchase_activation'])
+    assert.equal(db.updates.length + db.upserts.length + db.inserts.length, 0)
+  }
 })
 
 test('public purchase webhook activation does not reactivate a canceled sales intent', async () => {

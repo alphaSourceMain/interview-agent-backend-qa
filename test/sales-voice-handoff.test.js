@@ -111,6 +111,10 @@ test('database-managed route resolves a token to fixed active recipients', async
   const resolved = await routeForAuthorizationDb(`Bearer ${TOKEN}`, db, dynamicEnv);
   assert.equal(resolved.repEmail, 'michael@example.com');
   assert.equal(resolved.ghlNumber, '+17207904187');
+  tables.sales_voice_configs[0].notify_sms = false;
+  const emailSlackRoute = await routeForAuthorizationDb(`Bearer ${TOKEN}`, db, { ...dynamicEnv, SALES_VOICE_GHL_WEBHOOKS_JSON: '{}' });
+  assert.equal(emailSlackRoute.notifySms, false);
+  assert.equal(emailSlackRoute.ghlNotificationWebhook, '');
   assert.equal(await routeForAuthorizationDb(`Bearer ${'z'.repeat(48)}`, db, dynamicEnv), null);
 });
 
@@ -317,7 +321,7 @@ test('shared Grok entrypoint records a line, creates one context, and sends only
   }
 });
 
-test('a route fails closed unless email, Slack, and GHL text are all enabled', async () => {
+test('a route fails closed unless email and Slack are enabled', async () => {
   const calls = [];
   const emailOnlyRoute = {
     ...parseRouteConfig(env)[0],
@@ -337,6 +341,23 @@ test('a route fails closed unless email, Slack, and GHL text are all enabled', a
   });
   assert.equal((await service.send(message, emailOnlyRoute)).status, 'unavailable');
   assert.deepEqual(calls, []);
+});
+
+test('an SMS-disabled route sends only email and Slack and needs no GHL webhook', async () => {
+  const calls = [];
+  const route = { ...parseRouteConfig(env)[0], notifyEmail: true, notifySlack: true, notifySms: false, ghlNotificationWebhook: '' };
+  const service = createSalesVoiceHandoff({
+    env,
+    rateLimit: async () => ({ allowed: true }),
+    fetch: async (url) => {
+      calls.push(url);
+      if (url.includes('sendgrid')) return { ok: true, status: 202, json: async () => ({}) };
+      if (url.includes('slack')) return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      throw new Error('GHL must not be called when SMS is disabled');
+    },
+  });
+  assert.equal((await service.send(message, route)).status, 'accepted');
+  assert.equal(calls.length, 2);
 });
 
 test('fans an approved message out to fixed email, Slack DM, and GHL workflow', async () => {
@@ -425,6 +446,19 @@ test('reports partial success without retrying accepted channels', async () => {
   const result = await service.send(message, parseRouteConfig(env)[0]);
   assert.equal(result.status, 'partial');
   assert.equal(count, 3);
+});
+
+test('GHL webhook acknowledgment cannot make up for a failed required channel', async () => {
+  const service = createSalesVoiceHandoff({
+    env,
+    rateLimit: async () => ({ allowed: true }),
+    fetch: async (url) => {
+      if (url.includes('sendgrid')) return { ok: false, status: 500, json: async () => ({}) };
+      if (url.includes('slack')) return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      return { ok: true, status: 200, json: async () => ({ received: true }) };
+    },
+  });
+  assert.equal((await service.send(message, parseRouteConfig(env)[0])).status, 'partial');
 });
 
 test('reports failure when every fixed delivery channel rejects the message', async () => {

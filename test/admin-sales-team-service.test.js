@@ -244,14 +244,28 @@ test('shared voice migration keeps routing server-only and single-use', () => {
   assert.doesNotMatch(sql, /grant [^;]* to (?:anon|authenticated)/);
 });
 
-test('draft normalization locks Call Connect and all three caller-message channels', () => {
+test('draft normalization locks Call Connect and requires email plus Slack while SMS is optional', () => {
   const draft = normalizeDraft({ ...member, ...assignment, ...config, ring_seconds: 10 });
   assert.equal(draft.assignment.call_connect_required, true);
   assert.equal(draft.assignment.ring_seconds, 20);
   assert.deepEqual([draft.config.notify_slack, draft.config.notify_sms, draft.config.notify_email], [true, true, true]);
+  assert.equal(normalizeDraft({ ...member, ...assignment, ...config, notify_sms: false }).config.notify_sms, false);
   assert.throws(() => normalizeDraft({ ...member, ...assignment, ...config, notify_slack: false }), /notifications are required/i);
+  assert.throws(() => normalizeDraft({ ...member, ...assignment, ...config, notify_email: false }), /notifications are required/i);
   assert.throws(() => normalizeDraft({ ...member, ...assignment, ...config, mobile_phone_e164: '720-555-1212' }), /\+1XXXXXXXXXX/);
   assert.throws(() => validateTransferDestinations({ member, assignment: { ...assignment, backup_transfer_phone_e164: member.mobile_phone_e164 } }, phone), /separate from the salesperson mobile/i);
+});
+
+test('SMS-optional apply migration preserves the guarded invoker function', () => {
+  const sql = fs.readFileSync(path.join(__dirname, '../supabase/migrations/20261002010000_sales_voice_sms_optional.sql'), 'utf8');
+  assert.match(sql, /create or replace function public\.apply_sales_team_configuration_v2\(/i);
+  assert.match(sql, /security invoker\s+set search_path = ''/i);
+  assert.match(sql, /coalesce\(\(p_config->>'notify_slack'\)::boolean, false\) is not true/);
+  assert.match(sql, /coalesce\(\(p_config->>'notify_email'\)::boolean, false\) is not true/);
+  assert.doesNotMatch(sql, /coalesce\(\(p_config->>'notify_sms'\)::boolean, false\) is not true/);
+  assert.match(sql, /true, coalesce\(\(p_config->>'notify_sms'\)::boolean, false\), true, p_generated_prompt/);
+  assert.match(sql, /revoke all on function public\.apply_sales_team_configuration_v2/);
+  assert.match(sql, /to service_role;/);
 });
 
 test('readiness requires all rep identities and both reusable GHL routing values', () => {
@@ -260,8 +274,8 @@ test('readiness requires all rep identities and both reusable GHL routing values
   assert.equal(missing.ready, false);
   assert.ok(missing.missing.includes('Slack member'));
   assert.ok(missing.missing.includes('GHL user routing value'));
-  const notifications = readinessFor({ member, assignment, config: { ...config, notify_sms: false }, phone });
-  assert.ok(notifications.missing.includes('Slack, GHL text, and Workspace email'));
+  const notifications = readinessFor({ member, assignment, config: { ...config, notify_sms: false }, phone: { ...phone, ghl_notification_workflow_id: null } });
+  assert.equal(notifications.ready, true);
 });
 
 test('QA line-3 staging relaxes only the two call-test attestations for the pinned test member', () => {
@@ -387,9 +401,9 @@ test('database rejection restores the prior GHL values without changing the user
   assert.equal(db.tables.sales_team_members[0].status, 'draft');
 });
 
-test('legacy notification-off drafts are rejected before any provider write', async () => {
+test('required notification-off drafts are rejected before any provider write', async () => {
   const db = makeDb();
-  db.tables.sales_team_config_drafts[0].payload.config.notify_sms = false;
+  db.tables.sales_team_config_drafts[0].payload.config.notify_email = false;
   let providerCalls = 0;
   await assert.rejects(
     applySalesTeamMember({ db, memberId: member.id, env: applyEnv, fetchImpl: async () => { providerCalls += 1; throw new Error('must not call'); } }),

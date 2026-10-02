@@ -252,9 +252,9 @@ async function routeForAssignmentDb(assignmentId, db, env = process.env, tokenHa
   const notifySlack = config.notify_slack === true;
   const notifySms = config.notify_sms === true;
   const ghlNotificationWebhook = notifySms ? ghlWebhookForNumber(ghlNumber, env) : '';
-  if (!notifyEmail || !notifySlack || !notifySms ||
+  if (!notifyEmail || !notifySlack ||
       !repName || !validEmail(repEmail) || !validE164(ghlNumber) ||
-      !validSlackUserId(slackUserId) || !ghlNotificationWebhook ||
+      !validSlackUserId(slackUserId) || (notifySms && !ghlNotificationWebhook) ||
       !validEmail(env.SALES_VOICE_FROM_EMAIL) || cleanText(env.SENDGRID_API_KEY, 500).length <= 20 ||
       cleanText(env.SLACK_SALES_WON_BOT_TOKEN, 500).length <= 20) throw new Error('Sales voice delivery route is incomplete');
   return Object.freeze({
@@ -385,7 +385,7 @@ function createSalesVoiceHandoff(options = {}) {
 
   async function send(input, route) {
     if (!routeModeEnabled || !route) return { status: 'unavailable' };
-    if (route.notifyEmail === false || route.notifySlack === false || route.notifySms === false) return { status: 'unavailable' };
+    if (route.notifyEmail === false || route.notifySlack === false) return { status: 'unavailable' };
     const reference = hash(`${route.routeKey}:${JSON.stringify(input)}`).slice(0, 32);
     try {
       if (!await reserve('sales_voice_handoff_global', 'all', 3600000, 100) ||
@@ -429,11 +429,12 @@ function createSalesVoiceHandoff(options = {}) {
       if (result.status !== 'fulfilled' || !result.value.ok) return false;
       if (channels[index].name === 'email') return result.value.status === 202;
       if (channels[index].name === 'slack') return result.value.body?.ok === true;
-      return true;
+      // A GHL webhook 2xx only acknowledges ingress; it does not prove SMS delivery.
+      return false;
     });
-    const acceptedCount = accepted.filter(Boolean).length;
+    const requiredAccepted = accepted.filter((ok, index) => ok && channels[index].name !== 'ghl').length;
     return {
-      status: acceptedCount === channels.length ? 'accepted' : acceptedCount > 0 ? 'partial' : 'failed',
+      status: requiredAccepted === 2 ? 'accepted' : requiredAccepted > 0 ? 'partial' : 'failed',
       reference
     };
   }

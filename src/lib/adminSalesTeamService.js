@@ -184,11 +184,11 @@ function normalizeDraft(body = {}, current = {}) {
     answer_approved_faqs: bool(body.answer_approved_faqs, current.config?.answer_approved_faqs !== false),
     schedule_demos: bool(body.schedule_demos, current.config?.schedule_demos !== false),
     notify_slack: true,
-    notify_sms: true,
+    notify_sms: bool(body.notify_sms, current.config?.notify_sms === true),
     notify_email: true,
   };
-  if ([body.notify_slack, body.notify_sms, body.notify_email].some((value) => value === false)) {
-    throw serviceError(400, 'notification_channels_required', 'Slack, GHL text, and Workspace email notifications are required for every active salesperson.', { notifications: 'required' });
+  if ([body.notify_slack, body.notify_email].some((value) => value === false)) {
+    throw serviceError(400, 'notification_channels_required', 'Slack and Workspace email notifications are required for every active salesperson.', { notifications: 'required' });
   }
   return { member, assignment, config };
 }
@@ -207,7 +207,7 @@ function readinessFor(record, env = process.env) {
   const { member, assignment, config, phone } = record;
   const sharedVoicePhone = record.shared_voice_phone || phone;
   const qaStaged = isQaStagedSalesLine(record, env) && env.SALES_TEAM_PROVIDER_SYNC_ENABLED === 'true';
-  if (config?.notify_slack !== true || config?.notify_sms !== true || config?.notify_email !== true) missing.push('Slack, GHL text, and Workspace email');
+  if (config?.notify_slack !== true || config?.notify_email !== true) missing.push('Slack and Workspace email');
   if (!member.workspace_email) missing.push('Workspace email');
   if (!member.mobile_phone_e164) missing.push('Mobile number');
   if (!member.sales_rep_user_id) missing.push('Sales dashboard user');
@@ -440,8 +440,8 @@ async function reconcileGhlChangesAfterDatabaseFailure(db, changes, env, fetchIm
 async function applySalesTeamMember({ db, memberId, replaceTeamMemberId = null, actorId, env = process.env, fetchImpl = global.fetch }) {
   const record = await loadMemberRecord({ db, memberId, env });
   const pendingConfig = record.pending_draft?.payload?.config;
-  if (pendingConfig && (pendingConfig.notify_slack !== true || pendingConfig.notify_sms !== true || pendingConfig.notify_email !== true)) {
-    throw serviceError(409, 'sales_notification_channels_required', 'Slack, GHL text, and Workspace email notifications must all be enabled before routing can be applied.', { notifications: 'required' });
+  if (pendingConfig && (pendingConfig.notify_slack !== true || pendingConfig.notify_email !== true)) {
+    throw serviceError(409, 'sales_notification_channels_required', 'Slack and Workspace email notifications must be enabled before routing can be applied.', { notifications: 'required' });
   }
   const readiness = readinessFor(record, env);
   if (!readiness.ready) {
@@ -538,7 +538,7 @@ async function applySalesTeamMember({ db, memberId, replaceTeamMemberId = null, 
     if (/sales_voice_line_token_stale/i.test(detail)) throw serviceError(409, 'sales_voice_line_token_stale', 'The company line token changed during this request. Verify the updated Grok line and apply again.');
     if (/sales_team_member_inactive/i.test(detail)) throw serviceError(409, 'sales_team_member_inactive', 'Reactivate this salesperson before applying their configuration.');
     if (/sales_phone_replacement_stale/i.test(detail)) throw serviceError(409, 'sales_phone_replacement_stale', 'The line assignment changed. Refresh and review the current salesperson before applying routing.');
-    if (/sales_notification_channels_required/i.test(detail)) throw serviceError(409, 'sales_notification_channels_required', 'Slack, GHL text, and Workspace email notifications must all be enabled before routing can be applied.', { notifications: 'required' });
+    if (/sales_notification_channels_required/i.test(detail)) throw serviceError(409, 'sales_notification_channels_required', 'Slack and Workspace email notifications must be enabled before routing can be applied.', { notifications: 'required' });
     if (/sales_rep_not_found/i.test(detail)) throw serviceError(409, 'sales_rep_not_found', 'Create the sales-dashboard user before applying routing.', { sales_rep_user_id: 'not_found' });
     if (result.error.code === '23505') throw serviceError(409, 'sales_team_assignment_conflict', 'That salesperson, GHL number, or Grok agent is already active on another assignment.');
     throw Object.assign(new Error('Sales team configuration apply failed'), { cause: result.error });

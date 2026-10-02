@@ -50,7 +50,12 @@ const message = {
 test('validates exact caller-approved fields', () => {
   assert.deepEqual(validateSalesVoiceMessage(message), message);
   assert.equal(validateSalesVoiceMessage({ ...message, confirmed: false }), null);
-  assert.equal(validateSalesVoiceMessage({ ...message, callback_phone: '720-555-1212' }), null);
+  for (const phone of ['720-555-1212', '(720) 555-1212', '1 720.555.1212', '+1 (720) 555-1212']) {
+    assert.equal(validateSalesVoiceMessage({ ...message, callback_phone: phone }).callback_phone, '+17205551212');
+  }
+  for (const phone of ['+7205551212', '7205551212 ext 9', '7205551212#9', '7205551212,3035551111', '72055512123', '２０２５５５１２１２', '720/555/1212', '+1+7205551212']) {
+    assert.equal(validateSalesVoiceMessage({ ...message, callback_phone: phone }), null);
+  }
   assert.equal(validateSalesVoiceMessage({ ...message, contact_email: 'not-an-email' }), null);
   assert.equal(validateSalesVoiceMessage({ ...message, password: 'nope' }), null);
   assert.equal(validateSalesVoiceMessage({ ...message, to: 'other@example.com' }), null);
@@ -255,9 +260,11 @@ test('shared Grok entrypoint records a line, creates one context, and sends only
     },
   };
   const sends = [];
+  const diagnostics = [];
   const app = express();
   app.use('/voice-handoff', createSalesVoiceHandoffRouter({
     db,
+    logger: { warn: (...parts) => diagnostics.push(parts) },
     env: {
       ...env,
       SALES_VOICE_DB_ROUTES_ENABLED: 'true',
@@ -270,16 +277,29 @@ test('shared Grok entrypoint records a line, creates one context, and sends only
   try {
     const base = `http://127.0.0.1:${server.address().port}/voice-handoff`;
     const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` };
+    assert.equal((await fetch(`${base}/route`, { method: 'POST', headers, body: JSON.stringify({ caller_phone: '720-555-1212' }) })).status, 400);
     const registered = await fetch(`${base}/route`, { method: 'POST', headers, body: JSON.stringify({ caller_phone: '+17205551212' }) });
     assert.equal(registered.status, 200);
+    assert.equal((await fetch(`${base}/context`, { method: 'POST', headers, body: JSON.stringify({ caller_phone: '720-555-1212' }) })).status, 400);
     const contextResponse = await fetch(`${base}/context`, { method: 'POST', headers, body: JSON.stringify({ caller_phone: '+17205551212' }) });
     assert.equal(contextResponse.status, 200);
     const context = await contextResponse.json();
     assert.equal(context.representative_name, 'Christopher Turean');
     assert.match(context.routing_reference, /^[A-Za-z0-9_-]{48}$/);
-    const approved = { ...message, routing_reference: context.routing_reference };
+    const approved = { ...message, callback_phone: '(720) 555-1212', routing_reference: context.routing_reference };
+    const invalid = await fetch(base, { method: 'POST', headers, body: JSON.stringify({ ...approved, callback_phone: '720-555-1212 ext 9' }) });
+    assert.equal(invalid.status, 400);
+    assert.deepEqual(await invalid.json(), { status: 'invalid_request', reason: 'invalid_phone_format' });
+    assert.equal(claimed, false);
+    assert.equal(sends.length, 0);
+    assert.deepEqual(diagnostics, [['sales_voice_handoff_invalid_request', 'invalid_phone_format']]);
+    const missingReference = await fetch(base, { method: 'POST', headers, body: JSON.stringify({ ...message }) });
+    assert.equal(missingReference.status, 400);
+    assert.deepEqual(await missingReference.json(), { status: 'invalid_request', reason: 'missing_or_invalid_reference' });
+    assert.equal(claimed, false);
     assert.equal((await fetch(base, { method: 'POST', headers, body: JSON.stringify(approved) })).status, 200);
     assert.equal(sends[0].resolved.repName, 'Christopher Turean');
+    assert.equal(sends[0].input.callback_phone, '+17205551212');
     assert.equal(Object.hasOwn(sends[0].input, 'routing_reference'), false);
     assert.equal((await fetch(base, { method: 'POST', headers, body: JSON.stringify(approved) })).status, 409);
     assert.equal(sends.length, 1);
@@ -426,7 +446,8 @@ test('agent prompt keeps implementation details out of speech and requires conse
 
 test('reusable Grok bootstrap prompt loads current line context and keeps tool names out of speech', () => {
   const prompt = buildSalesVoiceBootstrapPrompt();
-  assert.match(prompt, /Then use the configured context action once/);
+  assert.match(prompt, /How can I help you today\?/);
+  assert.match(prompt, /Use the configured context action once/);
   assert.match(prompt, /routing_reference exactly/);
   assert.match(prompt, /representative_name/);
   assert.match(prompt, /Never say action, tool, or function names/);

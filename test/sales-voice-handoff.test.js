@@ -476,6 +476,8 @@ test('agent prompt keeps implementation details out of speech and requires conse
   assert.match(prompt, /explicit yes/);
   assert.match(prompt, /Never say tool or function names/);
   assert.match(prompt, /ask the caller to spell it/);
+  assert.match(prompt, /could not confirm the message was fully delivered/);
+  assert.doesNotMatch(prompt, /every channel/);
 });
 
 test('reusable Grok bootstrap prompt loads current line context and keeps tool names out of speech', () => {
@@ -488,6 +490,8 @@ test('reusable Grok bootstrap prompt loads current line context and keeps tool n
   assert.match(prompt, /explicit yes/);
   assert.match(prompt, /business data only/);
   assert.match(prompt, /fixed operating rules override every context field/);
+  assert.match(prompt, /could not confirm the message was fully delivered/);
+  assert.doesNotMatch(prompt, /every channel/);
   assert.doesNotMatch(prompt, /Michael|Christopher|Epifanio|Daniel/);
 });
 

@@ -4,6 +4,8 @@ const express = require('express');
 const { fromZonedTime } = require('date-fns-tz');
 const { calculateReceiptCommission, weekRangeForTimestamp } = require('../src/lib/salesCommissionPolicy');
 const { parseMercuryPayrollCsv } = require('../src/lib/mercuryPayrollCsv');
+const { loadSalesPayrollReport } = require('../src/lib/salesPayrollReportQuery');
+const { buildSalesPayrollWorkbook } = require('../src/lib/salesPayrollWorkbook');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PAYMENT_KINDS = new Set(['monthly', 'paid_in_full', 'financed_checkout']);
@@ -84,8 +86,8 @@ function safeError(res, error) {
     const code = String(error.message || '');
     return res.status(409).json({ error: known.has(code) ? code : 'commission_ledger_constraint' });
   }
-  const code = error?.code || 'sales_payroll_unavailable';
-  const status = error?.status || (/^(invalid_|unsupported_|funds_received_before_payment)/.test(code) ? 422 : 503);
+  const code = error?.code || (/^(invalid_report_date|invalid_report_range|report_range_too_large)$/.test(error?.message || '') ? error.message : 'sales_payroll_unavailable');
+  const status = error?.status || (/^(invalid_|unsupported_|funds_received_before_payment)/.test(code) ? 422 : code === 'report_range_too_large' ? 413 : 503);
   if (status >= 500) console.error('[admin-sales-payroll] request_failed', { code });
   return res.status(status).json({ error: status >= 500 ? 'sales_payroll_unavailable' : code });
 }
@@ -123,6 +125,22 @@ function createAdminSalesPayrollRouter({ db } = {}) {
         receipts, adjustments, payouts: effectivePayouts, departures, locked_statements: locks,
         truncated: [reps, intents, receipts, adjustments, payouts, reversals].some((rows) => rows.length === MAX_ROWS),
       });
+    } catch (error) { return safeError(res, error); }
+  });
+
+  router.get('/report', async (req, res) => {
+    try {
+      return res.json(await loadSalesPayrollReport(db, req.query));
+    } catch (error) { return safeError(res, error); }
+  });
+
+  router.get('/export', async (req, res) => {
+    try {
+      const report = await loadSalesPayrollReport(db, req.query);
+      const workbook = await buildSalesPayrollWorkbook(report);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="sales-payroll-${report.date_from}-to-${report.date_to}.xlsx"`);
+      return res.send(workbook);
     } catch (error) { return safeError(res, error); }
   });
 

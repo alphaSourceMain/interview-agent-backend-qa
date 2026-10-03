@@ -5,6 +5,7 @@ const test = require('node:test');
 const express = require('express');
 const { createAdminSalesPayrollRouter } = require('../routes/adminSalesPayroll');
 const { HEADERS } = require('../src/lib/mercuryPayrollCsv');
+const JSZip = require('jszip');
 
 async function withServer(callback, db = {}) {
   const app = express();
@@ -28,6 +29,58 @@ test('payroll automation stays off even if an admin requests ON', async () => {
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), { error: 'automation_not_implemented', enabled: false });
   });
+});
+
+test('date-filtered report and Excel export reconcile from the same reviewed source', async () => {
+  const repId = '11111111-1111-4111-8111-111111111111';
+  const intentId = '22222222-2222-4222-8222-222222222222';
+  const tables = {
+    sales_reps: [{ user_id: repId, display_name: 'Synthetic Rep', email: 'rep@example.invalid', created_at: '2026-09-01T00:00:00Z' }],
+    sales_commission_receipts: [{ id: '33333333-3333-4333-8333-333333333333', rep_user_id: repId, purchase_intent_id: intentId,
+      funds_received_at: '2026-10-02T18:00:00Z', reviewed_at: '2026-10-02T19:00:00Z', payment_kind: 'monthly',
+      gross_membership_cents: 29900, discount_cents: 1000, provider_fee_cents: 900, net_membership_cents: 28000,
+      commission_cents: 14000 }],
+    sales_commission_adjustments: [],
+    public_purchase_intents: [{ id: intentId, created_by_user_id: repId, channel: 'sales_assisted', company_legal_name: 'Synthetic Buyer' }],
+  };
+  const db = { from(table) {
+    const filters = []; let ids = null; let range = null;
+    const builder = {
+      select() { return builder; }, order() { return builder; },
+      gte(column, value) { filters.push([column, 'gte', value]); return builder; },
+      lt(column, value) { filters.push([column, 'lt', value]); return builder; },
+      lte(column, value) { filters.push([column, 'lte', value]); return builder; },
+      in(_column, value) { ids = value; return builder; }, limit() { return builder; },
+      range(start, end) { range = [start, end]; return builder; },
+      then(resolve) {
+        let data = tables[table] || [];
+        if (ids) data = data.filter((row) => ids.includes(row.id));
+        for (const [column, operation, value] of filters) data = data.filter((row) => operation === 'gte' ? row[column] >= value : operation === 'lt' ? row[column] < value : row[column] <= value);
+        const count = data.length;
+        if (range) data = data.slice(range[0], range[1] + 1);
+        resolve({ data, count, error: null });
+      },
+    };
+    return builder;
+  } };
+  await withServer(async (base) => {
+    const path = '/admin/sales-payroll';
+    const query = '?date_from=2026-10-01&date_to=2026-10-03';
+    const reportResponse = await fetch(`${base}${path}/report${query}`);
+    assert.equal(reportResponse.status, 200);
+    const report = await reportResponse.json();
+    assert.equal(report.totals.net_revenue_cents, 28000);
+    assert.equal(report.totals.sale_count, 1);
+    const exportResponse = await fetch(`${base}${path}/export${query}`);
+    assert.equal(exportResponse.status, 200);
+    assert.match(exportResponse.headers.get('content-type'), /spreadsheetml/);
+    const workbook = await JSZip.loadAsync(await exportResponse.arrayBuffer());
+    const summary = await workbook.file('xl/worksheets/sheet1.xml').async('string');
+    assert.match(summary, /<c r="E6" s="2"><v>280<\/v><\/c>/);
+    const invalid = await fetch(`${base}${path}/report?date_from=2026-02-30&date_to=2026-03-01`);
+    assert.equal(invalid.status, 422);
+    assert.deepEqual(await invalid.json(), { error: 'invalid_report_date' });
+  }, db);
 });
 
 test('payroll overview excludes a reversed bank payout from paid totals', async () => {

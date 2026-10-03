@@ -3,6 +3,9 @@
 begin;
 insert into public.sales_reps(user_id, email, display_name, active) values
   ('11111111-1111-4111-8111-111111111111', 'synthetic-rep@example.invalid', 'Synthetic Rep', true);
+insert into public.public_purchase_intents(id, status, channel, created_by_user_id) values
+  ('33333333-3333-4333-8333-333333333333', 'completed', 'sales_assisted',
+   '11111111-1111-4111-8111-111111111111');
 insert into public.sales_commission_receipts
   (id, purchase_intent_id, rep_user_id, provider, provider_payment_id, payment_kind,
    payment_success_at, funds_received_at, qualification_closed_at, first_term_start_at,

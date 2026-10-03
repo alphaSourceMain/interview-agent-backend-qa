@@ -119,6 +119,38 @@ create table if not exists public.sales_commission_statement_locks (
   primary key (rep_user_id, week_start)
 );
 
+-- The API validates attribution, and the ledger repeats it so a privileged
+-- direct insert cannot make a self-service purchase commissionable.
+create or replace function public.require_sales_commission_sales_assisted()
+returns trigger language plpgsql set search_path = '' as $$
+declare
+  intent_id uuid;
+  representative_id uuid;
+begin
+  if tg_table_name = 'sales_commission_receipts' then
+    intent_id := new.purchase_intent_id;
+    representative_id := new.rep_user_id;
+  else
+    select r.purchase_intent_id, r.rep_user_id into intent_id, representative_id
+    from public.sales_commission_receipts r where r.id = new.receipt_id;
+  end if;
+  if intent_id is null or not exists (
+    select 1 from public.public_purchase_intents i
+    where i.id = intent_id and i.channel = 'sales_assisted'
+      and i.status = 'completed' and i.created_by_user_id = representative_id
+  ) then
+    raise exception 'commission_sale_not_sales_assisted';
+  end if;
+  return new;
+end;
+$$;
+create trigger sales_commission_receipt_attribution before insert on public.sales_commission_receipts
+  for each row execute function public.require_sales_commission_sales_assisted();
+create trigger sales_commission_adjustment_attribution before insert on public.sales_commission_adjustments
+  for each row execute function public.require_sales_commission_sales_assisted();
+create trigger sales_commission_payout_attribution before insert on public.sales_commission_payouts
+  for each row execute function public.require_sales_commission_sales_assisted();
+
 -- An approved ledger row is never edited or deleted. Corrections are new, linked rows.
 create or replace function public.reject_sales_commission_ledger_mutation()
 returns trigger language plpgsql as $$
@@ -344,6 +376,7 @@ revoke truncate, delete on public.sales_commission_departures, public.sales_comm
   public.sales_commission_adjustments, public.sales_commission_payouts,
   public.sales_commission_statement_locks from service_role;
 revoke all on function public.reject_sales_commission_ledger_mutation() from public, anon, authenticated;
+revoke all on function public.require_sales_commission_sales_assisted() from public, anon, authenticated;
 revoke all on function public.check_sales_commission_receipt_balance() from public, anon, authenticated;
 revoke all on function public.check_sales_commission_week_unlocked() from public, anon, authenticated;
 revoke all on function public.check_sales_commission_departure_cutoff() from public, anon, authenticated;

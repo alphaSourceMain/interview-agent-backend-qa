@@ -30,6 +30,25 @@ test('payroll automation stays off even if an admin requests ON', async () => {
   });
 });
 
+test('payroll overview excludes a reversed bank payout from paid totals', async () => {
+  const tables = {
+    sales_commission_payouts: [
+      { id: 'bank-payout', receipt_id: 'receipt-1', bank_transaction_id: 'bank-1', amount_cents: 1000 },
+      { id: 'manual-payout', receipt_id: 'receipt-1', bank_transaction_id: null, amount_cents: 500 },
+    ],
+    sales_commission_bank_reversals: [{ bank_transaction_id: 'bank-1' }],
+  };
+  const db = { from(table) { return { select() { return { order() { return {
+    limit: async () => ({ data: tables[table] || [], error: null }),
+  }; } }; } }; } };
+  await withServer(async (base) => {
+    const response = await fetch(`${base}/admin/sales-payroll`);
+    assert.equal(response.status, 200);
+    const overview = await response.json();
+    assert.deepEqual(overview.payouts.map((row) => row.id), ['manual-payout']);
+  }, db);
+});
+
 test('reviewing one monthly receipt stores one net payment, not twelve annualized payments', async () => {
   const saleId = '22222222-2222-4222-8222-222222222222';
   const agreementId = '33333333-3333-4333-8333-333333333333';

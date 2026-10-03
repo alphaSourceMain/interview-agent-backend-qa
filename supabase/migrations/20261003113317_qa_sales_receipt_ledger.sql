@@ -67,6 +67,7 @@ from public.public_purchase_intents i
 join public.membership_agreements a on a.id = i.agreement_id and a.client_id = i.client_id
 join public.clients c on c.id = i.client_id
 where i.status = 'completed'
+  and i.channel = 'sales_assisted'
   and i.activated_at is not null
   and i.created_by_user_id is not null
   and a.status = 'signed' and a.checkout_status = 'paid'
@@ -142,6 +143,9 @@ declare
   final_day_recorded date;
   cutoff_exclusive timestamptz;
 begin
+  -- Serialize a final-day entry and a receipt for the same representative.
+  -- Without this lock, concurrent uncommitted inserts can each miss the other.
+  perform pg_advisory_xact_lock(hashtextextended('commission_departure:' || new.rep_user_id::text, 0));
   if tg_table_name = 'sales_commission_departures' then
     cutoff_exclusive := (new.final_day + 31)::timestamp at time zone 'America/Denver';
     if exists (
@@ -335,6 +339,10 @@ grant all on public.sales_commission_receipts to service_role;
 grant all on public.sales_commission_adjustments to service_role;
 grant all on public.sales_commission_payouts to service_role;
 grant all on public.sales_commission_statement_locks to service_role;
+-- Row triggers reject edits, but TRUNCATE does not fire row triggers.
+revoke truncate, delete on public.sales_commission_departures, public.sales_commission_receipts,
+  public.sales_commission_adjustments, public.sales_commission_payouts,
+  public.sales_commission_statement_locks from service_role;
 revoke all on function public.reject_sales_commission_ledger_mutation() from public, anon, authenticated;
 revoke all on function public.check_sales_commission_receipt_balance() from public, anon, authenticated;
 revoke all on function public.check_sales_commission_week_unlocked() from public, anon, authenticated;

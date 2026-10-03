@@ -23,11 +23,11 @@ begin
   insert into public.public_purchase_intents
     (id, client_id, agreement_id, company_legal_name, buyer_email,
      selected_plan_key, selected_billing_cadence, created_by_user_id,
-     activated_at, status)
+     activated_at, status, channel)
     values (tested_intent, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
             'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'Synthetic QA',
             'qa@example.invalid', 'basic', 'monthly', tested_rep,
-            '2026-01-10T18:00:00Z', 'completed');
+            '2026-01-10T18:00:00Z', 'completed', 'sales_assisted');
   if (select count(*) from public.sales_commission_review_candidates) <> 1 then
     raise exception 'active completed sale omitted from review view';
   end if;

@@ -213,8 +213,8 @@ function createAdminSalesPayrollRouter({ db } = {}) {
       const fundsAt = timestamp(body.funds_received_at, 'funds_received_at');
       if (new Date(paymentAt) > new Date()) throw failure('future_payment_not_allowed');
       if (new Date(fundsAt) > new Date()) throw failure('future_funds_not_allowed');
-      const intent = await one(db, 'public_purchase_intents', 'id,status,created_by_user_id,agreement_id,client_id,activated_at,selected_billing_cadence,platform_fee_cents', 'id', intentId);
-      if (!intent || intent.status !== 'completed' || !intent.created_by_user_id || !intent.agreement_id || !intent.client_id || !intent.activated_at) throw failure('unverified_qualifying_sale');
+      const intent = await one(db, 'public_purchase_intents', 'id,status,channel,created_by_user_id,agreement_id,client_id,activated_at,selected_billing_cadence,platform_fee_cents', 'id', intentId);
+      if (!intent || intent.status !== 'completed' || intent.channel !== 'sales_assisted' || !intent.created_by_user_id || !intent.agreement_id || !intent.client_id || !intent.activated_at) throw failure('unverified_qualifying_sale');
       const client = await one(db, 'clients', 'id,billing_status,subscription_status', 'id', intent.client_id);
       if (!isActiveClient(client)) throw failure('client_not_active');
       const cadence = String(intent.selected_billing_cadence || '').toLowerCase();

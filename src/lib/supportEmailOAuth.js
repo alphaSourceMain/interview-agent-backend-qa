@@ -101,6 +101,11 @@ function createSupportEmailOAuth({ env = process.env, fetchImpl = fetch, now = D
     }
   }
   return {
+    // Installer failure cleanup only; never wire this to a browser-selected token.
+    async revoke(refreshToken) {
+      if (!safeValue(refreshToken)) fail('SUPPORT_EMAIL_OAUTH_INVALID_REFRESH');
+      return revokeRejected({}, refreshToken);
+    },
     begin() {
       const time = now();
       if (pending && time < pending.expiresAt) fail('SUPPORT_EMAIL_OAUTH_PENDING');

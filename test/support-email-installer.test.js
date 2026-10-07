@@ -100,7 +100,8 @@ function harness(overrides={}) {
   async function start(){const r=await request('GET',new URL(i.bootstrapUrl).pathname,{'sec-fetch-site':'none'});
     const cookie=r.headers['Set-Cookie'].split(';')[0],csrf=r.body.match(/name="csrf" value="([^"]+)"/)[1];return{cookie,csrf,r};}
   async function authorize(){const s=await start();const r=await request('POST','/oauth/connect',{cookie:s.cookie,origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},'csrf='+s.csrf);
-    return{...s,auth:r,state:new URL(r.headers.Location).searchParams.get('state')};}
+    const authUrl = r.body.match(/href="([^"]+)"/)[1].replace(/&amp;/g,'&');
+    return{...s,auth:r,authUrl,state:new URL(authUrl).searchParams.get('state')};}
   return{i,request,start,authorize,calls,saves,currentEnv,advance:ms=>{time+=ms;}};
 }
 test('local connect form has cookie and restrictive headers, bootstrap is one-use',async()=>{
@@ -109,10 +110,10 @@ test('local connect form has cookie and restrictive headers, bootstrap is one-us
   assert.match(s.r.headers['Content-Security-Policy'],/frame-ancestors 'none'/);
   assert.equal((await h.request('GET',new URL(h.i.bootstrapUrl).pathname)).status,403);assert.equal(h.calls.length,0);
 });
-for(const variant of ['host','cross-site','origin','absolute','oversize','query','method'])test(`bootstrap rejects ${variant} without consuming session`,async()=>{
+for(const variant of ['host','origin','absolute','oversize','query','method'])test(`bootstrap rejects ${variant} without consuming session`,async()=>{
   const h=harness(),url=new URL(h.i.bootstrapUrl).pathname;
   const r=await h.request(variant==='method'?'POST':'GET',variant==='absolute'?h.i.bootstrapUrl:variant==='oversize'?'/'+ 'a'.repeat(8192):variant==='query'?url+'?extra=1':url,
-    variant==='host'?{host:'evil.invalid:43871'}:variant==='origin'?{origin:'https://evil.invalid'}:variant==='cross-site'?{'sec-fetch-site':'cross-site'}:{});
+    variant==='host'?{host:'evil.invalid:43871'}:variant==='origin'?{origin:'https://evil.invalid'}:{});
   assert.equal(r.status,403);assert.equal((await h.start()).r.status,200);assert.equal(h.calls.length,0);
 });
 for(const variant of ['no-cookie','duplicate-cookie','wrong-origin','no-origin','wrong-csrf','duplicate-csrf','extra-field','oversize','wrong-type'])test(`authorize rejects ${variant}`,async()=>{
@@ -124,11 +125,27 @@ for(const variant of ['no-cookie','duplicate-cookie','wrong-origin','no-origin',
   assert.equal((await h.request('POST','/oauth/connect',headers,body)).status,403);assert.equal(h.calls.length,0);
 });
 test('single callback stores verified QA grant with no credential in response',async()=>{
-  const h=harness(),s=await h.authorize();assert.equal(s.auth.status,303);assert.equal(new URL(s.auth.headers.Location).searchParams.get('scope'),READONLY_SCOPE);
+  const h=harness(),s=await h.authorize();assert.equal(s.auth.status,200);assert.equal(new URL(s.authUrl).searchParams.get('scope'),READONLY_SCOPE);
+  assert.equal(s.auth.headers['Referrer-Policy'],'no-referrer');assert.match(s.auth.headers['Content-Security-Policy'],/form-action 'none'/);
   const url='/oauth/callback?state='+s.state+'&code=synthetic-code&scope='+encodeURIComponent(READONLY_SCOPE)+'&authuser=2&prompt=consent&iss=https%3A%2F%2Faccounts.google.com';
   const r=await h.request('GET',url,{cookie:s.cookie});assert.equal(r.terminal,'CONNECTED');assert.equal(h.saves.length,1);assert.equal(h.saves[0][1].mailbox,env().SUPPORT_EMAIL_MAILBOX);
   const exposed=JSON.stringify(r);for(const value of ['synthetic-refresh','synthetic-access','synthetic-code',s.state,client.clientSecret])assert.equal(exposed.includes(value),false);
   assert.equal((await h.request('GET',url,{cookie:s.cookie})).status,403);assert.equal(h.calls.filter(c=>c.url.endsWith('/token')).length,1);
+});
+test('private bootstrap can open from desktop/chat cross-site navigation',async()=>{
+  const h=harness();const r=await h.request('GET',new URL(h.i.bootstrapUrl).pathname,{'sec-fetch-site':'cross-site'});assert.equal(r.status,200);assert.equal(h.calls.length,0);
+});
+test('no-referrer Chrome null origin allowed only for same-origin document navigation plus cookie/CSRF',async()=>{
+  const h=harness(),s=await h.start();
+  const headers={cookie:s.cookie,origin:'null','sec-fetch-site':'same-origin','sec-fetch-mode':'navigate','sec-fetch-dest':'document','content-type':'application/x-www-form-urlencoded'};
+  const r=await h.request('POST','/oauth/connect',headers,'csrf='+s.csrf);assert.equal(r.status,200);assert.match(r.body,/Continue to Google/);assert.equal(h.calls.length,0);
+});
+for(const missing of ['sec-fetch-site','sec-fetch-mode','sec-fetch-dest','cookie'])test(`null origin missing ${missing} rejected`,async()=>{
+  const h=harness(),s=await h.start();const headers={cookie:s.cookie,origin:'null','sec-fetch-site':'same-origin','sec-fetch-mode':'navigate','sec-fetch-dest':'document','content-type':'application/x-www-form-urlencoded'};
+  delete headers[missing];assert.equal((await h.request('POST','/oauth/connect',headers,'csrf='+s.csrf)).status,403);assert.equal(h.calls.length,0);
+});
+test('null cross-site origin cannot connect even with owner-cookie and CSRF',async()=>{
+  const h=harness(),s=await h.start();assert.equal((await h.request('POST','/oauth/connect',{cookie:s.cookie,origin:'null','sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','sec-fetch-dest':'document','content-type':'application/x-www-form-urlencoded'},'csrf='+s.csrf)).status,403);
 });
 for(const variant of ['no-cookie','duplicate-state','unknown-key','both-code-error','missing-state','wrong-method','wrong-iss'])test(`callback rejects ${variant} without exchange`,async()=>{
   const h=harness(),s=await h.authorize();let url='/oauth/callback?state='+s.state+'&code=synthetic-code';

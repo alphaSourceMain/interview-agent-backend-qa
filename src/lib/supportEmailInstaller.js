@@ -135,7 +135,8 @@ function createInstaller({ env, client, destination, fetchImpl = fetch, now = Da
       const u = new URL(url, ORIGIN);
       if (stage === 'new' && method === 'GET' && u.pathname === '/oauth/bootstrap/' + bootstrap && !u.search) {
         if (h.origin && h.origin !== ORIGIN) return denied();
-        if (h['sec-fetch-site'] && !['none', 'same-origin'].includes(h['sec-fetch-site'])) return denied();
+        // The unpredictable one-use bootstrap URL is also opened from chat/desktop links.
+        // Cross-site navigation alone is not authority to connect; cookie+CSRF still bind POST.
         stage = 'form';
         return response(200, '<h1>alphy QA connection</h1><p>Connect only alphy@alphasourceai.com with Gmail read-only access. No sending or automatic processing.</p>' +
           '<p>Client: '+CLIENT+'</p><p>Redirect: '+REDIRECT+'</p><p>Grant: /Users/jasongardner/Downloads/alphy-support-qa/grant.json</p>' +
@@ -145,14 +146,20 @@ function createInstaller({ env, client, destination, fetchImpl = fetch, now = Da
       }
       if (!cookie(h.cookie)) return denied();
       if (u.pathname === '/oauth/connect' && method === 'POST' && stage === 'form') {
-        if (u.search || h.origin !== ORIGIN || h['content-type'] !== 'application/x-www-form-urlencoded' || Buffer.byteLength(body) > 256) return denied();
+        const localPost = h.origin === ORIGIN || (h.origin === 'null' && h['sec-fetch-site'] === 'same-origin' &&
+          h['sec-fetch-mode'] === 'navigate' && h['sec-fetch-dest'] === 'document');
+        // Chrome's no-referrer form navigation supplies Origin:null. Never accept an unqualified null origin.
+        if (u.search || !localPost || h['content-type'] !== 'application/x-www-form-urlencoded' || Buffer.byteLength(body) > 256) return denied();
         const p = new URLSearchParams(body);
         if ([...p.keys()].length !== 1 || !equal(p.get('csrf'), csrf)) return denied();
         gates(env); stage = 'waiting';
         const auth = new URL(oauth.begin());
         if (auth.origin + auth.pathname !== 'https://accounts.google.com/o/oauth2/v2/auth' || auth.searchParams.get('client_id') !== CLIENT ||
             auth.searchParams.get('redirect_uri') !== REDIRECT || auth.searchParams.get('scope') !== READONLY_SCOPE) { stage='done'; return ended('FAILED'); }
-        return response(303, '', { Location: auth.href });
+        // A cross-origin form redirect conflicts with Chrome form-action enforcement.
+        // Use an explicit, generated-only link; no scripts or weaker CSP/referrer policy.
+        return response(200, '<h1>Continue to Google</h1><p>Choose only alphy@alphasourceai.com. Gmail read-only; sending stays off.</p>' +
+          '<a rel="noreferrer noopener" href="'+auth.href.replace(/&/g,'&amp;')+'">Continue to Google — alphy read-only</a>');
       }
       if (u.pathname === '/oauth/callback' && method === 'GET' && stage === 'waiting') {
         stage = 'busy'; // First authenticated exact-path callback is terminal, even malformed.

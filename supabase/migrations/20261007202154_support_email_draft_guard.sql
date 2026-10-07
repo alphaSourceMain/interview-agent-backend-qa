@@ -55,7 +55,8 @@ $$;
 create function private_support_email.confirmed_user(p_email text)
 returns uuid language sql security definer set search_path = '' as $$
   select case when count(*) = 1 then (array_agg(id))[1] else null end
-  from auth.users where lower(email) = p_email and email_confirmed_at is not null
+  from auth.users where current_setting('role', true) = 'service_role' and auth.uid() is null
+    and lower(email) = p_email and email_confirmed_at is not null
     and deleted_at is null and (banned_until is null or banned_until <= now());
 $$;
 create function public.support_email_confirmed_user(p_email text)

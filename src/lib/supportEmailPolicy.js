@@ -16,8 +16,9 @@ function header(message, name) {
 // Intentionally reject exotic/multiple mailbox forms rather than guessing a recipient.
 function address(value) {
   if (/[\r\n,;:]/.test(value)) return null;
-  const match = value.match(/^(?:[^<>]*<)?([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)>?$/i);
-  return match ? match[1].toLowerCase() : null;
+  const envelope = value.match(/^(?:[^<>]*<([^<>]+)>|([^<>\s]+))$/);
+  const email = envelope && (envelope[1] || envelope[2]);
+  return email && /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i.test(email) ? email.toLowerCase() : null;
 }
 
 function bodyText(part, budget = { parts: 0, bytes: 0 }) {

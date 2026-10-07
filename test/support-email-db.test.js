@@ -5,9 +5,10 @@ const { promisify } = require('node:util');
 const { randomBytes } = require('node:crypto');
 const exec = promisify(execFile);
 const socket = process.env.SUPPORT_EMAIL_TEST_PG_SOCKET;
-const args = ['-h', socket || '', '-p', '55473', '-U', 'support_email_test', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-Atc'];
+const database = process.env.SUPPORT_EMAIL_TEST_PG_DATABASE || 'postgres';
+const args = ['-h', socket || '', '-p', '55473', '-U', 'support_email_test', '-d', database, '-v', 'ON_ERROR_STOP=1', '-Atc'];
 // Only the disposable socket path can enable this test; no production/QA connection URL accepted.
-const disposable = /^\/private\/tmp\/alphascreen-support-email-db\.[a-zA-Z0-9]+$/.test(socket || '');
+const disposable = /^\/private\/tmp\/alphascreen-support-email-db\.[a-zA-Z0-9]+$/.test(socket || '') && /^(?:postgres|support_email_r\d+)$/.test(database);
 test('real database concurrent claim commits one winner', { skip: !disposable }, async () => {
   const keys = Array.from({ length: 3 }, () => randomBytes(32).toString('hex'));
   const query = `set role service_role; select public.claim_support_email_draft('${keys[0]}','${keys[1]}','${keys[2]}');`;

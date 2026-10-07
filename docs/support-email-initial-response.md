@@ -21,7 +21,7 @@ The model gets static knowledge and the untrusted plain-text question, with emai
 
 ## Storage
 
-CLI-generated migration creates `private_support_email.drafts`, with RLS, revoked public/browser grants and service-only RPC functions. SHA256 keys uniquely identify mailbox/thread, mailbox/RFC Message-ID and mailbox/Gmail message. The atomic claim commits before model work. The one narrow Auth lookup is a private, service-only SECURITY DEFINER function with an empty search path; a public SECURITY INVOKER wrapper exposes no auth row. No frontend route or permission is added.
+CLI-generated migration creates `private_support_email.drafts`, with RLS, revoked public/browser grants and service-only RPC functions. SHA256 keys uniquely identify mailbox/thread, mailbox/RFC Message-ID and mailbox/Gmail message. The atomic claim commits before model work. The one narrow Auth lookup is a private, service-only SECURITY DEFINER function with an empty search path; its role guard requires `service_role` with no end-user `auth.uid()`. A public SECURITY INVOKER wrapper exposes no auth row. No frontend route or permission is added.
 
 Bodies expire after seven days. `purge_support_email_draft_bodies()` erases expired bodies but retains duplicate-protection keys. A reviewed maintenance schedule must be installed before live processing; expiry alone is not deletion. Never automatically clear claims or retry stuck/unknown generation. An operator may review failure reason codes, not blindly replay mail. Logs must omit body, addresses, access tokens, raw provider errors and connection strings.
 

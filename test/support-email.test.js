@@ -41,6 +41,7 @@ for (const [name, value] of [
   ['Auto-Submitted', 'auto-replied'], ['X-Auto-Response-Suppress', 'All'], ['Return-Path', '<>'], ['Message-ID', 'malformed'],
 ]) test(`suppress ${name}=${value}`, () => { const m = fixture(); setHeader(m, name, value); assert.equal(classify(m).eligible, false); });
 test('duplicate singleton headers cannot pick a sender', () => { const m = fixture(); m.payload.headers.push({ name: 'From', value: 'second@example.invalid' }); assert.equal(classify(m).eligible, false); });
+test('unbalanced mailbox delimiters are rejected', () => { for (const value of ['customer@example.invalid>', 'Customer <customer@example.invalid', 'Customer <customer@example.invalid>>']) { const m = fixture(); setHeader(m, 'From', value); assert.equal(classify(m).eligible, false); } });
 test('old message and baseline history are rejected', () => { const m = fixture(); m.internalDate = '1'; assert.equal(classify(m).eligible, false); m.internalDate = fixture().internalDate; m.historyId = '100'; assert.equal(classify(m).eligible, false); });
 for (const label of ['SPAM', 'TRASH', 'SENT', 'DRAFT']) test(`reject ${label}`, () => { const m = fixture(); m.labelIds.push(label); assert.equal(classify(m).eligible, false); });
 for (const type of ['attachment', 'html', 'secret', 'oversize', 'quoted', 'encrypted']) test(`no model for ${type}`, async () => {

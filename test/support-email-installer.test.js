@@ -166,6 +166,12 @@ test('committed storage cleanup failure does not revoke or erase the committed g
   const r=await h.request('GET','/oauth/callback?state='+s.state+'&code=synthetic-code',{cookie:s.cookie});
   assert.equal(r.terminal,'FAILED');assert.equal(h.calls.filter(c=>c.url.endsWith('/revoke')).length,0);
 });
+test('operator abort during grant revokes issued token before storing',async()=>{
+  let release;const pending=new Promise(r=>{release=r;});const h=harness({delay:()=>pending}),s=await h.authorize();
+  const callback=h.request('GET','/oauth/callback?state='+s.state+'&code=synthetic-code',{cookie:s.cookie});
+  h.i.abort();release();const r=await callback;
+  assert.equal(r.terminal,'FAILED');assert.equal(h.saves.length,0);assert.equal(h.calls.filter(c=>c.url.endsWith('/revoke')).length,1);
+});
 test('favicon and wrong path do not consume an authorized attempt',async()=>{
   const h=harness(),s=await h.authorize();
   for(const url of ['/favicon.ico','/wrong?state='+s.state+'&code=synthetic-code'])assert.equal((await h.request('GET',url,{cookie:s.cookie})).status,403);

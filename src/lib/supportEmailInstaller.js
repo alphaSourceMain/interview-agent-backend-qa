@@ -116,7 +116,7 @@ function createInstaller({ env, client, destination, fetchImpl = fetch, now = Da
   const oauth = createSupportEmailOAuth({ env: oauthEnv, fetchImpl, now });
   const bootstrap = randomBytes(32).toString('base64url'), session = randomBytes(32).toString('base64url'), csrf = randomBytes(32).toString('base64url');
   const deadline = now() + 300000;
-  let stage = 'new';
+  let stage = 'new', canceled = false;
   const response = (status, body, extra = {}) => ({ status, headers: { ...headers, ...extra }, body });
   const denied = () => response(403, '<p>Connection request rejected.</p>');
   const ended = code => ({ ...response(code === 'CONNECTED' ? 200 : 400, code === 'CONNECTED' ? '<p>alphy QA read-only connection saved. Automatic replies remain off.</p>' : '<p>Connection failed. Check the local status; do not retry without review.</p>'), terminal: code });
@@ -127,10 +127,11 @@ function createInstaller({ env, client, destination, fetchImpl = fetch, now = Da
   return {
     bootstrapUrl: ORIGIN + '/oauth/bootstrap/' + bootstrap,
     deadline,
+    abort() { canceled = true; },
     async handle({ method, url, headers: h = {}, body = '' }) {
       if (h.host !== HOST || typeof url !== 'string' || url.length > 8192 || !url.startsWith('/') || url.startsWith('//')) return denied();
       try { gates(env); } catch (_) { stage = 'done'; return ended('CONFIG_CHANGED'); }
-      if (now() >= deadline) { stage = 'done'; return ended('EXPIRED'); }
+      if (canceled || now() >= deadline) { stage = 'done'; return ended('EXPIRED'); }
       const u = new URL(url, ORIGIN);
       if (stage === 'new' && method === 'GET' && u.pathname === '/oauth/bootstrap/' + bootstrap && !u.search) {
         if (h.origin && h.origin !== ORIGIN) return denied();
@@ -166,7 +167,7 @@ function createInstaller({ env, client, destination, fetchImpl = fetch, now = Da
           gates(env);
           grant = await oauth.complete(Object.fromEntries(u.searchParams));
           gates(env);
-          if (now() >= deadline) throw new Error('EXPIRED');
+          if (canceled || now() >= deadline) throw new Error('EXPIRED');
           save(destination, grant, env, now);
           stage = 'done'; return ended('CONNECTED');
         } catch (e) {
@@ -181,18 +182,28 @@ function createInstaller({ env, client, destination, fetchImpl = fetch, now = Da
 }
 
 async function listenInstaller(installer) {
+  let active = 0, stopping;
   const server = http.createServer({ maxHeaderSize: 8192, requestTimeout: 10000, headersTimeout: 5000 }, async (req, res) => {
+    active++;
     let body = '', result;
     try {
       for await (const part of req) { body += part.toString('utf8'); if (Buffer.byteLength(body) > 256) throw new Error('SIZE'); }
       result = await installer.handle({ method: req.method, url: req.url, headers: req.headers, body });
     } catch (_) { result = { status: 400, headers, body: '<p>Connection request rejected.</p>' }; }
-    res.writeHead(result.status, result.headers); res.end(result.body, () => { if (result.terminal) finish(result.terminal); });
+    if (!res.destroyed) { res.writeHead(result.status, result.headers); res.end(result.body, () => { if (result.terminal) finish(result.terminal); }); }
+    else if (result.terminal) finish(result.terminal);
+    active--;
+    if (stopping && active === 0) resolveDone(stopping);
   });
   let resolveDone;
   const done = new Promise(resolve => { resolveDone = resolve; });
   const timer = setTimeout(() => finish('EXPIRED'), Math.max(1, installer.deadline - Date.now()));
-  function finish(status) { clearTimeout(timer); server.close(); server.closeAllConnections(); resolveDone(status); }
+  function finish(status) {
+    if (!stopping || status === 'REVOKE_UNCONFIRMED') stopping = status;
+    if (status !== 'CONNECTED') installer.abort();
+    clearTimeout(timer); server.close(); server.closeAllConnections();
+    if (active === 0) resolveDone(stopping);
+  }
   server.on('clientError', (_, socket) => socket.destroy());
   try {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(43871, '127.0.0.1', resolve); });

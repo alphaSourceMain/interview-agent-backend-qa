@@ -9,8 +9,11 @@ async function main() {
   prepareStore(destination);
   const installer = createInstaller({ env: process.env, client, destination });
   const listener = await listenInstaller(installer);
+  const stop = () => listener.close();
+  process.once('SIGINT', stop); process.once('SIGTERM', stop);
   process.stdout.write(installer.bootstrapUrl + '\n');
   const status = await listener.done;
+  process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop);
   process.stdout.write((status === 'CONNECTED' ? 'STORED' : status === 'REVOKE_UNCONFIRMED' ? status : 'FAILED') + '\n');
   if (status !== 'CONNECTED') process.exitCode = 1;
 }

@@ -75,6 +75,8 @@ After **separate action-time approval for the actual grant and this persistent d
 
 Do not execute the real installer before exact-candidate review and approval. Synthetic tests bind only loopback and use fake provider responses; passing them does not prove real tokeninfo compatibility. No deployment/polling/migration is performed by the command. A stored grant is not a live responder. Group delivery attestation, hosted draft tests, signature MIME integration and sending gates below remain required.
 
+SIGINT/SIGTERM and the global timeout cancel the local flow and allow any in-flight exchange to settle through the post-grant revoke path before returning a final status. SIGKILL, power loss or process/runtime failure cannot guarantee revocation; if consent occurred without STORED, inspect Google's app access before retrying. This is not a crash-proof grant transaction.
+
 ## Later automatic send release
 
 This foundation does not implement the requested live automatic reply yet. That needs a separate reviewed sending phase: verified `support@` send-as or approved sender, correct reply threading and RFC auto-response headers, a delivery outbox with delivery-unknown tombstones, pre-send thread/history checks, human support coordination and a reviewed instant-off control. A new flag cannot turn the present draft worker into a sender. Approving a dedicated mailbox is not approval to grant sending scopes or reply to existing customer threads.

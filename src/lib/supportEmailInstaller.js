@@ -39,21 +39,30 @@ function ancestors(filename) {
     dir = path.dirname(dir);
   }
 }
-function secureRead(filename) {
+function secureReadText(filename, limit = 8192) {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 65536) fail();
   ancestors(filename);
   acl(filename);
   const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const s = fs.fstatSync(fd);
-    if (!s.isFile() || s.uid !== process.getuid() || s.nlink !== 1 || (s.mode & 0o777) !== 0o600 || s.size > 8192) fail();
-    const buffer = Buffer.alloc(8193);
-    const size = fs.readSync(fd, buffer, 0, buffer.length, 0);
-    if (size > 8192) fail();
-    return JSON.parse(buffer.subarray(0, size).toString('utf8'));
+    if (!s.isFile() || s.uid !== process.getuid() || s.nlink !== 1 || (s.mode & 0o777) !== 0o600 || s.size > limit) fail();
+    const buffer = Buffer.alloc(limit + 1);
+    try {
+      const size = fs.readSync(fd, buffer, 0, buffer.length, 0);
+      if (size > limit || size !== s.size) fail();
+      return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, size));
+    } finally { buffer.fill(0); }
   } finally { fs.closeSync(fd); }
 }
+function secureRead(filename) { return JSON.parse(secureReadText(filename)); }
 function loadClient(filename, env) {
   gates(env);
+  return readExistingClient(filename);
+}
+// Pure secure existing-file reader; trusted callers provide their own real gate.
+// Never authorizes connecting, storing or running a draft by itself.
+function readExistingClient(filename) {
   try {
     const parsed = secureRead(filename), c = parsed.web;
     const allowed = new Set(['client_id','project_id','auth_uri','token_uri','auth_provider_x509_cert_url','client_secret','redirect_uris','javascript_origins']);
@@ -218,4 +227,4 @@ async function listenInstaller(installer) {
   return { address: server.address(), done, close: () => finish('CLOSED') };
 }
 
-module.exports = { CLIENT, PROJECT, HOST, ORIGIN, loadClient, prepareStore, storeGrant, createInstaller, listenInstaller };
+module.exports = { CLIENT, PROJECT, HOST, ORIGIN, loadClient, secureReadText, readExistingClient, prepareStore, storeGrant, createInstaller, listenInstaller };

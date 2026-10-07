@@ -15,3 +15,23 @@ Opaque eligible decisions are private WeakMap entries tied to frozen raw-derived
 Actual owner-only readback accepted one initial email and rejected both two-message reply threads, with sender proof valid. Cryptographic synthetic failures and bounded transport/MIME tests are separate evidence, not provider acceptance. No bodies/addresses/signature values/credentials are retained in release packets.
 
 This increment is NOT a complete responder. Later reviewed composition must use the existing exact readonly token refresh/client/scope checks, durable claim before model, static membership-only guidance selection, a fresh branded decision immediately before persistence, and mandatory human review. Hosted QA schema/maintenance, actual model/draft tests and a separate approved send credential/outbox/Group-visible human coordination remain pending. Processing and sending are off; production unchanged.
+# Owner-only one-shot draft acceptance
+
+`node qa-draft.js` is a separate local Node 24 command, never part of app startup.
+It accepts no arguments or provider overrides. It reads only the pinned private
+QA `.env`, existing client file, and readonly alphy grant. All real QA/OAuth,
+owner-only, exact sender, cutover and original-baseline gates must pass.
+No ambient environment is merged. Only the owner-approved external sender is
+queried. Both static knowledge sections are hash-verified before any claim.
+The durable service-only claim precedes generation; every draft requires human
+review and a fresh cryptographic/thread recheck. Errors preserve bodyless claims
+or review tombstones, never retry generation or ambiguous saves. The command
+prints counts only; successful synthetic previews are returned in RAM for owner
+acceptance and are not logged. There is no send transport or hosted scheduler.
+
+Before a real run, the separately reviewed QA schema and fixed hourly body purge
+must be installed and verified. The original saved OAuth history baseline never
+moves. For this owner-only acceptance, the approved cutover may equal grant
+capture, allowing only that owner's explicitly requested test intake; this is
+not authority to backfill client/customer mail or to automatically enable a
+responder. Leave processing off outside the controlled acceptance run.

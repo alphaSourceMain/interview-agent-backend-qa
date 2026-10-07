@@ -98,9 +98,34 @@ function redactQuestion(text) {
 function validateDraft(value) {
   if (!value || Object.keys(value).sort().join(',') !== 'answer,human_review' || typeof value.human_review !== 'boolean' || typeof value.answer !== 'string') throw new Error('SUPPORT_EMAIL_INVALID_DRAFT');
   const answer = value.answer.trim();
-  if (!answer || Buffer.byteLength(answer) > 4000 || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(answer) || sensitive(answer)) throw new Error('SUPPORT_EMAIL_INVALID_DRAFT');
+  if (!answer || Buffer.byteLength(answer) > 4000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/u.test(answer) || unsafeOutput(answer)) throw new Error('SUPPORT_EMAIL_INVALID_DRAFT');
   const unsafeClaim = /\b(?:I(?:'ve| have)?|we(?:'ve| have)?)\s+(?:accessed|checked your account|reset|updated|changed|refunded|cancelled|canceled|processed|sent)\b|\b(?:within|in)\s+\d+\s+(?:hours?|days?|minutes?)\b/i.test(answer);
-  return { body: answer + SIGNOFF, humanReview: value.human_review || unsafeClaim };
+  if (unsafeClaim) throw new Error('SUPPORT_EMAIL_INVALID_DRAFT');
+  return { body: answer + SIGNOFF, humanReview: true };
+}
+
+function unsafeOutput(text) {
+  // Detection copy only; don't normalize the actual answer. Incoming concept
+  // filtering is intentionally unchanged. Bare static product nouns aren't PII.
+  const scan = text.normalize('NFKC').replace(/[\t\r\n ]+/g, ' ');
+  if (/-----\s*BEGIN\b|\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|\b\d{3}[- ]\d{2}[- ]\d{4}\b/i.test(scan) ||
+    /\b(?:password|secret|api[ _-]*key|(?:access[ _-]*)?token|private[ _-]*key)\s*(?:[:=]|\bis\b)\s*\S/i.test(scan) ||
+    /(?<!\w)(?:\+?\d[ ().-]*){10,15}(?!\w)/.test(scan) ||
+    /\b(?:candidate\s+(?:name|email|resume|score)|(?:candidate\s+)?transcript)\s*[:=]\s*\S/i.test(scan) ||
+    /\bcandidate\s+reports?\s*[:=].*\b(?:score\s*[:=]?\s*\d|(?:name|email)\s*[:=])/i.test(scan)) return true;
+  for (const match of scan.matchAll(/(?<!\d)(?:\d[ .-]*){13,19}(?!\d)/g)) {
+    const digits = match[0].replace(/\D/g, '');
+    if (digits.length < 13 || digits.length > 19) continue;
+    let sum = 0, double = false;
+    for (let i = digits.length - 1; i >= 0; i--, double = !double) { let n = Number(digits[i]); if (double) { n *= 2; if (n > 9) n -= 9; } sum += n; }
+    if (sum % 10 === 0) return true;
+  }
+  const emailScan = scan.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.');
+  for (const match of emailScan.matchAll(/[^\s<>()\[\],;:"']+@[^\s<>()\[\],;:"']+/gu)) {
+    const email = match[0].replace(/[.!?]+$/, '').toLowerCase();
+    if (!['alphy@alphasourceai.com', GROUP].includes(email)) return true;
+  }
+  return false;
 }
 
 module.exports = { GROUP, LIST_ID, SIGNOFF, header, address, classifyInitialEmail, buildEmailPrompt, redactQuestion, validateDraft };

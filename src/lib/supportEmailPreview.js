@@ -31,7 +31,7 @@ function readImage(option) {
         createHash('sha256').update(bytes).digest('hex') !== option.hash) fail('SUPPORT_EMAIL_PREVIEW_ASSET');
     return Buffer.from(bytes); // Only verified bytes, new buffer for each preview.
   } catch (_) { fail('SUPPORT_EMAIL_PREVIEW_ASSET'); }
-  finally { if (fd !== undefined) fs.closeSync(fd); }
+  finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch (_) { fail('SUPPORT_EMAIL_PREVIEW_ASSET'); } } }
 }
 
 function renderSupportEmailPreview(body, signatureId = 'brand-horizontal') {

@@ -1,0 +1,9 @@
+{
+  "name": "alphascreen-support-email-worker",
+  "version": "0.0.0",
+  "private": true,
+  "engines": { "node": ">=24.2.0 <25" },
+  "scripts": { "test": "node --test test/*.test.js" },
+  "dependencies": { "mailauth": "7.1.1" },
+  "exports": { ".": "./src/verified-gmail.js" }
+}

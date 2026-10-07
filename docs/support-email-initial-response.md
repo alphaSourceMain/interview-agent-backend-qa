@@ -39,23 +39,23 @@ The worker requires all of these:
 
 Do not enable yet. There is deliberately no runtime cron/start script: reviewed credential refresh and delivery/sender verifiers are required before wiring one. The default Group delivery verifier returns false. The test verifier is synthetic fixture evidence only and must never be substituted into a live job.
 
-`createReadonlyGmail` accepts a short-lived token, checks its actual grants with Google, requires exactly `gmail.readonly`, and verifies its mailbox profile. It cannot refresh itself, send mail or create Gmail drafts. A later reviewed OAuth installer/refresh adapter is required; the Codex Gmail connector is not its credential. Credentials must not be shared from the owner's Gmail or unrelated alphaAccounts integration.
+`createReadonlyGmail` accepts a short-lived token, checks its actual grants with Google, requires exactly `gmail.readonly`, and verifies its mailbox profile. It cannot refresh itself, send mail or create Gmail drafts. The separately reviewed local OAuth helper/installer now supports the owner-approved dedicated grant; a bounded polling entry point still needs review. The Codex Gmail connector is not its credential. Credentials must not be shared from the owner's Gmail or unrelated alphaAccounts integration.
 
 One polling page is capped at 25 messages; a next-page token stops the run for backlog review rather than silently starving older messages. MIME traversal and decoded text are bounded. Gmail's own `internalDate` and post-baseline history are checked after search; no historical backlog may be processed. Native fetch responses have a streaming byte cap and request deadlines.
 
 ## Remaining enablement work
 
-1. Create/confirm a real Google Workspace `alphy@alphasourceai.com` mailbox and subscribe it to the support Group using **Every email**, not digest. This may require a Workspace license; do not create a paid account without Jason's approval. Keep human Group members and their delivery intact.
-2. Verify external senders can post to support, and capture redacted initial/reply/human-response Group fixtures in that new mailbox. Existing evidence proves delivery to Jason only, not to alphy.
+1. Completed with owner approval: dedicated regular-user `alphy@alphasourceai.com` mailbox, support Group membership and **Every email** delivery. Human Group members and delivery unchanged.
+2. Controlled external initial and reply deliveries from the owner were observed in alphy on October 7. Independent local diagnostics verified their full-body Group DKIM signatures and Google ARC chains. Human-response coordination tests remain pending; no responder is enabled by this evidence.
 3. Implement and review independent provider-inserted authenticated Group delivery evidence and sender DMARC/ARC validation. Sender-supplied list/From/authentication headers must not serve as attestation. The placeholder verifier intentionally keeps live mail ineligible.
-4. Approve/install a dedicated Gmail **read-only** OAuth client and secure token refresh in QA. Test wrong mailbox and overbroad scopes. Add no Gmail send capability in this phase.
+4. Completed local read-only connection on reviewed `003635bf40c7fd4cabc2cb5fad770efdbb4f40df`: actual mailbox/client/exact scope/lifetime checks and owner-only storage passed; real refresh passed. Synthetic wrong-mailbox/overbroad-scope rejection tests passed. Add no Gmail send capability in this phase.
 5. Apply/review the migration in QA, run advisors and real service/browser denial checks, install body-purge maintenance, then add a separate bounded QA polling entry point. Confirm Auth schema compatibility and client membership query behavior.
 6. Run controlled owner-only initial/reply/duplicate/human-race/loop fixtures and inspect drafts as escaped plain text. No real customer email or automatic send before the explicit gate.
 7. Obtain Grok approval of the exact final code, configuration and hosted evidence before deploying/enabling.
 
 ## Local read-only OAuth preparation
 
-`supportEmailOAuth.js` is a callable helper only, not a backend HTTP endpoint. It has no credential store or listener. An owner-approved dedicated internal Google client has been created separately through Google Console, but no mailbox grant has been issued. It is not imported by `app.js` or run by any start/cron command.
+`supportEmailOAuth.js` is a callable helper only, not a backend HTTP endpoint. It has no credential store or listener. An owner-approved dedicated internal Google client was created through Google Console; the separately reviewed standalone installer completed the approved alphy read-only grant locally. Neither is imported by `app.js` or run by any start/cron command.
 
 It requires separate `SUPPORT_EMAIL_OAUTH_ENABLED=true`, the exact QA environment/mode/Supabase URL/mailbox above, a dedicated `SUPPORT_EMAIL_GOOGLE_CLIENT_ID`, `SUPPORT_EMAIL_GOOGLE_CLIENT_SECRET`, and exact `SUPPORT_EMAIL_GOOGLE_REDIRECT_URI=http://127.0.0.1:43871/oauth/callback`. These are documentation, not an instruction to save or enable them yet. Unlike polling, connecting does not require a baseline or SUPPORT_EMAIL_ENABLED=true: capture the initial Gmail baseline only after approved consent, before later enabling draft processing.
 
@@ -82,6 +82,16 @@ SIGINT/SIGTERM and the global timeout cancel the local flow and allow any in-fli
 This foundation does not implement the requested live automatic reply yet. That needs a separate reviewed sending phase: verified `support@` send-as or approved sender, correct reply threading and RFC auto-response headers, a delivery outbox with delivery-unknown tombstones, pre-send thread/history checks, human support coordination and a reviewed instant-off control. A new flag cannot turn the present draft worker into a sender. Approving a dedicated mailbox is not approval to grant sending scopes or reply to existing customer threads.
 
 Human replies outside the designated mailbox cannot be reliably detected by Gmail thread lookup alone. Configure/test shared Group-visible replies (and an explicit coordination policy) before enabling auto-send. Do not promise exactly-once email delivery or zero races across separate Google users without that evidence.
+
+## Branded preview options
+
+`supportEmailPreview.js` renders the owner-approved horizontal wordmark signature by default (`brand-horizontal`) and the compact symbol alternative (`compact-symbol`). Fixed public PNG masters live in `src/lib/support-email-assets`. SHA256, length and exact dimensions are pinned in source; bounded same-buffer verification and symlink rejection precede output. Existing metadata in the unchanged public horizontal master is retained. No external image URLs or tracking resources are loaded.
+
+The input is a bounded plaintext draft body with exactly one terminal server `SIGNOFF`, not HTML or headers. Answer text is escaped, never autolinked, with controls/visual-spoof characters rejected. Both signatures identify alphy as an AI support assistant at alphaSource with fixed website/support links. Options metadata is available; no admin picker is installed yet.
+
+Output is exactly `{text, html, inlineImage, sendable:false}` and never marks a draft human-reviewed. The image descriptor has one fixed CID, PNG content type and verified Buffer bytes. This pure preview function is not wired to app/start, worker or delivery; the later MIME adapter must separately attach CID bytes, set transfer encoding and undergo threading/outbox/sending review. Rendered preview output is not an authorization to send.
+
+The cryptographic fixture diagnostic used a pinned library only in an isolated local directory with the local Node runtime. It is not a new dependency in this Node-20 application and is not the production delivery verifier. Runtime compatibility for a live verifier must be solved in its own reviewed increment. Bare list or Authentication-Results headers remain insufficient; the worker's default verifier still returns false.
 
 ## Verification
 

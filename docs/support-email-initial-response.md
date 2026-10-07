@@ -55,6 +55,16 @@ One polling page is capped at 25 messages; a next-page token stops the run for b
 
 ## Later automatic send release
 
+### Local read-only OAuth preparation
+
+`supportEmailOAuth.js` is a callable helper only, not an installer or backend HTTP endpoint. It has no credential store or listener. No Google client has been created or authorized by this code. It is not imported by `app.js` or run by any start/cron command.
+
+It requires separate `SUPPORT_EMAIL_OAUTH_ENABLED=true`, the exact QA environment/mode/Supabase URL/mailbox above, a dedicated `SUPPORT_EMAIL_GOOGLE_CLIENT_ID`, `SUPPORT_EMAIL_GOOGLE_CLIENT_SECRET`, and exact `SUPPORT_EMAIL_GOOGLE_REDIRECT_URI=http://127.0.0.1:43871/oauth/callback`. These are documentation, not an instruction to save or enable them yet. Unlike polling, connecting does not require a baseline or SUPPORT_EMAIL_ENABLED=true: capture the initial Gmail baseline only after approved consent, before later enabling draft processing.
+
+The helper constructs one five-minute, single-attempt state/PKCE authorization request with only Gmail read-only scope. It verifies token client audience, exact scope, expiry, and exact alphy profile before returning token material to a trusted future installer. It validates refreshed tokens the same way and never retries an authorization/token request automatically. Fixed Google endpoints use deadlines, bounded responses and deny redirects. Provider failures expose only generic reason codes. No secret is persisted or printed; future secure storage/rotation must be reviewed separately. Google's tokeninfo query-string introspection remains a documented credential-handling residual; never log those URLs.
+
+A reviewed owner-operated loopback callback installer (bound only to 127.0.0.1, browser-origin/session/state protection, no code logging or third-party callback content), a dedicated internal Google client, action-time approval for the exact scope and persistent credential destination, and hosted QA checks are still required before real authorization. Do not paste credentials into chat or use an unrelated OAuth client. This helper must not be wired to a send worker.
+
 This foundation does not implement the requested live automatic reply yet. That needs a separate reviewed sending phase: verified `support@` send-as or approved sender, correct reply threading and RFC auto-response headers, a delivery outbox with delivery-unknown tombstones, pre-send thread/history checks, human support coordination and a reviewed instant-off control. A new flag cannot turn the present draft worker into a sender. Approving a dedicated mailbox is not approval to grant sending scopes or reply to existing customer threads.
 
 Human replies outside the designated mailbox cannot be reliably detected by Gmail thread lookup alone. Configure/test shared Group-visible replies (and an explicit coordination policy) before enabling auto-send. Do not promise exactly-once email delivery or zero races across separate Google users without that evidence.

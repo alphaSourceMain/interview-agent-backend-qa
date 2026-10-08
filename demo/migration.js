@@ -2,7 +2,8 @@
 const { buildFixture } = require('./northstar');
 const { DEMO_CLIENT_ID } = require('../src/lib/salesDemo');
 function migrationSql() {
-  const baseline = JSON.stringify(buildFixture(new Date('2026-10-08T21:00:00Z'))).replace(/'/g, "''");
+  // Keep the already-applied v1 migration immutable; v2 is a separate update.
+  const baseline = JSON.stringify(buildFixture(new Date('2026-10-08T21:00:00Z'), { syntheticSignals: false })).replace(/'/g, "''");
   return `-- QA-only. Operator must SET LOCAL sales_demo.qa_project before applying.
 do $guard$ begin
   if current_setting('sales_demo.qa_project',true) is distinct from 'yjjxzxoghlpguquknyso' then raise exception 'QA project assertion required'; end if;
@@ -87,4 +88,19 @@ end $policies$;
 select public.sales_demo_control('reset');
 `;
 }
-module.exports = { migrationSql };
+function signalsMigrationSql() {
+  const baseline = JSON.stringify(buildFixture(new Date('2026-10-08T21:00:00Z'))).replace(/'/g, "''");
+  return `-- QA-only presentation update. Existing auth, routing and access rules stay unchanged.
+do $update$ declare changed integer; begin
+  if current_setting('sales_demo.qa_project',true) is distinct from 'yjjxzxoghlpguquknyso' then raise exception 'QA project assertion required';end if;
+  perform pg_catalog.pg_advisory_xact_lock(3872026,1008);
+  update private.sales_demo_baseline set fixture='${baseline}'::jsonb
+    where id and fixture->'clients'->0->>'id'='${DEMO_CLIENT_ID}' and (fixture->>'version')::integer in (1,2);
+  get diagnostics changed=row_count;
+  if changed<>1 then raise exception 'demo_baseline_mismatch';end if;
+  -- Same closed-fixture validation and lock as a user reset; abort atomically.
+  perform public.sales_demo_control('reset');
+end $update$;
+`;
+}
+module.exports = { migrationSql, signalsMigrationSql };

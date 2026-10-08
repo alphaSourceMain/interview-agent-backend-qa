@@ -3,7 +3,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const {buildFixture,people,roles}=require('../demo/northstar');
-const {migrationSql}=require('../demo/migration');
+const {migrationSql,signalsMigrationSql}=require('../demo/migration');
 const {DEMO_CLIENT_ID,QA_URL,isQa,safeDemoRequest,referencesDemo,assertDemoPrincipal,uuid}=require('../src/lib/salesDemo');
 
 test('closed fictional fixture: one client, two roles, three candidates per role, six bound reports and transcripts',()=>{
@@ -18,7 +18,7 @@ test('closed fictional fixture: one client, two roles, three candidates per role
     assert.equal(c.client_id,DEMO_CLIENT_ID);assert.match(c.email,/@example\.invalid$/);assert.equal(c.phone,null);
     assert.equal(iv.candidate_id,c.id);assert.equal(rep.interview_id,iv.id);assert.equal(iv.attempt_number,rep.attempt_number);
     assert.equal(iv.video_url,null);assert.equal(iv.recording_status,'demo_placeholder');assert.equal(iv.perception_scores.unavailable,true);
-    assert.equal(iv.transcript_scores.ai_aided_risk,null);
+    assert.ok(['low','medium','high'].includes(iv.transcript_scores.ai_aided_risk));
     assert.equal(rep.overall_score,Math.round((rep.resume_score+rep.interview_score)/2));
     assert.equal(rep.interview_score,Math.round(p.points.reduce((s,score,n)=>s+score*roles[p.role].questions[n][2]/100,0)));
     for(const a of p.answers){assert.ok(iv.transcript.includes(a));assert.ok(iv.interview_analysis_v2.evidence.some(e=>e.includes(a)));}
@@ -26,6 +26,27 @@ test('closed fictional fixture: one client, two roles, three candidates per role
     const pdf=fs.readFileSync(require('node:path').join(__dirname,'../demo/resumes',uuid(p.n)+'.pdf'));
     assert.match(pdf.toString('ascii',0,8),/^%PDF-/);
   });
+});
+test('six complete synthetic signal examples retain no-media truth and stable v1 migration',()=>{
+  const f=buildFixture();assert.equal(f.version,2);
+  const profiles=new Set();
+  for(const iv of f.interviews){
+    assert.equal(iv.perception_scores.unavailable,true);assert.equal(iv.perception_scores.synthetic,true);assert.equal(iv.perception_scores.mode,'demo');
+    for(const key of ['clarity','confidence','engagement'])assert.ok(iv.perception_scores[key]>=0&&iv.perception_scores[key]<=100,key);
+    assert.ok(iv.transcript_scores.confidence>0&&iv.transcript_scores.confidence<=100);
+    const badges=[...Object.values(iv.interview_analysis_v2.conditions),iv.interview_analysis_v2.risk.integrity_risk];
+    assert.equal(badges.length,5);assert.ok(badges.every(s=>s&&s.length<16&&!/not assessed|illustrative/i.test(s)));
+    assert.ok(iv.interview_analysis_v2.limitations.some(s=>s.includes('synthetic display examples')));
+    const report=f.reports.find(r=>r.interview_id===iv.id);assert.equal(report.interview_breakdown.synthetic,true);
+    assert.equal(report.interview_breakdown.clarity,iv.perception_scores.clarity);assert.equal(report.interview_breakdown.ai_aided_risk,iv.transcript_scores.ai_aided_risk);
+    profiles.add(iv.transcript_scores.ai_aided_risk);
+  }
+  assert.equal(profiles.size,3);
+  const original=buildFixture(new Date(),{syntheticSignals:false});assert.equal(original.version,1);assert.equal(original.interviews[0].transcript_scores.ai_aided_risk,null);
+  const sql=signalsMigrationSql();
+  assert.equal(fs.readFileSync(require('node:path').join(__dirname,'../supabase/migrations/20261008215557_sales_demo_synthetic_signals.sql'),'utf8').trim(),sql.trim());
+  assert.ok(sql.includes('pg_advisory_xact_lock'));assert.ok(sql.includes("perform public.sales_demo_control('reset')"));assert.ok(sql.includes('QA project assertion required'));
+  assert.ok(!/auth\.users|client_members|grant |create function|alter function/i.test(sql));
 });
 test('QA pin and trusted metadata confinement reject prod and admin, never trust user_metadata',()=>{
   assert.equal(isQa({SUPABASE_URL:QA_URL}),true);assert.equal(isQa({SUPABASE_URL:'https://rytlclkkcvvnkoncfaid.supabase.co'}),false);

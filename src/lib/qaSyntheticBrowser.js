@@ -19,13 +19,27 @@ function installSyntheticBrowser(session) {
     return new MediaStream(tracks);
   };
   runtime.play = async (base64) => {
-    await context.resume();
+    let resumeTimer;
+    try {
+      await Promise.race([context.resume(), new Promise((_, reject) => {
+        resumeTimer = setTimeout(() => reject(new Error('synthetic_audio_resume_stalled')), 5000);
+      })]);
+    } finally { clearTimeout(resumeTimer); }
     const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
-    const buffer = await context.decodeAudioData(bytes.buffer);
+    if (!bytes.length || bytes.length % 2 || bytes.length > 24000 * 2 * 30) throw new Error('synthetic_audio_invalid');
+    // OpenAI PCM is mono, signed 16-bit little-endian at 24 kHz.
+    const buffer = context.createBuffer(1, bytes.length / 2, 24000);
+    const samples = buffer.getChannelData(0);
+    const view = new DataView(bytes.buffer);
+    for (let index = 0; index < samples.length; index += 1) samples[index] = view.getInt16(index * 2, true) / 32768;
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.connect(microphone);
-    await new Promise((resolve) => { source.onended = resolve; source.start(); });
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { source.stop(); reject(new Error('synthetic_audio_playback_stalled')); }, (buffer.duration + 3) * 1000);
+      source.onended = () => { clearTimeout(timer); resolve(); };
+      source.start();
+    });
   };
   runtime.finishRecording = async () => {
     if (!runtime.recorder) return null;

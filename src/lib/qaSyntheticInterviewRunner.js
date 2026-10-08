@@ -36,7 +36,7 @@ async function launchBrowser() {
   const chromium = require('@sparticuz/chromium');
   return puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || await chromium.executablePath(),
     args: [...chromium.args, '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
-      '--autoplay-policy=no-user-gesture-required'], headless: true, protocolTimeout: 20000 });
+      '--autoplay-policy=no-user-gesture-required'], headless: true, protocolTimeout: 45000 });
 }
 
 async function runSyntheticInterview({ id, scenario, signal, update }, dependencies = {}) {
@@ -116,7 +116,7 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
     const clips = [];
     for (const input of scripts) {
       signal.throwIfAborted();
-      const response = await ai.audio.speech.create({ model: 'tts-1', voice: 'alloy', input, response_format: 'wav' }, { signal });
+      const response = await ai.audio.speech.create({ model: 'tts-1', voice: 'alloy', input, response_format: 'pcm' }, { signal });
       const bytes = Buffer.from(await response.arrayBuffer());
       if (bytes.length > MAX_AUDIO_BYTES) throw new Error('synthetic_audio_limit');
       clips.push(bytes.toString('base64'));
@@ -195,7 +195,13 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
         }
         if (clip !== undefined) {
           if (!snapshot.recording) throw new Error('synthetic_remote_audio_unavailable');
-          await page.evaluate((audioClip) => window.__qaSynthetic.play(audioClip), clips[clip]);
+          try {
+            await page.evaluate((audioClip) => window.__qaSynthetic.play(audioClip), clips[clip]);
+          } catch (failure) {
+            const known = String(failure?.message).match(/synthetic_audio_(?:invalid|resume_stalled|playback_stalled)/);
+            if (known) throw new Error(known[0]);
+            throw new Error(failure?.name === 'ProtocolError' ? 'synthetic_audio_protocol_timeout' : 'synthetic_audio_playback_failed');
+          }
           lastAnswerAt = Date.now();
         }
       }

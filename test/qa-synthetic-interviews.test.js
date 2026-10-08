@@ -81,14 +81,18 @@ test('runner is off by default and rejects production, previews, missing identit
 });
 
 test('synthetic playback converts bounded little-endian PCM without a browser codec', async () => {
-  let samples, stopped = 0;
-  const connections = [], microphone = {}, output = {};
+  let samples, stopped = 0, context, source;
+  const track = { readyState: 'live', enabled: true, muted: false };
+  const connections = [], microphone = { stream: { getAudioTracks: () => [track] } }, output = {};
   const window = {}; window.top = window;
   const sandbox = { window, location: { origin: 'https://alphasourceai-com.onrender.com', pathname: '/interview/live' },
     sessionStorage: { setItem() {} }, navigator: { mediaDevices: { getUserMedia: async () => {} } },
     atob: (value) => Buffer.from(value, 'base64').toString('binary'), setTimeout, clearTimeout,
     AudioContext: class {
       destination = output;
+      currentTime = 1;
+      state = 'running';
+      constructor() { context = this; }
       async resume() {}
       createMediaStreamDestination() { return microphone; }
       createBuffer(channels, count, rate) {
@@ -96,8 +100,8 @@ test('synthetic playback converts bounded little-endian PCM without a browser co
         samples = new Float32Array(count);
         return { duration: count / rate, getChannelData: () => samples };
       }
-      createBufferSource() { return { connect(target) { connections.push(target); },
-        start() {}, stop() { stopped += 1; }, disconnect() {} }; }
+      createBufferSource() { source = { connect(target) { connections.push(target); },
+        start() {}, stop() { stopped += 1; }, disconnect() {} }; return source; }
     } };
   runInNewContext(`(${installSyntheticBrowser.toString()})({})`, sandbox);
   const playback = await window.__qaSynthetic.play(Buffer.from([0, 128, 0, 0, 255, 127]).toString('base64'));
@@ -105,10 +109,30 @@ test('synthetic playback converts bounded little-endian PCM without a browser co
   assert.ok(playback.started_at > 0);
   assert.deepEqual(connections, [microphone, output]);
   assert.deepEqual(Array.from(samples), [-1, 0, 32767 / 32768]);
+  const runtime = window.__qaSynthetic;
+  context.currentTime = 3;
+  runtime.call = { participants: () => ({ local: { local: true, audio: false } }) };
+  const diagnostic = runtime.readPlayback();
+  assert.equal(diagnostic.context_elapsed_ms, 2000);
+  assert.equal(diagnostic.active, true);
+  assert.equal(diagnostic.naturally_ended, false);
+  assert.equal(diagnostic.source_track_state, 'live');
+  assert.equal(diagnostic.source_track_enabled, true);
+  assert.equal(diagnostic.source_track_muted, false);
+  assert.equal(diagnostic.local_audio_enabled, false);
+  assert.equal(diagnostic.observer_at_capacity, false);
+  runtime.events.length = 200;
+  assert.equal(runtime.readPlayback().observer_at_capacity, true);
   await assert.rejects(window.__qaSynthetic.play('AAA='), /synthetic_audio_overlap/);
   window.__qaSynthetic.stopPlayback();
   window.__qaSynthetic.stopPlayback();
   assert.equal(stopped, 1);
+  assert.equal(runtime.readPlayback().active, false);
+  assert.equal(runtime.readPlayback().naturally_ended, false);
+  await runtime.play(Buffer.from([0, 128]).toString('base64'));
+  source.onended();
+  assert.equal(runtime.readPlayback().naturally_ended, true);
+  assert.equal(runtime.readPlayback().active, false);
   for (const bytes of [Buffer.alloc(0), Buffer.alloc(1), Buffer.alloc(24000 * 2 * 30 + 2)]) {
     await assert.rejects(window.__qaSynthetic.play(bytes.toString('base64')), /synthetic_audio_invalid/);
   }
@@ -197,9 +221,11 @@ test('one active run, retry idempotency and untrusted settings cannot cause extr
   assert.throws(() => service.start({ ...input, url: 'https://prod.test' }), { code: 'synthetic_test_invalid_request' });
   await settle();
   assert.equal(called, 1);
-  resolve({ status: 'passed', cleanup_confirmed: true });
+  resolve({ status: 'passed', cleanup_confirmed: true,
+    playback_diagnostics: Array.from({ length: 10 }, (_, clip) => ({ clip })) });
   await settle();
   assert.equal(service.get(first.id).status, 'passed');
+  assert.equal(service.get(first.id).playback_diagnostics.length, 8);
   assert.equal(service.start(input).id, first.id);
   assert.equal(called, 1);
   assert.equal(JSON.stringify(service.get(first.id)).includes('controller'), false);
@@ -256,4 +282,6 @@ test('integration is additive and runner has no database, credit, OTP, document 
   assert.match(runner, /max_call_duration: 300/);
   assert.match(runner, /setRequestInterception\(true\)/);
   assert.match(runner, /setBypassServiceWorker\(true\)/);
+  assert.match(runner, /map\(\(\{ role, speech, at \}\) => \(\{ role, speech, at \}\)\)/);
+  assert.match(runner, /audio_receipt_failure/);
 });

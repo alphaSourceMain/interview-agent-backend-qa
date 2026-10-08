@@ -160,6 +160,7 @@ function createQaSyntheticInterviewService({ env = process.env, execute, now = D
           run.status = run.controller.signal.aborted ? 'cancelled' : (result.status === 'passed' ? 'passed' : 'failed');
           run.checks = result.checks || [];
           run.transcript = result.transcript || [];
+          run.playback_diagnostics = (result.playback_diagnostics || []).slice(0, 8);
           run.error = result.error || null;
           run.cleanup_confirmed = result.cleanup_confirmed === true;
           if (Buffer.isBuffer(result.audio) && result.audio.length <= MAX_AUDIO_BYTES) run.audio = result.audio;

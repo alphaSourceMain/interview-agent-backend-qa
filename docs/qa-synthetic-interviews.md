@@ -53,6 +53,11 @@ or a speaking event alone cannot advance the test. The wait is bounded; missing
 acknowledgement fails with synthetic_answer_not_received. Playback completion
 callbacks are not used as success evidence. Failure transcripts retain the most
 recent observed events rather than just the snapshot before playback.
+Results retain utterance timestamps and at most eight playback diagnostics:
+audio-context versus wall-clock progress, source/local audio state, observer
+capacity, and replica-utterance arrival times. Failed receipt also logs this
+bounded diagnostic with the synthetic run ID, never audio or speech payloads.
+These are diagnostic evidence only, not additional pass signals.
 Vendor Unicode hyphen variants are normalized for scripted question matching;
 different question content still fails rather than advancing the test.
 

@@ -11,6 +11,19 @@ function installSyntheticBrowser(session) {
   const context = new AudioContext();
   const microphone = context.createMediaStreamDestination();
   let activeSource = null;
+  let playback = null;
+  runtime.readPlayback = () => {
+    if (!playback) return null;
+    const track = microphone.stream.getAudioTracks()[0];
+    let local;
+    try { local = Object.values(runtime.call?.participants?.() || {}).find((item) => item.local); } catch {}
+    return { ...playback, wall_elapsed_ms: Date.now() - playback.started_at,
+      context_elapsed_ms: Math.round((context.currentTime - playback.context_started_seconds) * 1000),
+      context_state: context.state, active: Boolean(activeSource),
+      source_track_state: track?.readyState || null, source_track_enabled: track?.enabled ?? null,
+      source_track_muted: track?.muted ?? null, local_audio_enabled: local?.audio ?? null,
+      observer_event_count: runtime.events.length, observer_at_capacity: runtime.events.length >= 200 };
+  };
   runtime.stopPlayback = () => {
     if (!activeSource) return;
     const source = activeSource;
@@ -43,8 +56,12 @@ function installSyntheticBrowser(session) {
     source.connect(microphone);
     source.connect(context.destination);
     activeSource = source;
-    source.onended = () => { if (activeSource === source) runtime.stopPlayback(); };
+    source.onended = () => {
+      if (activeSource === source) { playback.naturally_ended = true; runtime.stopPlayback(); }
+    };
     const startedAt = Date.now();
+    playback = { started_at: startedAt, duration_seconds: buffer.duration,
+      context_started_seconds: context.currentTime, naturally_ended: false };
     source.start();
     // The driver waits for received speech; a missing onended callback is not a verdict.
     return { started_at: startedAt, duration_seconds: buffer.duration };

@@ -17,7 +17,7 @@ const fingerprint = (persona) => createHash('sha256').update(JSON.stringify({
 function readSyntheticSnapshot() {
   const runtime = window.__qaSynthetic;
   return runtime && { events: runtime.events, lastStop: runtime.lastStop, speaking: runtime.speaking,
-    recording: Boolean(runtime.recorder), path: location.pathname };
+    recording: Boolean(runtime.recorder), path: location.pathname, playback: runtime.readPlayback() };
 }
 
 function networkAction(url, method) {
@@ -65,6 +65,7 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
   const evidence = { events: [], answered_questions: [], candidate_utterances: 0, closing_reply_sent: false,
     end_requests: 0, end_reason: null, provider_end_confirmed: false, completion_page: false,
     browser_errors: 0, audio_bytes: 0, audio_transcript: '' };
+  const playbackDiagnostics = [];
   const captureEvents = (events) => {
     if (!Array.isArray(events)) return;
     evidence.events = events;
@@ -217,9 +218,10 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
           const acknowledgementDeadline = Math.min(deadline,
             Date.now() + Math.max(20000, playback.duration_seconds * 2000 + 10000));
           let acknowledged = false;
+          let received;
           while (Date.now() < acknowledgementDeadline) {
             signal.throwIfAborted();
-            const received = await page.evaluate(readSyntheticSnapshot);
+            received = await page.evaluate(readSyntheticSnapshot);
             captureEvents(received?.events);
             if (scriptedAnswerReceived(evidence.events, scripts[clip], playback.started_at)) {
               acknowledged = true;
@@ -229,6 +231,14 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
             if (!received || frontendEndSucceeded) break;
             await delay(350, undefined, { signal });
           }
+          const diagnostic = { clip, acknowledged, ...received?.playback,
+            candidate_utterances: evidence.events.filter((item) => item.at >= playback.started_at &&
+              item.type === 'conversation.utterance' && ['candidate', 'user', 'participant'].includes(item.role)).length,
+            replica_utterance_times: evidence.events.filter((item) => item.at >= playback.started_at &&
+              item.type === 'conversation.utterance' && ['replica', 'assistant', 'agent'].includes(item.role))
+              .map((item) => item.at).slice(0, 8) };
+          if (playbackDiagnostics.length < 8) playbackDiagnostics.push(diagnostic);
+          if (!acknowledged) console.warn('[qa-synthetic] audio_receipt_failure', JSON.stringify({ run_id: id, ...diagnostic }));
           if (!acknowledged) throw new Error('synthetic_answer_not_received');
         }
       }
@@ -274,9 +284,10 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
     await closeBrowser();
   }
   if (audio?.length > MAX_AUDIO_BYTES) audio = null;
-  return { status, checks, error, audio, cleanup_confirmed: !createAttempted || providerEnded,
+  return { status, checks, error, audio, playback_diagnostics: playbackDiagnostics,
+    cleanup_confirmed: !createAttempted || providerEnded,
     transcript: evidence.events.filter((item) => item.type === 'conversation.utterance')
-      .map(({ role, speech }) => ({ role, speech })).slice(0, 30) };
+      .map(({ role, speech, at }) => ({ role, speech, at })).slice(0, 30) };
 }
 
 module.exports = { networkAction, runSyntheticInterview };

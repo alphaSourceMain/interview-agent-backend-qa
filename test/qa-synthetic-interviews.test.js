@@ -19,12 +19,16 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 test('isolated observer recognizes qualified speaking variants without treating candidate or unknown stops as replica progress', () => {
   const handlers = {};
+  const microphoneTrack = { kind: 'audio', clone() { return this; } };
   const window = {}; window.top = window;
   const sandbox = { window, location: { origin: 'https://alphasourceai-com.onrender.com', pathname: '/interview/live' },
     sessionStorage: { setItem() {} }, navigator: { mediaDevices: { getUserMedia: async () => ({ getVideoTracks: () => [] }) } },
-    AudioContext: class { createMediaStreamDestination() { return { stream: { getAudioTracks: () => [{ clone() {} }] } }; } } };
+    AudioContext: class { createMediaStreamDestination() { return { stream: { getAudioTracks: () => [microphoneTrack] } }; } } };
   runInNewContext(`(${installSyntheticBrowser.toString()})({})`, sandbox);
-  window.DailyIframe = { createCallObject: () => ({ on: (name, handler) => { handlers[name] = handler; } }) };
+  window.DailyIframe = { createCallObject: (options) => {
+    assert.equal(options.audioSource, microphoneTrack);
+    return { on: (name, handler) => { handlers[name] = handler; } };
+  } };
   window.DailyIframe.createCallObject();
   const emit = (type, role) => handlers['app-message']({ data: { eventType: type, properties: { role } } });
   const runtime = window.__qaSynthetic;

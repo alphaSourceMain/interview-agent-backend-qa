@@ -77,7 +77,8 @@ function installSyntheticBrowser(session) {
       if (!value?.createCallObject) return;
       const original = value.createCallObject;
       value.createCallObject = function (...args) {
-        const call = original.apply(this, args);
+        // Daily acquires media in its own context, so bind the synthetic track explicitly.
+        const call = original.call(this, { ...args[0], audioSource: microphone.stream.getAudioTracks()[0] });
         runtime.call = call;
         call.on('app-message', (event) => {
           const data = event?.data || {};

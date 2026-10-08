@@ -39,6 +39,8 @@ internal evaluation details. Expected speech comes from interviewClosingContract
 The runner uses real Tavus audio, the deployed QA persona, canonical dynamic
 prompt builders, and the actual deployed /interview/live browser UI. It injects
 synthetic microphone/camera media only in its isolated Chromium instance. It
+binds the Web Audio microphone track through Daily's audioSource option, rather
+than relying on a top-page getUserMedia override to affect Daily's media context.
 observes real Daily events; it never fabricates participant utterances.
 
 Only within that isolated browser, application status and telemetry are synthetic

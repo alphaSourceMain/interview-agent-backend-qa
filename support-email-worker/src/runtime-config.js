@@ -7,6 +7,7 @@ const { validateSendGrant } = require('./send-config');
 const readPins = require('../../src/lib/supportEmailInstaller');
 const sendPins = require('./send-oauth');
 const READ_REDIRECT = require('../../src/lib/supportEmailOAuth').REDIRECT;
+const { readProjectedJsonSet } = require('./projected-mounts');
 const NAME = 'alphascreen-alphy-mail-qa';
 const PATHS = Object.freeze({ readClient: '/etc/secrets/alphy-read-client.json', readGrant: '/etc/secrets/alphy-read-grant.json',
   sendClient: '/etc/secrets/alphy-send-client.json', sendGrant: '/etc/secrets/alphy-send-grant.json', keys: '/etc/secrets/alphy-runtime-keys.json' });
@@ -20,15 +21,16 @@ function validateRuntimeEnvironment(env) {
       env.SUPPORT_EMAIL_OWNER_TEST_SENDER !== OWNER || env.SUPPORT_EMAIL_OWNER_TEST_ONLY !== 'true' ||
       !['qa-draft', 'qa-owner-auto'].includes(env.SUPPORT_EMAIL_WORKER_MODE) || env.SUPPORT_EMAIL_SECRET_MOUNT_APPROVED !== 'true') fail();
   const auto = env.SUPPORT_EMAIL_WORKER_MODE === 'qa-owner-auto' && env.SUPPORT_EMAIL_WORKER_SEND_APPROVED === 'true' && env.SUPPORT_EMAIL_HUMAN_CC_RULE_APPROVED === 'true';
-  return Object.freeze({ mode: auto ? 'qa-owner-auto' : 'qa-draft', serviceId: env.RENDER_SERVICE_ID });
+  return Object.freeze({ mode: auto ? 'qa-owner-auto' : 'qa-draft', serviceId: env.RENDER_SERVICE_ID,
+    layout: env.SUPPORT_EMAIL_SECRET_LAYOUT === 'render-projected-v1' ? 'render-projected-v1' : 'direct' });
 }
-function validateManifest(value) {
+function validateManifest(value, layout = 'direct') {
   let manifest;
   try { manifest = JSON.parse(value); } catch (_) { fail(); }
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || Object.keys(manifest).sort().join(',') !== Object.keys(PATHS).sort().join(',')) fail();
   for (const entry of Object.values(manifest)) {
     if (!entry || Object.keys(entry).sort().join(',') !== 'mode,uid' || !Number.isSafeInteger(entry.uid) || entry.uid < 0 ||
-        !['0400', '0600', '0444', '0644'].includes(entry.mode)) fail();
+        (layout === 'render-projected-v1' ? entry.uid !== 0 || entry.mode !== '0640' : !['0400', '0600', '0444', '0644'].includes(entry.mode))) fail();
   }
   return manifest;
 }
@@ -79,12 +81,15 @@ function loadRuntimeConfig() {
   if (arguments.length) fail();
   const settings = validateRuntimeEnvironment(process.env);
   if (!settings) return null; // No file read, OAuth, network, database or model.
-  const manifest = validateManifest(process.env.SUPPORT_EMAIL_MOUNT_MANIFEST);
-  const readGrant = validateGrant(readMountedJson(PATHS.readGrant));
-  const readClient = validateMountedClient(readMountedJson(PATHS.readClient), 'read');
-  const keys = validateRuntimeKeys(readMountedJson(PATHS.keys));
-  const sendClient = settings.mode === 'qa-owner-auto' ? validateMountedClient(readMountedJson(PATHS.sendClient), 'send') : null;
-  const sendGrant = settings.mode === 'qa-owner-auto' ? validateSendGrant(readMountedJson(PATHS.sendGrant)) : null;
+  const manifest = validateManifest(process.env.SUPPORT_EMAIL_MOUNT_MANIFEST, settings.layout);
+  const wanted = ['readClient', 'readGrant', 'keys', ...(settings.mode === 'qa-owner-auto' ? ['sendClient', 'sendGrant'] : [])];
+  const mounted = settings.layout === 'render-projected-v1' ? readProjectedJsonSet(wanted, manifest) : null;
+  const read = key => mounted ? mounted[key] : readMountedJson(PATHS[key]);
+  const readGrant = validateGrant(read('readGrant'));
+  const readClient = validateMountedClient(read('readClient'), 'read');
+  const keys = validateRuntimeKeys(read('keys'));
+  const sendClient = settings.mode === 'qa-owner-auto' ? validateMountedClient(read('sendClient'), 'send') : null;
+  const sendGrant = settings.mode === 'qa-owner-auto' ? validateSendGrant(read('sendGrant')) : null;
   const binding = createHash('sha256').update(JSON.stringify({ settings, manifest, keys, readClient, readGrant, sendClient, sendGrant })).digest('hex');
   return Object.freeze({ ...settings, keys, readClient, readGrant, sendClient, sendGrant, binding });
 }

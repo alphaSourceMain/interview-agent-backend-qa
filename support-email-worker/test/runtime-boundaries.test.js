@@ -16,6 +16,28 @@ test('manifest pins exact fixed-file tuples; malformed/extra entries fail',()=>{
   const m=Object.fromEntries(Object.keys(PATHS).map(k=>[k,{uid:0,mode:'0644'}]));assert.deepEqual(validateManifest(JSON.stringify(m)),m);
   for(const v of [{}, {...m,extra:{uid:0,mode:'0644'}},{...m,readGrant:{uid:0,mode:'0666'}},{...m,keys:{uid:-1,mode:'0600'}},{...m,sendGrant:{uid:0,mode:'0600',extra:true}}])assert.throws(()=>validateManifest(JSON.stringify(v)));
 });
+test('projected layout is explicit, direct mode never accepts projected pin',()=>{
+  const m=Object.fromEntries(Object.keys(PATHS).map(k=>[k,{uid:0,mode:'0640'}]));
+  assert.throws(()=>validateManifest(JSON.stringify(m)));
+  assert.deepEqual(validateManifest(JSON.stringify(m),'render-projected-v1'),m);
+  assert.equal(validateRuntimeEnvironment({...env,SUPPORT_EMAIL_SECRET_LAYOUT:'render-projected-v1'}).layout,'render-projected-v1');
+  assert.equal(validateRuntimeEnvironment({...env,SUPPORT_EMAIL_SECRET_LAYOUT:'unknown'}).layout,'direct');
+  assert.equal(validateRuntimeEnvironment({...env,SUPPORT_EMAIL_WORKER_ENABLED:'false',SUPPORT_EMAIL_SECRET_LAYOUT:'render-projected-v1'}),null);
+});
+test('closed actual config accesses no mounted filesystem even with projected layout selected',()=>{
+  const fs=require('node:fs'),{loadRuntimeConfig}=require('../src/runtime-config');
+  const oldFlag=process.env.SUPPORT_EMAIL_WORKER_ENABLED,oldLayout=process.env.SUPPORT_EMAIL_SECRET_LAYOUT;
+  const oldStat=fs.lstatSync,oldOpen=fs.openSync;let accessed=0;
+  try{
+    process.env.SUPPORT_EMAIL_WORKER_ENABLED='false';process.env.SUPPORT_EMAIL_SECRET_LAYOUT='render-projected-v1';
+    fs.lstatSync=fs.openSync=()=>{accessed++;throw Error('FORBIDDEN_MOUNT');};
+    assert.equal(loadRuntimeConfig(),null);assert.equal(accessed,0);
+  }finally{
+    fs.lstatSync=oldStat;fs.openSync=oldOpen;
+    if(oldFlag===undefined)delete process.env.SUPPORT_EMAIL_WORKER_ENABLED;else process.env.SUPPORT_EMAIL_WORKER_ENABLED=oldFlag;
+    if(oldLayout===undefined)delete process.env.SUPPORT_EMAIL_SECRET_LAYOUT;else process.env.SUPPORT_EMAIL_SECRET_LAYOUT=oldLayout;
+  }
+});
 test('runtime service token binding rejects prod ref and expired credentials',()=>{
   const token=claims=>'eyJhbGciOiJIUzI1NiJ9.'+Buffer.from(JSON.stringify(claims)).toString('base64url')+'.synthetic';
   const good={role:'service_role',ref:'yjjxzxoghlpguquknyso',exp:Math.floor(Date.now()/1000)+3600};

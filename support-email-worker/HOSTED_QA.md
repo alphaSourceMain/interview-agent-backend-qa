@@ -54,6 +54,23 @@ OAuth/network). Review that actual result and pin its manifest in
 Linux-only runtime; local synthetic tests cannot supply provider dependencies to
 the shipped command. Credentials must never be placed in Git, logs or evidence.
 
+The paragraph above describes default direct mode; it intentionally rejects
+Render's observed projected symlinks. Explicit `SUPPORT_EMAIL_SECRET_LAYOUT=
+render-projected-v1` uses only the reviewed projected reader (no direct fallback).
+Its pins are `/etc` root0/0755; `/etc/secrets` root0/group1000/03777; root-owned
+singlelink public and `..data` links0777 with exact relative targets; generated
+timestamp version directory root0/group1000/02755; and five regular singlelink
+root0/group1000/0640 leaves. All runtime identity UID/eUID/GID/eGID must be1000.
+The sticky mount protects root-owned names, while the backing directory/leaves
+are not writable by the application. Every metadata tuple is checked with bigint
+inodes before opens; only fixed backing leaves are opened with no-follow/nonblock.
+FD stats match before/after bounded reads; buffers wiped/FDs closed on all paths.
+Recollecting the complete projection rejects rotation/split versions with no retry.
+Draft mode inspects five leaves but opens only readclient/readgrant/QAkeys.
+Metadata-only inspect-mounts in this explicit layout returns five uid0/mode0640
+pins only after two complete agreeing metadata walks, with zero file opens.
+No provider directory is chmodded and no arbitrary symlink is followed.
+
 ## Human coordination and delivery
 
 Humans must copy `support@alphasourceai.com` when replying. The last Group-visible

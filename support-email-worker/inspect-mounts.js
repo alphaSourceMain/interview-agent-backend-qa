@@ -4,6 +4,10 @@ const fs = require('node:fs');
 const { NAME, PATHS } = require('./src/runtime-config');
 try {
   if (process.argv.length !== 2 || process.platform !== 'linux' || process.env.RENDER !== 'true' || process.env.RENDER_SERVICE_NAME !== NAME || process.env.SUPPORT_EMAIL_WORKER_ENABLED !== 'false') throw Error();
+  if (process.env.SUPPORT_EMAIL_SECRET_LAYOUT === 'render-projected-v1') {
+    const manifest = require('./src/projected-mounts').inspectProjectedMounts();
+    console.log(JSON.stringify({ status: 'metadata_only', layout: 'render-projected-v1', manifest }));
+  } else {
   const manifest = {};
   const metadata = [];
   let held = false;
@@ -20,4 +24,5 @@ try {
   }
   if (held) { console.log(JSON.stringify({ status: 'metadata_held', process_uid: process.getuid(), metadata })); throw Error(); }
   console.log(JSON.stringify({ status: 'metadata_only', manifest }));
+  }
 } catch (_) { console.error('SUPPORT_EMAIL_MOUNT_INSPECTION_HELD'); process.exitCode = 1; }

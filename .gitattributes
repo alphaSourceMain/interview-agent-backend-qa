@@ -1,1 +1,3 @@
 templates/pdf/alphascreen-public-purchase-support-playbook.pdf binary
+demo/resumes/*.pdf binary
+demo/reports/*.pdf binary

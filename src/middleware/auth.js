@@ -1,6 +1,7 @@
 // src/middleware/auth.js
 const { supabaseAdmin, supabaseAnon } = require('../lib/supabaseClient');
 const { buildClientScopeContext } = require('../lib/clientScope');
+const { assertDemoPrincipal, DEMO_CLIENT_ID } = require('../lib/salesDemo');
 
 const supabase = supabaseAdmin;
 const ROLE_PRIORITY = ['super_admin', 'owner', 'admin', 'manager', 'member', 'tester'];
@@ -100,6 +101,16 @@ async function requireAuth(req, res, next) {
     req.userToken = token;
     req.isGlobalAdmin = await lookupGlobalAdmin(req.user.email, req.user.id);
     req.isAdmin = req.isGlobalAdmin;
+    const demoDenial = assertDemoPrincipal(req, authUser);
+    if (demoDenial) return res.status(403).json({ error: demoDenial });
+    if (req.isSalesDemo) {
+      const { data: grants, error: grantError } = await supabase.from('client_members').select('client_id,role').eq('user_id',req.user.id);
+      if (grantError || grants?.length !== 1 || grants[0].client_id !== DEMO_CLIENT_ID || grants[0].role !== 'manager') {
+        return res.status(403).json({error:'demo_access_denied'});
+      }
+      const { data: children, error: childError } = await supabase.from('clients').select('id').eq('parent_client_id',DEMO_CLIENT_ID).limit(1);
+      if (childError || children?.length) return res.status(403).json({error:'demo_access_denied'});
+    }
     return next();
   } catch (err) {
     console.error('[requireAuth] error', err);

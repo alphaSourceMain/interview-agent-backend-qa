@@ -331,6 +331,11 @@ router.post('/', requireAuth, withClientScope, async (req, res) => {
 });
 
 router.patch('/:id/status', requireAuth, withClientScope, async (req, res) => {
+  if (req.isSalesDemo) {
+    const { data, error } = await supabaseAdmin.rpc('sales_demo_control', { p_operation:'role_status', p_target:req.params.id, p_status:req.body?.status });
+    if (error) return res.status(409).json({error:'demo_role_update_failed'});
+    return res.json(data);
+  }
   try {
     const roleId = String(req.params.id || '').trim();
     const status = normalizeRoleStatus(req.body?.status, '');

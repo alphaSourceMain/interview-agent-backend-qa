@@ -306,6 +306,7 @@ async function evaluateCandidateAutomation(input = {}) {
   }
 
   const clientId = optionalUuid(input.clientId || input.client_id, 'client_id');
+  if (require('./salesDemo').isDemo(clientId) || /^d38ade00-2026-4000-8000-/i.test(String(input.candidateId || input.candidate_id || input.roleId || input.role_id || ''))) throw automationError('demo_automation_disabled','Automation is disabled for the sales demo.',403);
   const roleId = optionalUuid(input.roleId || input.role_id, 'role_id');
   const candidateId = optionalUuid(input.candidateId || input.candidate_id, 'candidate_id');
   const triggerSource = String(input.triggerSource || input.trigger_source || 'dry_run').trim() || 'dry_run';

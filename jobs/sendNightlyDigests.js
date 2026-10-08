@@ -21,7 +21,8 @@ async function sendNightlyDigests() {
 
     const { data: roles, error: rolesError } = await supabase
       .from('roles')
-      .select('id, title, client_id, created_at');
+      .select('id, title, client_id, created_at')
+      .neq('client_id', require('../src/lib/salesDemo').DEMO_CLIENT_ID);
 
     if (rolesError) throw new Error('Failed to fetch roles');
     console.log(`📌 Fetched ${roles.length} roles`);

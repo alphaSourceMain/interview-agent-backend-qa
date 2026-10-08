@@ -244,6 +244,8 @@ app.use('/webhook/sendgrid', express.json({
 app.use('/webhook', require('./routes/webhook'))
 
 app.use(express.json({ limit: '10mb' }))
+app.use(require('./src/lib/salesDemo').demoFence)
+app.use('/demo', require('./routes/salesDemo'))
 
 // ---------- CSP: allow Wix to embed (frame-ancestors) ----------
 app.use((req, res, next) => {
@@ -554,6 +556,7 @@ app.get('/clients/my', requireAuth, withClientScope, async (req, res) => {
         client_id: c.id,
         name: c.name,
         role: membership.role || 'member',
+        is_sales_demo: require('./src/lib/salesDemo').isQa() && require('./src/lib/salesDemo').isDemo(c.id),
         inherited,
         inherited_from_client_id: inherited ? (membership.inherited_from_client_id || c.parent_client_id || null) : null,
         ...clientScopeMetadata(scopeContext, c.id),

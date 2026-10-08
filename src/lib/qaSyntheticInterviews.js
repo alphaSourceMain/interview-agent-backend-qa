@@ -57,7 +57,11 @@ function normalizeSpeech(value) {
 }
 
 function spokenWords(value) {
-  return normalizeSpeech(value).replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9' ]/g, '').replace(/\s+/g, ' ').trim();
+  const numbers = { one: '1', two: '2', three: '3', four: '4', five: '5',
+    six: '6', seven: '7', eight: '8', nine: '9', ten: '10' };
+  return normalizeSpeech(value).replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9' ]/g, '')
+    .replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b/g, (word) => numbers[word])
+    .replace(/\s+/g, ' ').trim();
 }
 
 function scriptedAnswerReceived(events, expected, startedAt) {

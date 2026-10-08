@@ -153,6 +153,10 @@ test('answer acknowledgement requires fresh received candidate content, not play
   const expected = ANSWERS[0];
   const event = { type: 'conversation.utterance', role: 'user', speech: expected, at: 100 };
   assert.equal(scriptedAnswerReceived([event], expected, 99), true);
+  const capturedSpeech = 'I group leads by next action and due date in our. Customer relationship system. Morning I review overdue tasks and prioritize customers waiting on a decision. I record the outcome of every call and schedule the next. Step. This reduced miss. Follow-ups and helped our team respond within 1 business. Day.';
+  assert.equal(scriptedAnswerReceived([{ ...event, speech: capturedSpeech }], expected, 99), true);
+  assert.equal(scriptedAnswerReceived([{ ...event, speech: capturedSpeech.replace('1 business', '2 business') }], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([{ ...event, speech: ANSWERS[1].replace('two weeks', '2 weeks') }], ANSWERS[1], 99), true);
   assert.equal(scriptedAnswerReceived([event], expected, 101), false);
   assert.equal(scriptedAnswerReceived([{ ...event, role: 'replica' }], expected, 99), false);
   assert.equal(scriptedAnswerReceived([{ ...event, type: 'conversation.started_speaking' }], expected, 99), false);

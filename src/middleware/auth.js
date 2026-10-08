@@ -110,6 +110,8 @@ async function requireAuth(req, res, next) {
       }
       const { data: children, error: childError } = await supabase.from('clients').select('id').eq('parent_client_id',DEMO_CLIENT_ID).limit(1);
       if (childError || children?.length) return res.status(403).json({error:'demo_access_denied'});
+      const { data: salesGrant, error: salesError } = await supabase.from('sales_reps').select('user_id').eq('user_id',req.user.id).limit(1);
+      if (salesError || salesGrant?.length) return res.status(403).json({error:'demo_access_denied'});
     }
     return next();
   } catch (err) {

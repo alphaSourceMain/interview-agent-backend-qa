@@ -20,7 +20,8 @@ router.post('/reset', async (req, res) => {
   if (error) return res.status(409).json({ error: 'demo_reset_not_safe', detail:'The demo could not be safely restored. Please contact your administrator.' });
   return res.json(data);
 });
-router.get('/:kind(resumes|reports)/:id', (req,res) => {
+router.get('/:kind/:id', (req,res) => {
+  if (!['resumes','reports'].includes(req.params.kind)) return res.status(404).json({ error: 'demo_document_not_found' });
   const person = people.find(p => uuid(p.n) === req.params.id);
   if (!person) return res.status(404).json({ error: 'demo_resume_not_found' });
   const file = path.join(__dirname,'../demo',req.params.kind,`${uuid(person.n)}.pdf`);

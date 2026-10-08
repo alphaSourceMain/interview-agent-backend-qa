@@ -12,6 +12,7 @@ function safeDemoRequest(req) {
   const method = String(req.method || '').toUpperCase();
   if (method === 'OPTIONS') return true;
   if (method === 'GET' || method === 'HEAD') {
+    if (/signed-url|recording-url|\/reports\/.+\/download/.test(path)) return false;
     return /^\/(auth\/(me|ping)|clients\/(my|entities|billing\/summary)|dashboard(?:\/|$)|roles(?:\/|$)|client-members(?:\/|$)|files\/resume-signed-url|reports(?:\/|$)|demo(?:\/|$)|automation(?:\/|$))/.test(path);
   }
   if (method === 'PATCH') return /^\/roles\/d38ade00-2026-4000-8000-\d{12}\/status$/.test(path);

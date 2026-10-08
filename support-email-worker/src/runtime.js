@@ -134,7 +134,7 @@ async function runRuntime() {
     if (sendAuth.mailbox !== MAILBOX || sendAuth.expiresAt < deadline + 60000) fail();
     const wire = buildQaMime(record, generated.body), wireHash = hash(wire.raw), bodyHash = hash(generated.body);
     const binding = { id: claim, body_hash: bodyHash, knowledge_hash: knowledge.hash, fingerprint: record.fingerprint, wire: wireHash, thread_id: record.threadId };
-    let reserved = false, started = false, finishing = false;
+    let reserved = false, started = false, postInvoked = false, finishing = false;
     async function finalProof() {
       await check(30000);
       const proof = await readVerifiedInitial({ accessToken: auth.accessToken, id, cutoverMs: lease.cutover_ms, baselineHistoryId: initial.readGrant.baselineHistoryId });
@@ -149,9 +149,11 @@ async function runRuntime() {
       await finalProof(); await check(30000);
       if (await store.call('start', nonce, binding) !== true) fail();
       started = true;
+      const sendOptions = { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
+        headers: { Authorization: 'Bearer ' + sendAuth.accessToken, 'Content-Type': 'application/json' }, body: JSON.stringify({ raw: wire.raw.toString('base64url'), threadId: wire.threadId }) };
       await check(20000); // Includes off switch and DB fence immediately pre-POST.
-      const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
-        headers: { Authorization: 'Bearer ' + sendAuth.accessToken, 'Content-Type': 'application/json' }, body: JSON.stringify({ raw: wire.raw.toString('base64url'), threadId: wire.threadId }) });
+      postInvoked = true;
+      const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', sendOptions);
       if (response.status !== 200 || !/^application\/json(?:;|$)/i.test(response.headers.get('content-type') || '')) fail();
       const result = await readJson(response);
       if (!hex(result.id) || result.threadId !== wire.threadId) fail();
@@ -168,8 +170,8 @@ async function runRuntime() {
     } catch (_) {
       // Lost start response: cancel cannot change committed submitting. Lost
       // POST/finish: terminal unknown/submitting, never an automatic replay.
-      if (reserved && !finishing) {
-        try { await check(10000); await store.call(started ? 'finish' : 'cancel', nonce, { id: claim, ...(started ? { state: 'unknown' } : {}) }); } catch (_) { /* Permanent hold. */ }
+      if (reserved && !finishing && (!started || postInvoked)) {
+        try { await check(10000); await store.call(postInvoked ? 'finish' : 'cancel', nonce, { id: claim, ...(postInvoked ? { state: 'unknown' } : {}) }); } catch (_) { /* Permanent hold. */ }
       }
       fail();
     } finally { wire.raw.fill(0); }

@@ -5,7 +5,8 @@ const { OWNER, MAILBOX } = require('../src/qa-config');
 const nonce = '11111111-1111-4111-8111-111111111111', claim = '22222222-2222-4222-8222-222222222222';
 async function harness(change = {}) {
   const events = [], writes = [];
-  let reads = 0, off = !!change.off, state = null;
+  let reads = 0, off = !!change.off, state = null, elapsed = 0;
+  const priorNow = Date.now, clockStart = priorNow();
   const cfg = { binding: 'fixed', mode: change.draftOnly ? 'qa-draft' : 'qa-owner-auto', readClient: {}, readGrant: { baselineHistoryId: '1', refreshToken: 'test' },
     sendClient: {}, sendGrant: { refreshToken: 'test' }, keys: { supabaseServiceRoleKey: 'test', xaiApiKey: 'test' } };
   const record = { sender: OWNER, senderVerified: true, subject: 'Synthetic question', text: 'What is alphaScreen?', fingerprint: 'a'.repeat(64),
@@ -20,7 +21,7 @@ async function harness(change = {}) {
       if (op === 'seen') return change.seen || null;
       if (op === 'claim') return change.duplicate ? null : claim;
       if (op === 'reserve') { state = 'reserved'; return true; }
-      if (op === 'start') { state = 'submitting'; if (change.lostStart) throw Error('LOST'); return true; }
+      if (op === 'start') { state = 'submitting'; if (change.lostStart) throw Error('LOST'); if (change.prePostBudget) elapsed = 135000; return true; }
       if (op === 'cancel') { if (state === 'reserved') state = 'cancelled'; return state === 'cancelled'; }
       if (op === 'finish') { if (change.lostFinish) throw Error('LOST'); state = data.state; return true; }
       return true;
@@ -55,6 +56,7 @@ async function harness(change = {}) {
   const saved = new Map(), target = require.resolve('../src/runtime'), priorFetch = global.fetch;
   saved.set(target, require.cache[target]); delete require.cache[target];
   try {
+    if (change.prePostBudget) Date.now = () => clockStart + elapsed;
     for (const [name,exports] of Object.entries(modules)) { const key = require.resolve(name); saved.set(key, require.cache[key]); require.cache[key] = { id:key, filename:key,loaded:true,exports }; }
     global.fetch = async (url, options) => {
       events.push('POST'); assert.equal(url,'https://gmail.googleapis.com/gmail/v1/users/me/messages/send');
@@ -65,8 +67,14 @@ async function harness(change = {}) {
     let result, error;
     try { result = await require(target).runRuntime(); } catch (e) { error = e.message; }
     return { result,error,events,writes,state };
-  } finally { global.fetch = priorFetch; for (const [key,value] of saved) { if(value) require.cache[key]=value; else delete require.cache[key]; } }
+  } finally { Date.now = priorNow; global.fetch = priorFetch; for (const [key,value] of saved) { if(value) require.cache[key]=value; else delete require.cache[key]; } }
 }
+test('budget expiry after committed start but before fetch leaves submitting, not unknown', async()=>{
+  const r = await harness({prePostBudget:true});
+  assert.ok(r.error); assert.equal(r.state,'submitting');
+  assert.ok(r.events.includes('start')); assert.ok(!r.events.includes('POST'));
+  assert.ok(!r.events.includes('finish')); assert.ok(!r.events.includes('cancel')); assert.ok(!r.events.includes('complete'));
+});
 test('off has no secrets/provider/database work',async()=>{const r=await harness({off:true});assert.equal(r.result.status,'off');assert.deepEqual(r.events,['config']);});
 for (const change of [{busy:true},{skew:true},{errorOp:'acquire'}]) test('lease loser/skew/failure does no Google/model/send',async()=>{
   const r=await harness(change);assert.ok(!r.events.includes('readAuth'));assert.ok(!r.events.includes('model'));assert.ok(!r.events.includes('complete'));

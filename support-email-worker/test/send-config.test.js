@@ -16,7 +16,7 @@ test('send gates use genuine readonly refresh with processing off, separate send
   assert.equal(validateSendEnvironment(e,readGrant,'send').SUPPORT_EMAIL_ENABLED,'false');assert.throws(()=>validateSendEnvironment({...e,SUPPORT_EMAIL_SEND_CONNECTION_APPROVED:'true'},readGrant,'send'));
 });
 test('stored send grant is exact separate client/scope/identity/time shape',()=>{assert.equal(validateSendGrant({...grant}).clientId,CLIENT);
-  for(const change of [{clientId:'readonly-client'},{scope:SCOPE+' openid'},{mailbox:'jason@alphasourceai.com'},{extra:true},{capturedAt:'bad'},{accessTokenExpiresAt:now+99999999}])assert.throws(()=>validateSendGrant({...grant,...change}));});
+  for(const change of [{clientId:'readonly-client'},{scope:SCOPE+' openid'},{scope:SCOPE+' email'},{scope:SCOPE.replace(' openid','')},{mailbox:'jason@alphasourceai.com'},{extra:true},{capturedAt:'bad'},{accessTokenExpiresAt:now+99999999}])assert.throws(()=>validateSendGrant({...grant,...change}));});
 test('pinned send client secure reader rejects scope path/client tampering',t=>{
   const dir=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'alphy-send-client-test-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const file=path.join(dir,'client.json'),data={web:{client_id:CLIENT,project_id:PROJECT,client_secret:'synthetic-send-client-secret',auth_uri:'https://accounts.google.com/o/oauth2/auth',token_uri:'https://oauth2.googleapis.com/token',auth_provider_x509_cert_url:'https://www.googleapis.com/oauth2/v1/certs',redirect_uris:[REDIRECT]}};

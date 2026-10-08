@@ -20,11 +20,22 @@ Downloaded JSON must match that exact project, client prefix, endpoints and
 redirect; old project/client pairs and mixed metadata are rejected. Google
 revocation is project-wide, so a second client in the intake project is unsafe.
 The separate Internal Google client has one callback at
-`http://127.0.0.1:43873/oauth/callback`. It requests exactly Gmail send and
-userinfo email, not Gmail read/modify/delete or admin permissions. Identity
+`http://127.0.0.1:43873/oauth/callback`. It requests exactly Gmail send,
+userinfo email and basic OpenID identity, not Gmail read/modify/delete,
+profile, Drive or admin permissions. The optional Workspace callback hd
+must equal alphasourceai.com and never authenticates the caller. Google may
+return one additional exact email alias alongside the mandatory full
+userinfo.email URI; it cannot replace that URI. All three canonical scopes
+are required; literal duplicates and every other extra scope fail. The
+stored grant contains only the fixed canonical three-scope string. No ID
+token is decoded or trusted. Identity
 must be Google's verified primary alphy email; client/audience/expiry/scope
-checks remain mandatory on authorization and refresh. Extra scopes stop the
-test; do not widen them to get a provider test to pass.
+checks remain mandatory on authorization and refresh. Unexpected scopes
+stop the test; do not widen them to get a provider test to pass. The earlier
+two-scope approval is not permission to retry: require the owner's exact
+basic identity-set approval before renewed consent and both exact-source
+gates. A callback rejected before exchange issues no local token or revoke;
+preserve that failure, turn all gates off, and stop execution for review.
 
 Approved new owner-only files are `Downloads/alphy-support-qa/isolated-send-client.json`
 and `isolated-send-grant.json`. The unused old same-project sender JSON stays

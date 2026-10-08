@@ -15,9 +15,18 @@ function harness(change={}) {
   const auth=new URL(oauth.begin());
   return {oauth,calls,auth,complete:()=>oauth.complete({state:auth.searchParams.get('state'),code:'synthetic-code'})};
 }
-test('two exact scopes order-independent; never broaden or allow duplicate',()=>{
+test('three canonical scopes with only optional Google email alias; never broaden',()=>{
+  assert.deepEqual(SCOPES,['https://www.googleapis.com/auth/gmail.send','https://www.googleapis.com/auth/userinfo.email','openid']);
   assert.equal(exactScopes([...SCOPES].reverse().join(' ')),true);
+  assert.equal(exactScopes('email '+SCOPE),true);
+  assert.equal(exactScopes(SCOPE+' email'),true);
   for(const scope of [SCOPE+' openid',SCOPE+' '+SCOPES[0],SCOPES[0],'https://mail.google.com/'])assert.equal(exactScopes(scope),false);
+  for(const scope of [SCOPE+' email email',SCOPE.replace(SCOPES[1],'email'),SCOPE.replace('openid',''),SCOPE+' profile',SCOPE+' https://www.googleapis.com/auth/userinfo.profile',SCOPE+' https://www.googleapis.com/auth/gmail.compose',SCOPE+' https://www.googleapis.com/auth/gmail.modify',SCOPE+' https://www.googleapis.com/auth/drive'])assert.equal(exactScopes(scope),false);
+});
+test('actual Google email alias coexistence verifies and stores canonical scopes only',async()=>{
+  const h=harness({tokenScope:SCOPE+' email',scope:'email '+SCOPE});const grant=await h.complete();
+  assert.equal(grant.scope,SCOPE);assert.equal(grant.mailbox,'alphy@alphasourceai.com');assert.equal(h.calls.length,3);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/revoke')).length,0);
 });
 test('authorization binds new client, sole loopback, PKCE, exact scopes, no accumulated grants',async()=>{
   const h=harness();assert.equal(h.auth.searchParams.get('client_id'),CLIENT);assert.equal(h.auth.searchParams.get('redirect_uri'),REDIRECT);
@@ -26,7 +35,7 @@ test('authorization binds new client, sole loopback, PKCE, exact scopes, no accu
   await assert.rejects(h.complete(),/CALLBACK/);assert.equal(h.calls.length,3);
   h.oauth.committed(g.refreshToken);await assert.rejects(h.oauth.revokeUncommitted(g.refreshToken),/REVOKE_UNCONFIRMED/);assert.equal(h.calls.length,3);
 });
-for(const change of [{scope:SCOPE+' openid'},{scope:SCOPES[0]},{tokenScope:SCOPE+' https://www.googleapis.com/auth/gmail.readonly'},{client:'wrong.apps.googleusercontent.com'},{mailbox:'jason@alphasourceai.com'},{unverified:true}])test('invalid NEW grant revokes only its new token',async()=>{
+for(const change of [{scope:SCOPE+' openid'},{scope:SCOPE+' profile'},{scope:SCOPE.replace(SCOPES[1],'email')},{tokenScope:SCOPE.replace('openid','')},{scope:SCOPES[0]},{tokenScope:SCOPE+' https://www.googleapis.com/auth/gmail.readonly'},{client:'wrong.apps.googleusercontent.com'},{mailbox:'jason@alphasourceai.com'},{unverified:true}])test('invalid NEW grant revokes only its new token',async()=>{
   const h=harness(change);await assert.rejects(h.complete());const revokes=h.calls.filter(c=>c.url.endsWith('/revoke'));assert.equal(revokes.length,1);assert.equal(new URLSearchParams(revokes[0].options.body).get('token'),'new-synthetic-refresh');
 });
 for(const change of [{scope:SCOPE+' openid'},{rotation:true},{mailbox:'other@example.invalid'}])test('committed refresh failure or rotation NEVER revokes/writes',async()=>{

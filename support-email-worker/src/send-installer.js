@@ -45,7 +45,7 @@ function createSendInstaller({initial,load=loadSendConfig,save=storeSendGrant,fe
     const u=new URL(url,ORIGIN);
     if(stage==='new'&&method==='GET'&&u.pathname==='/oauth/bootstrap/'+bootstrap&&!u.search){
       if(h.origin&&h.origin!==ORIGIN)return denied();stage='form';
-      return response(200,'<h1>alphy QA sending connection</h1><p>Connect only alphy@alphasourceai.com. Gmail send plus verified email identity. No automatic sending.</p>'+
+      return response(200,'<h1>alphy QA sending connection</h1><p>Connect only alphy@alphasourceai.com. Gmail send plus verified email/OpenID identity. No Gmail reading or profile access. No automatic sending.</p>'+
         '<p>Client: '+CLIENT+'</p><p>Redirect: '+REDIRECT+'</p><p>Grant: '+SEND_GRANT+'</p>'+
         '<form method="post" action="/oauth/connect"><input type="hidden" name="csrf" value="'+csrf+'"><button>Connect alphy sending</button></form>',
         {'Set-Cookie':'alphy_qa_send_session='+session+'; HttpOnly; Secure; SameSite=Lax; Path=/oauth; Max-Age=300',
@@ -58,12 +58,13 @@ function createSendInstaller({initial,load=loadSendConfig,save=storeSendGrant,fe
       if(u.search||!local||h['content-type']!=='application/x-www-form-urlencoded'||Buffer.byteLength(body)>256||[...fields.keys()].length!==1||!equal(fields.get('csrf'),csrf))return denied();
       check();stage='waiting';const auth=new URL(oauth.begin());
       if(auth.origin+auth.pathname!=='https://accounts.google.com/o/oauth2/v2/auth'||auth.searchParams.get('client_id')!==CLIENT||auth.searchParams.get('scope')!==SCOPE||auth.searchParams.get('redirect_uri')!==REDIRECT)fail();
-      return response(200,'<h1>Continue to Google</h1><p>Choose only alphy@alphasourceai.com. Gmail sending and email identity only; no email is sent by connecting.</p><a rel="noreferrer noopener" href="'+auth.href.replace(/&/g,'&amp;')+'">Continue to Google — alphy sending</a>');
+      return response(200,'<h1>Continue to Google</h1><p>Choose only alphy@alphasourceai.com. Gmail sending and email/OpenID identity only; no Gmail reading or profile access. No email is sent by connecting.</p><a rel="noreferrer noopener" href="'+auth.href.replace(/&/g,'&amp;')+'">Continue to Google — alphy sending</a>');
     }
     if(stage==='waiting'&&method==='GET'&&u.pathname==='/oauth/callback'){
-      stage='busy';const keys=[...u.searchParams.keys()],allowed=['state','code','error','scope','authuser','prompt','iss'];
+      stage='busy';const keys=[...u.searchParams.keys()],allowed=['state','code','error','scope','authuser','prompt','iss','hd'];
       if(keys.some(k=>!allowed.includes(k))||keys.length!==new Set(keys).size||!u.searchParams.has('state')||u.searchParams.has('code')===u.searchParams.has('error')||
-        (u.searchParams.has('iss')&&u.searchParams.get('iss')!=='https://accounts.google.com')){stage='done';return ended('FAILED');}
+        (u.searchParams.has('iss')&&u.searchParams.get('iss')!=='https://accounts.google.com')||
+        (u.searchParams.has('hd')&&u.searchParams.get('hd')!=='alphasourceai.com')){stage='done';return ended('FAILED');}
       let grant;
       try{check();grant=await oauth.complete(Object.fromEntries(u.searchParams));check();if(cancelled||now()>=deadline)fail();
         save(grant,initial.binding,now);oauth.committed(grant.refreshToken);stage='done';return ended('CONNECTED');

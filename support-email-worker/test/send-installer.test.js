@@ -21,6 +21,14 @@ test('separate one-use bootstrap, CSRF and exact-scope authorization, single com
   const r=await h.request('GET','/oauth/callback?state='+s.state+'&code=synthetic-code',{cookie:s.cookie});assert.equal(r.terminal,'CONNECTED');assert.equal(h.saves.length,1);
   assert.equal(JSON.stringify(r).includes('synthetic'),false);assert.equal((await h.request('GET','/oauth/callback?state='+s.state+'&code=synthetic-code',{cookie:s.cookie})).status,403);
 });
+test('Workspace callback hd and observed identity aliases allow one verified exchange',async()=>{
+  const h=harness(),s=await h.auth();const params=new URLSearchParams({state:s.state,code:'synthetic-code',hd:'alphasourceai.com',iss:'https://accounts.google.com',scope:SCOPE+' email',authuser:'2',prompt:'consent'});
+  const r=await h.request('GET','/oauth/callback?'+params,{cookie:s.cookie});assert.equal(r.terminal,'CONNECTED');assert.equal(h.calls.length,3);assert.equal(h.saves.length,1);
+});
+for(const hd of ['','other.invalid','AlphaSourceAI.com','alphasourceai.com&hd=alphasourceai.com'])test('Workspace callback rejects invalid/duplicate hd before exchange',async()=>{
+  const h=harness(),s=await h.auth();const r=await h.request('GET','/oauth/callback?state='+s.state+'&code=synthetic-code&hd='+hd,{cookie:s.cookie});
+  assert.equal(r.terminal,'FAILED');assert.equal(h.calls.length,0);assert.equal(h.saves.length,0);
+});
 for(const variant of ['cookie','origin','csrf','extra','host','method'])test('connect rejects '+variant+' without provider call',async()=>{
   const h=harness(),s=await h.start(),headers={cookie:s.cookie,origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'};let body='csrf='+s.csrf;
   if(variant==='cookie')delete headers.cookie;if(variant==='origin')headers.origin='https://evil.invalid';if(variant==='csrf')body='csrf='+ 'x'.repeat(43);if(variant==='extra')body+='&extra=1';if(variant==='host')headers.host='evil.invalid';

@@ -7,14 +7,17 @@ const PROJECT = 'alphascreen-alphy-qa-sending';
 const PROJECT_NUMBER = '581820238541';
 const CLIENT = '581820238541-evup8b38vdio8f53rultitdifc4dmmdl.apps.googleusercontent.com';
 const REDIRECT = 'http://127.0.0.1:43873/oauth/callback';
-const SCOPES = Object.freeze(['https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/userinfo.email']);
+const SCOPES = Object.freeze(['https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/userinfo.email', 'openid']);
 const SCOPE = SCOPES.join(' ');
 const MAILBOX = 'alphy@alphasourceai.com';
 const fail = code => { throw new Error('SUPPORT_EMAIL_SEND_' + code); };
 const printable = value => typeof value === 'string' && /^[\x21-\x7e]{1,8192}$/.test(value);
 function exactScopes(value) {
   const items = typeof value === 'string' ? value.split(/\s+/).filter(Boolean) : [];
-  return items.length === 2 && new Set(items).size === 2 && SCOPES.every(scope => items.includes(scope));
+  // Google may also return the short email alias alongside its full URI.
+  // The alias never replaces the full URI; no other extra permission is allowed.
+  return (items.length === 3 || items.length === 4) && new Set(items).size === items.length &&
+    SCOPES.every(scope => items.includes(scope)) && items.every(scope => SCOPES.includes(scope) || scope === 'email');
 }
 function createSendOAuth({ client, fetchImpl = fetch, now = Date.now }) {
   if (client?.clientId !== CLIENT || !printable(client.clientSecret) || client.clientSecret.length < 20 || client.clientSecret.length > 256) fail('CONFIG');

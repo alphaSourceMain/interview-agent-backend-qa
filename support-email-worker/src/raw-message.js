@@ -84,7 +84,12 @@ function decodeTransfer(body, encoding) {
 function plainQuestion(headers, body, budget = { parts: 0, plains: 0 }) {
   if (++budget.parts > 30) fail();
   const type = one(headers, 'content-type', true).toLowerCase();
-  const transfer = one(headers, 'content-transfer-encoding').toLowerCase() || '7bit';
+  const transferRows = headers.filter(h => h.name === 'content-transfer-encoding');
+  if (transferRows.length > 1 || (transferRows.length === 1 && !transferRows[0].value.trim())) fail();
+  const transfer = transferRows.length ? transferRows[0].value.toLowerCase() : '7bit';
+  // Enforce the container too, not only decoded leaves. A default 7bit outer
+  // entity cannot carry raw 8bit bytes in a nested HTML or MIME part.
+  if (transfer === '7bit' && body.some(byte => byte > 127)) fail();
   const disposition = one(headers, 'content-disposition');
   if ((disposition && disposition.toLowerCase() !== 'inline') || /(?:name|filename)\s*=/.test(type)) fail();
   if (type.startsWith('multipart/alternative;')) {

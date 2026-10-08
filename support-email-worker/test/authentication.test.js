@@ -7,6 +7,10 @@ const { boundedResolver, within } = require('../src/keys');
 const { readVerifiedInitial, inspectVerified } = require('../src/verified-gmail');
 const { classifyInitialEmail } = require('../../src/lib/supportEmailPolicy');
 const F = require('./fixtures');
+const crypto = require('node:crypto');
+const { parseHeaders, getSigningHeaderLines, stripSignatureValue } = require('mailauth/lib/tools');
+const { generateCanonicalizedHeader } = require('mailauth/lib/dkim/header');
+const { one, tags } = require('../src/raw-message');
 async function check(raw, keyOptions) {
   const keys = F.fixtureKeys(keyOptions);
   try { return await authenticateRaw({ raw, envelope: F.envelope, keys, now: F.now }); }
@@ -24,6 +28,60 @@ test('signed MIME 1.0 with bounded comment is valid; ambiguous versions fail', a
   assert.equal((await check(await F.fixture({ baseOptions: { replace: { 'MIME-Version': '1.0 (Google Groups)' } } }))).senderVerified, true);
   assert.equal((await check(await F.fixture({ baseOptions: { replace: { 'MIME-Version': '1.0 (library 1.0 (https://example.test/))' } } }))).senderVerified, true);
   for (const value of ['2.0', '1.0; 2.0', '1.0 (too(deep(with(five(levels)))))', '1.0 (unterminated']) await assert.rejects(check(await F.fixture({ baseOptions: { replace: { 'MIME-Version': value } } })));
+});
+test('missing CTE defaults to 7bit with real Group and ARC verification', async () => {
+  assert.equal((await check(await F.fixture({baseOptions:{replace:{'Content-Transfer-Encoding':null}}}))).senderVerified,true);
+});
+test('missing oversigned CTE is accepted; insertion into that signature fails crypto', async () => {
+  const raw=await F.fixture({baseOptions:{replace:{'Content-Transfer-Encoding':null}}});
+  const parsed=headersAndBody(raw), end=raw.indexOf('\r\n\r\n');
+  const rows=parseHeaders(raw.subarray(0,end)).parsed;
+  const old=one(parsed.headers,'dkim-signature',true);
+  const signature=stripSignatureValue(Buffer.from('DKIM-Signature: '+old.replace(/h=([^;]+)/,(_,h)=>'h='+h.trim()+':content-transfer-encoding')),true);
+  const fields=tags(signature.toString().slice('DKIM-Signature:'.length));
+  const signed=getSigningHeaderLines(rows,fields.h,true);
+  const canonical=generateCanonicalizedHeader('DKIM',signed,{signatureHeaderLine:signature,canonicalization:fields.c,strict:true}).canonicalizedHeader;
+  const value=crypto.sign('sha256',canonical,F.keyMaterial().privateKey).toString('base64');
+  const rest=rows.filter(r=>r.key!=='dkim-signature').map(r=>r.line.toString()).join('\r\n');
+  const oversigned=Buffer.concat([Buffer.from(signature.toString().replace(/b=([^;]*)/,'b='+value)+'\r\n'+rest+'\r\n\r\n'),parsed.body]);
+  try {
+    assert.equal((await check(Buffer.from(oversigned))).senderVerified,true);
+    await assert.rejects(check(Buffer.concat([Buffer.from('Content-Transfer-Encoding: 7bit\r\n'),oversigned])));
+  }finally{raw.fill(0);parsed.body.fill(0);oversigned.fill(0);canonical.fill(0);}
+});
+test('present unsigned CTE and inserted unsigned CTE are rejected before decoding', async () => {
+  await assert.rejects(check(await F.fixture({groupOptions:{headerList:REQUIRED.filter(n=>n!=='content-transfer-encoding')}})));
+  const raw=await F.fixture({baseOptions:{replace:{'Content-Transfer-Encoding':null}}});
+  try {for(const value of ['7bit','base64','quoted-printable','8bit']) await assert.rejects(check(Buffer.concat([Buffer.from('Content-Transfer-Encoding: '+value+'\r\n'),raw])));}
+  finally{raw.fill(0);}
+});
+test('removing signed CTE fails actual Group signature verification', async () => {
+  const raw=await F.fixture();
+  try {await assert.rejects(check(Buffer.from(raw.toString().replace('Content-Transfer-Encoding: 7bit\r\n',''))));}
+  finally{raw.fill(0);}
+});
+test('present empty, whitespace, duplicate or unsupported CTE never defaults', async () => {
+  for(const value of ['', '   ', 'binary', 'invalid']) await assert.rejects(check(await F.fixture({baseOptions:{replace:{'Content-Transfer-Encoding':value}}})));
+  await assert.rejects(check(await F.fixture({baseOptions:{append:['Content-Transfer-Encoding: 7bit']}})));
+});
+test('signed explicit 8bit remains supported but missing CTE with 8bit body fails', async () => {
+  assert.equal((await check(await F.fixture({baseOptions:{replace:{'Content-Transfer-Encoding':'8bit'},body:'Hello café\r\n'}}))).senderVerified,true);
+  await assert.rejects(check(await F.fixture({baseOptions:{replace:{'Content-Transfer-Encoding':null},body:'Hello café\r\n'}})));
+});
+test('every default/explicit7bit MIME entity rejects high bytes before parsing', () => {
+  const leaf=[{name:'content-type',value:'text/plain; charset=utf-8'}];
+  for(const value of [undefined,'7bit','', '  ']) {
+    const headers=[...leaf,...(value===undefined?[]:[{name:'content-transfer-encoding',value}])];
+    assert.throws(()=>plainQuestion(headers,Buffer.from('café\r\n')));
+  }
+  const multipart=[{name:'content-type',value:'multipart/alternative; boundary="Part"'}];
+  const body=Buffer.from('--Part\r\nContent-Type: text/plain\r\n\r\nHello\r\n--Part\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\ncafé\r\n--Part--\r\n');
+  for(const outer of [undefined,'7bit']) assert.throws(()=>plainQuestion([...multipart,...(outer?[{name:'content-transfer-encoding',value:outer}]:[])],body));
+  assert.equal(plainQuestion([...multipart,{name:'content-transfer-encoding',value:'8bit'}],body).trim(),'Hello');
+  const nested=Buffer.from('--Outer\r\nContent-Type: multipart/alternative; boundary="Part"\r\n\r\n'+body.toString()+'--Outer--\r\n');
+  assert.throws(()=>plainQuestion([{name:'content-type',value:'multipart/alternative; boundary="Outer"'},{name:'content-transfer-encoding',value:'8bit'}],nested));
+  const emptyPart=Buffer.from('--Part\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding:\r\n\r\nHello\r\n--Part--\r\n');
+  assert.throws(()=>plainQuestion(multipart,emptyPart));
 });
 for (const [name, mutate] of [
   ['body', raw => Buffer.concat([raw, Buffer.from('altered\r\n')])],

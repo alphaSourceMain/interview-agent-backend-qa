@@ -47,7 +47,9 @@ async function authenticateRaw({ raw, envelope, keys, now = Date.now() }) {
     const headers = parsed.headers;
     for (const name of ['arc-seal', 'arc-message-signature', 'arc-authentication-results']) if (headers.filter(h => h.name === name).length > 10) fail();
     stage = 'group_fields';
-    for (const name of REQUIRED) one(headers, name, true);
+    for (const name of REQUIRED) if (name !== 'content-transfer-encoding') one(headers, name, true);
+    const transferRows = headers.filter(h => h.name === 'content-transfer-encoding');
+    if (transferRows.length > 1 || (transferRows.length === 1 && !transferRows[0].value)) fail();
     // Encoded reply/forward subjects cannot bypass initial-message policy.
     if (one(headers, 'subject').includes('=?')) fail();
     const from = exactMailbox(one(headers, 'from'));
@@ -60,7 +62,9 @@ async function authenticateRaw({ raw, envelope, keys, now = Date.now() }) {
     const candidates = dkimRows.map(h => tags(h.value)).filter(s => s.d === 'alphasourceai.com');
     if (candidates.length !== 1 || candidates[0].s !== 'google') fail();
     signatureShape(candidates[0], 'alphasourceai.com', Number(envelope.internalDate), now);
-    if (REQUIRED.some(name => !covered(candidates[0]).has(name))) fail();
+    // Missing CTE defaults to 7bit. A present CTE must still be signed: adding
+    // an unsigned encoding header could otherwise change decoding of signed bytes.
+    if (REQUIRED.some(name => (name !== 'content-transfer-encoding' || transferRows.length) && !covered(candidates[0]).has(name))) fail();
     stage = 'group_crypto';
     const proof = await dkimVerify(raw, { strict: true, minBitLength: 2048, resolver: keys.resolver, curTime: new Date(now) });
     keys.assertBudget();

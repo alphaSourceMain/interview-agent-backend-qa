@@ -3,12 +3,12 @@ const { createHash } = require('node:crypto');
 const { parse } = require('dotenv');
 const { secureReadText, readExistingClient } = require('../../src/lib/supportEmailInstaller');
 const { validateGrant, QA, MAILBOX, OWNER } = require('./qa-config');
-const { CLIENT, REDIRECT, SCOPE } = require('./send-oauth');
+const { PROJECT, PROJECT_NUMBER, CLIENT, REDIRECT, SCOPE } = require('./send-oauth');
 const ENV_FILE = '/Users/jasongardner/Desktop/ai-interview-final/QA/interview-agent-backend-qa/.env';
 const READ_CLIENT = '/Users/jasongardner/Downloads/client_secret_940084368446-rmd990rkphtbbshq85tk357kcd3dl0t8.apps.googleusercontent.com.json';
 const READ_GRANT = '/Users/jasongardner/Downloads/alphy-support-qa/grant.json';
-const SEND_CLIENT = '/Users/jasongardner/Downloads/alphy-support-qa/send-client.json';
-const SEND_GRANT = '/Users/jasongardner/Downloads/alphy-support-qa/send-grant.json';
+const SEND_CLIENT = '/Users/jasongardner/Downloads/alphy-support-qa/isolated-send-client.json';
+const SEND_GRANT = '/Users/jasongardner/Downloads/alphy-support-qa/isolated-send-grant.json';
 const DRAFT = '1afe67e6-78e7-4df9-a69a-cbb066351d9d';
 const MD5 = '3b5b4fcd3e944481c150ba00eb3ff5a2';
 const SHA256 = '25796fcabdd1ea631b88a60e83d9c7bc0351c6b1f08acc6f36e3e2bdbdfb6f38';
@@ -22,7 +22,7 @@ function readSendClient(filename = SEND_CLIENT) {
     const parsed = JSON.parse(secureReadText(filename)), c = parsed.web;
     const allowed = ['client_id','project_id','auth_uri','token_uri','auth_provider_x509_cert_url','client_secret','redirect_uris','javascript_origins'];
     if (!c || Object.keys(parsed).length !== 1 || Object.keys(c).some(k => !allowed.includes(k)) ||
-      c.client_id !== CLIENT || c.project_id !== 'alphascreen-alphy-support' || c.auth_uri !== 'https://accounts.google.com/o/oauth2/auth' ||
+      c.client_id !== CLIENT || c.project_id !== PROJECT || CLIENT.split('-')[0] !== PROJECT_NUMBER || c.auth_uri !== 'https://accounts.google.com/o/oauth2/auth' ||
       c.token_uri !== 'https://oauth2.googleapis.com/token' || c.auth_provider_x509_cert_url !== 'https://www.googleapis.com/oauth2/v1/certs' ||
       !Array.isArray(c.redirect_uris) || c.redirect_uris.length !== 1 || c.redirect_uris[0] !== REDIRECT ||
       (c.javascript_origins && (!Array.isArray(c.javascript_origins) || c.javascript_origins.length)) ||

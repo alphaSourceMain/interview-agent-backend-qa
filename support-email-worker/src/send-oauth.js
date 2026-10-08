@@ -1,8 +1,11 @@
 'use strict';
-// Separate sender credentials. Existing readonly helpers are not generalized.
+// Separate sender PROJECT, not merely another client: Google revokes project-wide.
+// Existing readonly helpers and committed grants are not generalized or revoked.
 const { randomBytes, createHash, timingSafeEqual } = require('node:crypto');
 const { readJson } = require('./qa-store');
-const CLIENT = '940084368446-m88ok6st3vkts8vbk61sh0ue59qdgakr.apps.googleusercontent.com';
+const PROJECT = 'alphascreen-alphy-qa-sending';
+const PROJECT_NUMBER = '581820238541';
+const CLIENT = '581820238541-evup8b38vdio8f53rultitdifc4dmmdl.apps.googleusercontent.com';
 const REDIRECT = 'http://127.0.0.1:43873/oauth/callback';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/userinfo.email']);
 const SCOPE = SCOPES.join(' ');
@@ -95,4 +98,4 @@ function createSendOAuth({ client, fetchImpl = fetch, now = Date.now }) {
     },
   });
 }
-module.exports = { CLIENT, REDIRECT, SCOPES, SCOPE, exactScopes, createSendOAuth };
+module.exports = { PROJECT, PROJECT_NUMBER, CLIENT, REDIRECT, SCOPES, SCOPE, exactScopes, createSendOAuth };

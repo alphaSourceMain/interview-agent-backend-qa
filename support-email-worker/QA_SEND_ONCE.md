@@ -13,6 +13,12 @@ It can send only from alphy to the owner's previously authorized test address.
 
 ## Credential and configuration boundary
 
+The sender is isolated in its own Internal Google project:
+`alphascreen-alphy-qa-sending`, number `581820238541`, client
+`581820238541-evup8b38vdio8f53rultitdifc4dmmdl.apps.googleusercontent.com`.
+Downloaded JSON must match that exact project, client prefix, endpoints and
+redirect; old project/client pairs and mixed metadata are rejected. Google
+revocation is project-wide, so a second client in the intake project is unsafe.
 The separate Internal Google client has one callback at
 `http://127.0.0.1:43873/oauth/callback`. It requests exactly Gmail send and
 userinfo email, not Gmail read/modify/delete or admin permissions. Identity
@@ -20,12 +26,17 @@ must be Google's verified primary alphy email; client/audience/expiry/scope
 checks remain mandatory on authorization and refresh. Extra scopes stop the
 test; do not widen them to get a provider test to pass.
 
-Approved new owner-only files are `Downloads/alphy-support-qa/send-client.json`
-and `send-grant.json`. Reads reject symlinks, hardlinks and unsafe ancestors;
+Approved new owner-only files are `Downloads/alphy-support-qa/isolated-send-client.json`
+and `isolated-send-grant.json`. The unused old same-project sender JSON stays
+untouched and is not used. Reads reject symlinks, hardlinks and unsafe ancestors;
 new grant publication is exclusive, fsynced and never overwrites a file.
 Access tokens are RAM-only. Only an uncommitted new send refresh token may be
 revoked during failed connection cleanup. Neither committed send nor original
 readonly credentials are ever written/revoked on refresh failure or rotation.
+After any new sender-project revoke attempt (including an unconfirmed result),
+stop; the original readonly grant must be refreshed and verified by a separately
+reviewed read-only procedure before any further sender consent. Do not force
+an artificial failure, retry consent, bypass flags or treat mocks as live proof.
 
 Configuration comes only from the pinned private QA env file, not ambient
 environment or command arguments. XAI_API_KEY is not selected or used.

@@ -4,7 +4,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { createHash } = require('node:crypto');
 const {
   ANSWERS, CLOSING_QUESTION, MAX_AUDIO_BYTES, MAX_RUN_MS, QA_FRONTEND, QA_PERSONA_ID,
-  QUESTIONS, SCENARIOS, assertQaEnvironment, evaluateRun, normalizeSpeech,
+  QUESTIONS, SCENARIOS, assertQaEnvironment, evaluateRun, normalizeSpeech, scriptedAnswerReceived,
 } = require('./qaSyntheticInterviews');
 const { installSyntheticBrowser } = require('./qaSyntheticBrowser');
 
@@ -13,6 +13,12 @@ const DAILY_SCRIPT = 'https://unpkg.com/@daily-co/daily-js@0.91.0/dist/daily.js'
 const fingerprint = (persona) => createHash('sha256').update(JSON.stringify({
   system_prompt: persona.system_prompt, layers: persona.layers, default_replica_id: persona.default_replica_id,
 })).digest('hex');
+
+function readSyntheticSnapshot() {
+  const runtime = window.__qaSynthetic;
+  return runtime && { events: runtime.events, lastStop: runtime.lastStop, speaking: runtime.speaking,
+    recording: Boolean(runtime.recorder), path: location.pathname };
+}
 
 function networkAction(url, method) {
   let parsed;
@@ -59,6 +65,12 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
   const evidence = { events: [], answered_questions: [], candidate_utterances: 0, closing_reply_sent: false,
     end_requests: 0, end_reason: null, provider_end_confirmed: false, completion_page: false,
     browser_errors: 0, audio_bytes: 0, audio_transcript: '' };
+  const captureEvents = (events) => {
+    if (!Array.isArray(events)) return;
+    evidence.events = events;
+    evidence.candidate_utterances = events.filter((item) => item.type === 'conversation.utterance' &&
+      ['candidate', 'user', 'participant'].includes(item.role)).length;
+  };
   const endProvider = () => {
     if (!conversation?.conversation_id) return Promise.resolve(false);
     if (!endPromise) endPromise = (async () => {
@@ -103,8 +115,12 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
           evidence.end_reason = body.reason;
           if (body.interview_id !== id || body.role_token !== id || body.conversation_id !== conversation?.conversation_id ||
               body.reason !== 'closing_utterance' || evidence.end_requests !== 1) return reply({ error: 'synthetic_end_binding_mismatch' }, 403);
-          const recorded = await page.evaluate(() => window.__qaSynthetic?.finishRecording());
-          if (recorded) audio = Buffer.from(recorded, 'base64');
+          const recorded = await page.evaluate(async () => {
+            const runtime = window.__qaSynthetic;
+            return runtime && { audio: await runtime.finishRecording(), events: runtime.events };
+          });
+          captureEvents(recorded?.events);
+          if (recorded?.audio) audio = Buffer.from(recorded.audio, 'base64');
           frontendEndSucceeded = await endProvider();
           return reply({ ok: frontendEndSucceeded }, frontendEndSucceeded ? 200 : 502);
         }
@@ -147,15 +163,9 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
     let cursor = 0, warmupAnswered = false, previousSpeech = '', lastAnswerAt = 0, followups = 0;
     while (Date.now() < deadline && !frontendEndSucceeded) {
       signal.throwIfAborted();
-      const snapshot = await page.evaluate(() => {
-        const runtime = window.__qaSynthetic;
-        return runtime && { events: runtime.events, lastStop: runtime.lastStop, speaking: runtime.speaking,
-          recording: Boolean(runtime.recorder), path: location.pathname };
-      });
+      const snapshot = await page.evaluate(readSyntheticSnapshot);
       if (!snapshot) throw new Error('synthetic_browser_observer_missing');
-      evidence.events = snapshot.events;
-      evidence.candidate_utterances = snapshot.events.filter((item) => item.type === 'conversation.utterance' &&
-        ['candidate', 'user', 'participant'].includes(item.role)).length;
+      captureEvents(snapshot.events);
       let turn = null;
       while (cursor < snapshot.events.length) {
         const item = snapshot.events[cursor];
@@ -195,14 +205,31 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
         }
         if (clip !== undefined) {
           if (!snapshot.recording) throw new Error('synthetic_remote_audio_unavailable');
+          let playback;
           try {
-            await page.evaluate((audioClip) => window.__qaSynthetic.play(audioClip), clips[clip]);
+            playback = await page.evaluate((audioClip) => window.__qaSynthetic.play(audioClip), clips[clip]);
           } catch (failure) {
-            const known = String(failure?.message).match(/synthetic_audio_(?:invalid|resume_stalled|playback_stalled)/);
+            const known = String(failure?.message).match(/synthetic_audio_(?:invalid|resume_stalled|overlap)/);
             if (known) throw new Error(known[0]);
             throw new Error(failure?.name === 'ProtocolError' ? 'synthetic_audio_protocol_timeout' : 'synthetic_audio_playback_failed');
           }
-          lastAnswerAt = Date.now();
+          lastAnswerAt = playback.started_at;
+          const acknowledgementDeadline = Math.min(deadline,
+            Date.now() + Math.max(20000, playback.duration_seconds * 2000 + 10000));
+          let acknowledged = false;
+          while (Date.now() < acknowledgementDeadline) {
+            signal.throwIfAborted();
+            const received = await page.evaluate(readSyntheticSnapshot);
+            captureEvents(received?.events);
+            if (scriptedAnswerReceived(evidence.events, scripts[clip], playback.started_at)) {
+              acknowledged = true;
+              if (received) await page.evaluate(() => window.__qaSynthetic.stopPlayback());
+              break;
+            }
+            if (!received || frontendEndSucceeded) break;
+            await delay(350, undefined, { signal });
+          }
+          if (!acknowledged) throw new Error('synthetic_answer_not_received');
         }
       }
       await delay(350, undefined, { signal });
@@ -227,8 +254,14 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
     signal.removeEventListener('abort', onAbort);
     if (!audio && page && !page.isClosed()) {
       try {
-        const recorded = await page.evaluate(() => window.__qaSynthetic?.finishRecording());
-        if (recorded) audio = Buffer.from(recorded, 'base64');
+        const recorded = await page.evaluate(async () => {
+          const runtime = window.__qaSynthetic;
+          if (!runtime) return null;
+          runtime.stopPlayback();
+          return { audio: await runtime.finishRecording(), events: runtime.events };
+        });
+        captureEvents(recorded?.events);
+        if (recorded?.audio) audio = Buffer.from(recorded.audio, 'base64');
       } catch {}
     }
     try { await endProvider(); } catch { error = 'synthetic_vendor_cleanup_unconfirmed'; }

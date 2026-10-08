@@ -43,6 +43,13 @@ binds the Web Audio microphone track through Daily's audioSource option, rather
 than relying on a top-page getUserMedia override to affect Daily's media context.
 observes real Daily events; it never fabricates participant utterances.
 
+Each answer waits for fresh Tavus candidate-utterance evidence matching the
+script's beginning, ending, and minimum content length. Browser playback start
+or a speaking event alone cannot advance the test. The wait is bounded; missing
+acknowledgement fails with synthetic_answer_not_received. Playback completion
+callbacks are not used as success evidence. Failure transcripts retain the most
+recent observed events rather than just the snapshot before playback.
+
 Only within that isolated browser, application status and telemetry are synthetic
 nonpersisting responses. The frontend's real end request is intercepted, checked
 against the run IDs, and calls the real vendor end API without invoking normal

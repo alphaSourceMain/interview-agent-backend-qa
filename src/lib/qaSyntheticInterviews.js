@@ -60,6 +60,17 @@ function spokenWords(value) {
   return normalizeSpeech(value).replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9' ]/g, '').replace(/\s+/g, ' ').trim();
 }
 
+function scriptedAnswerReceived(events, expected, startedAt) {
+  if (!spokenWords(expected) || !Number.isFinite(startedAt)) return false;
+  const words = spokenWords(expected).split(' ');
+  const prefix = words.slice(0, 8).join(' ');
+  const suffix = words.slice(-4).join(' ');
+  const received = events.filter((item) => item.at >= startedAt && item.type === 'conversation.utterance' &&
+    ['candidate', 'user', 'participant'].includes(item.role)).map((item) => spokenWords(item.speech)).join(' ');
+  return received.includes(prefix) && received.includes(suffix) &&
+    received.split(' ').length >= Math.ceil(words.length * 0.8);
+}
+
 function evaluateRun(scenarioId, evidence) {
   const expected = SCENARIOS[scenarioId].expected;
   const replica = evidence.events.filter((item) => item.type === 'conversation.utterance' &&
@@ -176,4 +187,4 @@ function createQaSyntheticInterviewService({ env = process.env, execute, now = D
 
 module.exports = { ANSWERS, CLOSING_QUESTION, MAX_AUDIO_BYTES, MAX_RUN_MS, QA_FRONTEND, QA_PERSONA_ID,
   QA_SERVICE_ID, QUESTIONS, SCENARIOS, assertQaEnvironment, createQaSyntheticInterviewService,
-  evaluateRun, normalizeSpeech };
+  evaluateRun, normalizeSpeech, scriptedAnswerReceived };

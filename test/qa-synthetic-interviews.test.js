@@ -6,7 +6,7 @@ const { randomUUID } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const express = require('express');
 const { SCENARIOS, QUESTIONS, ANSWERS, CLOSING_QUESTION, QA_SERVICE_ID, QA_PERSONA_ID,
-  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun } = require('../src/lib/qaSyntheticInterviews');
+  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, scriptedAnswerReceived } = require('../src/lib/qaSyntheticInterviews');
 const { networkAction } = require('../src/lib/qaSyntheticInterviewRunner');
 const { createAdminSyntheticInterviewsRouter } = require('../routes/adminSyntheticInterviews');
 const { installSyntheticBrowser } = require('../src/lib/qaSyntheticBrowser');
@@ -62,7 +62,7 @@ test('runner is off by default and rejects production, previews, missing identit
 });
 
 test('synthetic playback converts bounded little-endian PCM without a browser codec', async () => {
-  let samples;
+  let samples, stopped = 0;
   const connections = [], microphone = {}, output = {};
   const window = {}; window.top = window;
   const sandbox = { window, location: { origin: 'https://alphasourceai-com.onrender.com', pathname: '/interview/live' },
@@ -77,14 +77,37 @@ test('synthetic playback converts bounded little-endian PCM without a browser co
         samples = new Float32Array(count);
         return { duration: count / rate, getChannelData: () => samples };
       }
-      createBufferSource() { return { connect(target) { connections.push(target); }, start() { this.onended(); } }; }
+      createBufferSource() { return { connect(target) { connections.push(target); },
+        start() {}, stop() { stopped += 1; }, disconnect() {} }; }
     } };
   runInNewContext(`(${installSyntheticBrowser.toString()})({})`, sandbox);
-  await window.__qaSynthetic.play(Buffer.from([0, 128, 0, 0, 255, 127]).toString('base64'));
+  const playback = await window.__qaSynthetic.play(Buffer.from([0, 128, 0, 0, 255, 127]).toString('base64'));
+  assert.equal(playback.duration_seconds, 3 / 24000);
+  assert.ok(playback.started_at > 0);
   assert.deepEqual(connections, [microphone, output]);
   assert.deepEqual(Array.from(samples), [-1, 0, 32767 / 32768]);
+  await assert.rejects(window.__qaSynthetic.play('AAA='), /synthetic_audio_overlap/);
+  window.__qaSynthetic.stopPlayback();
+  window.__qaSynthetic.stopPlayback();
+  assert.equal(stopped, 1);
   for (const bytes of [Buffer.alloc(0), Buffer.alloc(1), Buffer.alloc(24000 * 2 * 30 + 2)]) {
     await assert.rejects(window.__qaSynthetic.play(bytes.toString('base64')), /synthetic_audio_invalid/);
+  }
+});
+
+test('answer acknowledgement requires fresh received candidate content, not playback or speaking events', () => {
+  const expected = ANSWERS[0];
+  const event = { type: 'conversation.utterance', role: 'user', speech: expected, at: 100 };
+  assert.equal(scriptedAnswerReceived([event], expected, 99), true);
+  assert.equal(scriptedAnswerReceived([event], expected, 101), false);
+  assert.equal(scriptedAnswerReceived([{ ...event, role: 'replica' }], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([{ ...event, type: 'conversation.started_speaking' }], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([{ ...event, speech: expected.split(' ').slice(0, 8).join(' ') }], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([{ ...event, speech: 'Can you repeat the question?' }], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([event], '', 99), false);
+  for (const { reply } of Object.values(SCENARIOS)) {
+    assert.equal(scriptedAnswerReceived([{ ...event, speech: reply }], reply, 99), true);
   }
 });
 

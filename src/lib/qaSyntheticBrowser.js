@@ -10,6 +10,14 @@ function installSyntheticBrowser(session) {
   window.__qaSynthetic = runtime;
   const context = new AudioContext();
   const microphone = context.createMediaStreamDestination();
+  let activeSource = null;
+  runtime.stopPlayback = () => {
+    if (!activeSource) return;
+    const source = activeSource;
+    activeSource = null;
+    try { source.stop(); } catch {}
+    source.disconnect();
+  };
   const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
   navigator.mediaDevices.getUserMedia = async (constraints) => {
     const tracks = constraints?.video
@@ -19,6 +27,7 @@ function installSyntheticBrowser(session) {
     return new MediaStream(tracks);
   };
   runtime.play = async (base64) => {
+    if (activeSource) throw new Error('synthetic_audio_overlap');
     let resumeTimer;
     try {
       await Promise.race([context.resume(), new Promise((_, reject) => {
@@ -36,11 +45,12 @@ function installSyntheticBrowser(session) {
     source.buffer = buffer;
     source.connect(microphone);
     source.connect(context.destination);
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { source.stop(); reject(new Error('synthetic_audio_playback_stalled')); }, (buffer.duration + 3) * 1000);
-      source.onended = () => { clearTimeout(timer); resolve(); };
-      source.start();
-    });
+    activeSource = source;
+    source.onended = () => { if (activeSource === source) runtime.stopPlayback(); };
+    const startedAt = Date.now();
+    source.start();
+    // The driver waits for received speech; a missing onended callback is not a verdict.
+    return { started_at: startedAt, duration_seconds: buffer.duration };
   };
   runtime.finishRecording = async () => {
     if (!runtime.recorder) return null;

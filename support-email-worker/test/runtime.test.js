@@ -25,7 +25,7 @@ async function harness(change = {}) {
       if (op === 'finish') { if (change.lostFinish) throw Error('LOST'); state = data.state; return true; }
       return true;
     } }) },
-    '../src/qa-store': { ...require('../src/qa-store'), createQaStore: () => ({ async recognizeClient() { events.push('membership'); if (change.lookupError) throw Error(); return !!change.client; } }) },
+    '../src/runtime-membership': { async recognizeRuntimeClient() { events.push('membership'); if (change.lookupError) throw Error(); return !!change.client; } },
     '../src/send-readonly-refresh': { async refreshSendReadonly() { events.push('readAuth'); return { mailbox: MAILBOX, accessToken: 'synthetic-read-token', expiresAt: Date.now()+3600000 }; } },
     '../src/send-oauth': { createSendOAuth: () => ({ async refresh() { events.push('sendAuth'); return { mailbox: MAILBOX, accessToken: 'synthetic-send-token', expiresAt: Date.now()+3600000 }; } }) },
     '../src/gmail-read': { ...require('../src/gmail-read'), async boundedJson(path) {

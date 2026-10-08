@@ -5,7 +5,8 @@ const { createHash } = require('node:crypto');
 const { loadRuntimeConfig } = require('./runtime-config');
 const { MAILBOX, OWNER } = require('./qa-config');
 const { createRuntimeStore } = require('./runtime-store');
-const { createQaStore, readJson } = require('./qa-store');
+const { readJson } = require('./qa-store');
+const { recognizeRuntimeClient } = require('./runtime-membership');
 const { refreshSendReadonly } = require('./send-readonly-refresh');
 const { createSendOAuth } = require('./send-oauth');
 const { boundedJson, decimal, hex, decodeEnvelope } = require('./gmail-read');
@@ -69,7 +70,6 @@ async function runRuntime() {
   const knowledge = readKnowledgeFiles();
   const prompts = { public: buildEmailPrompt('public', knowledge), client: buildEmailPrompt('client', knowledge) };
   const page = await readHistory(auth.accessToken, lease.cursor, deadline);
-  const membership = createQaStore(initial.keys.supabaseServiceRoleKey, deadline);
   const generate = createXaiDraftGenerator({ apiKey: initial.keys.xaiApiKey, fetchImpl: async (url, options) => {
     await check(45000);
     if (url !== 'https://api.x.ai/v1/chat/completions') fail();
@@ -82,8 +82,13 @@ async function runRuntime() {
     const seen = await store.call('seen', nonce, { gmail: gmailKey, gmail_id: id });
     async function processed(reason) { await check(10000); if (await store.call('processed', nonce, { gmail: gmailKey, reason }) !== true) fail(); }
     if (![null, 'processed', 'accepted_copy'].includes(seen)) fail();
-    if (seen) { if (seen === 'accepted_copy') await processed('accepted_copy'); counts.duplicate++; continue; }
+    if (seen === 'processed') { counts.duplicate++; continue; }
     const envelope = await boundedJson('messages/' + id + '?format=raw', auth.accessToken, Math.min(deadline - 10000, Date.now() + 10000));
+    if (seen === 'accepted_copy') {
+      // Even a durable sent id must match the fetched history message/labels.
+      const checked = decodeEnvelope(envelope, id); checked.fill(0);
+      await processed('accepted_copy'); counts.duplicate++; continue;
+    }
     const excluded = excludeEnvelope(envelope, id);
     if (excluded) { await processed(excluded); counts.skipped++; continue; }
     await check(115000); // A partial page holds the cursor; prior claims remain durable.
@@ -99,7 +104,7 @@ async function runRuntime() {
     if (claim === null) { await processed('duplicate'); counts.duplicate++; continue; }
     if (typeof claim !== 'string' || !UUID.test(claim)) fail();
     let generated, lookupFailed = false, client = false;
-    try { client = await membership.recognizeClient(record.sender) === true; } catch (_) { lookupFailed = true; }
+    try { client = await recognizeRuntimeClient(initial.keys.supabaseServiceRoleKey, record.sender, deadline) === true; } catch (_) { lookupFailed = true; }
     const audience = client ? 'client' : 'public', prompt = prompts[audience];
     // Any ambiguous storage failure halts. Generation/recheck rejection can
     // finish a bodyless review exactly once, never regenerate the same claim.

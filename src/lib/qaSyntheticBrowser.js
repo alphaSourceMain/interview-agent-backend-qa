@@ -5,7 +5,7 @@ function installSyntheticBrowser(session) {
   if (window.top !== window || location.origin !== 'https://alphasourceai-com.onrender.com') return;
   if (location.pathname !== '/interview/live') return;
   sessionStorage.setItem('alphasource_interview_live_state', JSON.stringify(session));
-  const runtime = { events: [], lastStop: 0, speaking: false, call: null,
+  const runtime = { events: [], lastStop: 0, speaking: false, candidateSpeaking: false, call: null,
     recorder: null, chunks: [], recordingBytes: 0, recordingError: false, audio: null };
   window.__qaSynthetic = runtime;
   const context = new AudioContext();
@@ -81,13 +81,19 @@ function installSyntheticBrowser(session) {
         runtime.call = call;
         call.on('app-message', (event) => {
           const data = event?.data || {};
-          const type = String(data.event_type || data.type || '');
+          const type = String(data.event_type || data.eventType || data.type || '').toLowerCase();
           const role = String(data.properties?.role || data.role || '').toLowerCase();
           const speech = String(data.properties?.speech || data.properties?.text || data.speech || data.text || '').slice(0, 2000);
           if (runtime.events.length < 200 && type) runtime.events.push({ type, role, speech, at: Date.now() });
-          const pal = ['replica', 'pal', 'assistant', 'agent'].includes(role) || /replica|pal/.test(type);
-          if (pal && /started[._]speaking$/.test(type)) runtime.speaking = true;
-          if (pal && /stopped[._]speaking$/.test(type)) { runtime.speaking = false; runtime.lastStop = Date.now(); }
+          const started = /started[._-]speaking$/.test(type);
+          const stopped = /stopped[._-]speaking$/.test(type);
+          const candidate = ['candidate', 'user', 'participant'].includes(role) || /(?:^|[._-])user[._-]/.test(type);
+          if (candidate && started) runtime.candidateSpeaking = true;
+          if (candidate && stopped) runtime.candidateSpeaking = false;
+          const pal = ['replica', 'pal', 'assistant', 'agent'].includes(role) || /(?:^|[._-])(?:replica|pal|assistant|agent)[._-]/.test(type);
+          if (pal && started) runtime.speaking = true;
+          const rolelessStop = type === 'conversation.stopped_speaking' && !role && runtime.speaking && !runtime.candidateSpeaking;
+          if ((pal || rolelessStop) && stopped) { runtime.speaking = false; runtime.lastStop = Date.now(); }
         });
         for (const event of ['participant-updated', 'track-started', 'participant-joined']) {
           call.on(event, () => attachRecording(call));

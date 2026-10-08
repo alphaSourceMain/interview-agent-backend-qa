@@ -9,11 +9,41 @@ const { SCENARIOS, QUESTIONS, ANSWERS, CLOSING_QUESTION, QA_SERVICE_ID, QA_PERSO
   assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun } = require('../src/lib/qaSyntheticInterviews');
 const { networkAction } = require('../src/lib/qaSyntheticInterviewRunner');
 const { createAdminSyntheticInterviewsRouter } = require('../routes/adminSyntheticInterviews');
+const { installSyntheticBrowser } = require('../src/lib/qaSyntheticBrowser');
+const { runInNewContext } = require('node:vm');
 
 const ENV = { ENABLE_QA_SYNTHETIC_INTERVIEWS: 'true', SUPABASE_URL: 'https://yjjxzxoghlpguquknyso.supabase.co',
   RENDER_SERVICE_ID: QA_SERVICE_ID, RENDER_GIT_BRANCH: 'qa-backend', TAVUS_PERSONA_ID: QA_PERSONA_ID,
   RENDER_EXTERNAL_URL: 'https://ia-backend-qa.onrender.com', TAVUS_API_KEY: 'test', OPENAI_API_KEY: 'test' };
 const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test('isolated observer recognizes qualified speaking variants without treating candidate or unknown stops as replica progress', () => {
+  const handlers = {};
+  const window = {}; window.top = window;
+  const sandbox = { window, location: { origin: 'https://alphasourceai-com.onrender.com', pathname: '/interview/live' },
+    sessionStorage: { setItem() {} }, navigator: { mediaDevices: { getUserMedia: async () => ({ getVideoTracks: () => [] }) } },
+    AudioContext: class { createMediaStreamDestination() { return { stream: { getAudioTracks: () => [{ clone() {} }] } }; } } };
+  runInNewContext(`(${installSyntheticBrowser.toString()})({})`, sandbox);
+  window.DailyIframe = { createCallObject: () => ({ on: (name, handler) => { handlers[name] = handler; } }) };
+  window.DailyIframe.createCallObject();
+  const emit = (type, role) => handlers['app-message']({ data: { eventType: type, properties: { role } } });
+  const runtime = window.__qaSynthetic;
+  emit('conversation.stopped_speaking');
+  assert.equal(runtime.lastStop, 0);
+  emit('conversation.replica-started-speaking');
+  assert.equal(runtime.speaking, true);
+  emit('conversation.user-started-speaking');
+  emit('conversation.stopped_speaking');
+  assert.equal(runtime.speaking, true);
+  emit('conversation.user-stopped-speaking');
+  emit('conversation.stopped_speaking');
+  assert.equal(runtime.speaking, false);
+  assert.ok(runtime.lastStop > 0);
+  emit('conversation.started_speaking', 'replica');
+  emit('conversation.replica.stopped_speaking');
+  assert.equal(runtime.speaking, false);
+  assert.equal(runtime.events.length, 8);
+});
 
 test('runner is off by default and rejects production, previews, missing identity and provider overrides', () => {
   assert.doesNotThrow(() => assertQaEnvironment(ENV));

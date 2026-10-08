@@ -1,0 +1,39 @@
+# Isolated service only; never synchronize this as the main backend Blueprint.
+# Repo root is intentional: worker reuses reviewed static src/lib and assets.
+services:
+  - type: cron
+    name: alphascreen-alphy-mail-qa
+    runtime: node
+    repo: https://github.com/alphaSourceMain/interview-agent-backend-qa
+    branch: support-email-qa-20261007
+    plan: starter
+    region: oregon
+    autoDeployTrigger: off
+    schedule: "*/5 * * * *"
+    buildCommand: npm ci --ignore-scripts --prefix support-email-worker
+    startCommand: node support-email-worker/tick.js
+    envVars:
+      - key: NODE_VERSION
+        value: "24.19.0"
+      - key: SUPABASE_URL
+        value: https://yjjxzxoghlpguquknyso.supabase.co
+      - key: SUPPORT_EMAIL_ENVIRONMENT
+        value: qa
+      - key: SUPPORT_EMAIL_MAILBOX
+        value: alphy@alphasourceai.com
+      - key: SUPPORT_EMAIL_OWNER_TEST_ONLY
+        value: "true"
+      - key: SUPPORT_EMAIL_OWNER_TEST_SENDER
+        value: jason@gardner.ltd
+      - key: SUPPORT_EMAIL_WORKER_ENABLED
+        value: "false"
+      - key: SUPPORT_EMAIL_WORKER_MODE
+        value: qa-draft
+      - key: SUPPORT_EMAIL_WORKER_SEND_APPROVED
+        value: "false"
+      - key: SUPPORT_EMAIL_HUMAN_CC_RULE_APPROVED
+        value: "false"
+      - key: SUPPORT_EMAIL_SECRET_MOUNT_APPROVED
+        value: "false"
+      - key: SUPPORT_EMAIL_MOUNT_MANIFEST
+        value: "{}"

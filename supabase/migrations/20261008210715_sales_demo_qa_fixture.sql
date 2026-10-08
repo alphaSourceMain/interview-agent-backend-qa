@@ -67,7 +67,7 @@ do $policies$ declare r record; predicate text; command text; pname text; begin
     from information_schema.columns where table_schema='public' and column_name in ('client_id','parent_client_id','role_id','candidate_id','interview_id')
       and table_name in(select tablename from pg_tables where schemaname='public') group by table_name loop
     predicate:=r.predicate;
-    if r.table_name='roles' or r.table_name='candidates' or r.table_name='interviews' or r.table_name='reports' then
+    if r.table_name='clients' or r.table_name='roles' or r.table_name='candidates' or r.table_name='interviews' or r.table_name='reports' then
       predicate:=predicate || ' and id::text !~ ''^d38ade00-2026-4000-8000-''';
     end if;
     if not (select relrowsecurity from pg_class where oid=('public.'||quote_ident(r.table_name))::regclass) then raise exception 'existing_RLS_required: %',r.table_name; end if;

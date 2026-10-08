@@ -27,6 +27,9 @@ test('isolated observer recognizes qualified speaking variants without treating 
   runInNewContext(`(${installSyntheticBrowser.toString()})({})`, sandbox);
   window.DailyIframe = { createCallObject: (options) => {
     assert.equal(options.audioSource, microphoneTrack);
+    assert.equal(options.videoSource, false);
+    assert.equal(options.startVideoOff, true);
+    assert.equal(options.receiveSettings.base.video.layer, 0);
     return { on: (name, handler) => { handlers[name] = handler; } };
   } };
   window.DailyIframe.createCallObject();
@@ -47,6 +50,22 @@ test('isolated observer recognizes qualified speaking variants without treating 
   emit('conversation.replica.stopped_speaking');
   assert.equal(runtime.speaking, false);
   assert.equal(runtime.events.length, 8);
+});
+
+test('isolated media override never captures camera media and preserves cloned microphone audio', async () => {
+  let captures = 0;
+  const clonedTrack = { kind: 'audio' };
+  const microphoneTrack = { clone: () => clonedTrack };
+  const window = {}; window.top = window;
+  const sandbox = { window, location: { origin: 'https://alphasourceai-com.onrender.com', pathname: '/interview/live' },
+    sessionStorage: { setItem() {} }, navigator: { mediaDevices: { getUserMedia: async () => { captures += 1; } } },
+    MediaStream: class { constructor(tracks) { this.tracks = tracks; } },
+    AudioContext: class { createMediaStreamDestination() { return { stream: { getAudioTracks: () => [microphoneTrack] } }; } } };
+  runInNewContext(`(${installSyntheticBrowser.toString()})({})`, sandbox);
+  const media = await sandbox.navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+  assert.deepEqual(Array.from(media.tracks), [clonedTrack]);
+  assert.equal((await sandbox.navigator.mediaDevices.getUserMedia({ video: true })).tracks.length, 0);
+  assert.equal(captures, 0);
 });
 
 test('runner is off by default and rejects production, previews, missing identity and provider overrides', () => {

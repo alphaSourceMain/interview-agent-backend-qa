@@ -18,11 +18,8 @@ function installSyntheticBrowser(session) {
     try { source.stop(); } catch {}
     source.disconnect();
   };
-  const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
   navigator.mediaDevices.getUserMedia = async (constraints) => {
-    const tracks = constraints?.video
-      ? (await originalGetUserMedia({ audio: false, video: constraints.video })).getVideoTracks()
-      : [];
+    const tracks = [];
     if (constraints?.audio) tracks.push(microphone.stream.getAudioTracks()[0].clone());
     return new MediaStream(tracks);
   };
@@ -103,7 +100,9 @@ function installSyntheticBrowser(session) {
       const original = value.createCallObject;
       value.createCallObject = function (...args) {
         // Daily acquires media in its own context, so bind the synthetic track explicitly.
-        const call = original.call(this, { ...args[0], audioSource: microphone.stream.getAudioTracks()[0] });
+        const call = original.call(this, { ...args[0], audioSource: microphone.stream.getAudioTracks()[0],
+          videoSource: false, startVideoOff: true,
+          receiveSettings: { base: { video: { layer: 0 } } } });
         runtime.call = call;
         call.on('app-message', (event) => {
           const data = event?.data || {};

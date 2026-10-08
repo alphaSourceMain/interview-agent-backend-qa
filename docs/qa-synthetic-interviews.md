@@ -38,10 +38,14 @@ internal evaluation details. Expected speech comes from interviewClosingContract
 
 The runner uses real Tavus audio, the deployed QA persona, canonical dynamic
 prompt builders, and the actual deployed /interview/live browser UI. It injects
-synthetic microphone/camera media only in its isolated Chromium instance. It
+synthetic microphone media only in its isolated Chromium instance. Camera capture
+and transmission are disabled there, and remote avatar video requests the lowest
+simulcast layer (0), when the Daily call uses SFU mode. Remote audio, video, and
+the frontend's real startup/progress checks remain enabled. This reduces media
+work; it does not establish that CPU pressure caused a missing answer. It
 binds the Web Audio microphone track through Daily's audioSource option, rather
 than relying on a top-page getUserMedia override to affect Daily's media context.
-observes real Daily events; it never fabricates participant utterances.
+It observes real Daily events; it never fabricates participant utterances.
 
 Each answer waits for fresh Tavus candidate-utterance evidence matching the
 script's beginning, ending, and minimum content length. Browser playback start

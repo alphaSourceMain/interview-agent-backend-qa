@@ -1,6 +1,6 @@
 # alphy raw-mail verifier — local QA increment
 
-Separate Node24 package; install with `npm ci --ignore-scripts`, test with `npm test`. `mailauth` is exactly 7.1.1 with a separate integrity lockfile. No startup, polling, cron, model, store, send, provider credential file or deployment wiring exists here. The main Node20 backend package/lock/start path is unchanged.
+Separate Node24 package; install with `npm ci --ignore-scripts`, test with `npm test`. `mailauth` is exactly 7.1.1 with a separate integrity lockfile. The verifier has no writes/model/send. Separate default-off local acceptance commands below are not imported by backend startup, polling or cron. The main Node20 backend package/lock/start path is unchanged.
 
 `readVerifiedInitial` is a fixed read-only Gmail composition. Only canonical hex IDs, dedicated alphy profile, a 400KiB streamed JSON cap, a 256KiB complete raw cap, 64KiB/100-field header cap and a 15-second attempt are accepted. Gmail's padded or unpadded canonical base64url forms are supported. All policy/question data come from those same authenticated RFC822 bytes, never format=full. The minimal bound thread must contain only that message. Every call repeats raw, crypto and thread retrieval: no reusable cached attestation.
 
@@ -14,7 +14,7 @@ Opaque eligible decisions are private WeakMap entries tied to frozen raw-derived
 
 Actual owner-only readback accepted one initial email and rejected both two-message reply threads, with sender proof valid. Cryptographic synthetic failures and bounded transport/MIME tests are separate evidence, not provider acceptance. No bodies/addresses/signature values/credentials are retained in release packets.
 
-This increment is NOT a complete responder. Later reviewed composition must use the existing exact readonly token refresh/client/scope checks, durable claim before model, static membership-only guidance selection, a fresh branded decision immediately before persistence, and mandatory human review. Hosted QA schema/maintenance, actual model/draft tests and a separate approved send credential/outbox/Group-visible human coordination remain pending. Processing and sending are off; production unchanged.
+This is NOT a complete automatic responder. The owner-only draft acceptance below has been separately reviewed and tested. A permanent Gmail history cursor, Group-visible human coordination and a general production delivery policy still require later work. Processing and sending stay off outside explicit controlled acceptance; production is unchanged.
 # Owner-only one-shot draft acceptance
 
 `node qa-draft.js` is a separate local Node 24 command, never part of app startup.
@@ -35,3 +35,10 @@ moves. For this owner-only acceptance, the approved cutover may equal grant
 capture, allowing only that owner's explicitly requested test intake; this is
 not authority to backfill client/customer mail or to automatically enable a
 responder. Leave processing off outside the controlled acceptance run.
+
+# Separate owner-only one-reply acceptance
+
+See [QA_SEND_ONCE.md](QA_SEND_ONCE.md). `connect-send.js` and `qa-send.js`
+are separate local Node24 commands, with no arguments or runtime dependency
+overrides. They are not a general mail worker and do not authorize automatic
+replies, customer sending, hosted credentials, or production.

@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { authenticateRaw } = require('./authenticate-raw');
 const { productionResolver, within } = require('./keys');
 const { hex, decimal, boundedJson, decodeEnvelope } = require('./gmail-read');
+const { one } = require('./raw-message');
 const { classifyInitialEmail } = require('../../src/lib/supportEmailPolicy');
 const decisions = new WeakMap();
 const fail = () => { throw new Error('SUPPORT_EMAIL_GMAIL_REJECTED'); };
@@ -29,7 +30,8 @@ async function readVerifiedInitial({ accessToken, id, cutoverMs, baselineHistory
       if (!policy.eligible) return Object.freeze({ eligible: false, reason: policy.reason });
       const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ message: verified.message, thread: canonicalThread })).digest('hex');
       const decision = Object.freeze({ eligible: true });
-      decisions.set(decision, Object.freeze({ ...policy, senderVerified: verified.senderVerified, fingerprint }));
+      decisions.set(decision, Object.freeze({ ...policy, senderVerified: verified.senderVerified, fingerprint,
+        gmailId: envelope.id, threadId: envelope.threadId, rfcMessageId: one(verified.message.payload.headers, 'message-id', true) }));
       return decision;
     })(), deadline - Date.now(), () => keys.close());
   } catch (_) { return Object.freeze({ eligible: false, reason: 'unverified_group_delivery' }); }

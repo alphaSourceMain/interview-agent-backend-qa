@@ -62,24 +62,26 @@ test('runner is off by default and rejects production, previews, missing identit
 });
 
 test('synthetic playback converts bounded little-endian PCM without a browser codec', async () => {
-  let samples, connected = false;
+  let samples;
+  const connections = [], microphone = {}, output = {};
   const window = {}; window.top = window;
   const sandbox = { window, location: { origin: 'https://alphasourceai-com.onrender.com', pathname: '/interview/live' },
     sessionStorage: { setItem() {} }, navigator: { mediaDevices: { getUserMedia: async () => {} } },
     atob: (value) => Buffer.from(value, 'base64').toString('binary'), setTimeout, clearTimeout,
     AudioContext: class {
+      destination = output;
       async resume() {}
-      createMediaStreamDestination() { return {}; }
+      createMediaStreamDestination() { return microphone; }
       createBuffer(channels, count, rate) {
         assert.equal(channels, 1); assert.equal(rate, 24000);
         samples = new Float32Array(count);
         return { duration: count / rate, getChannelData: () => samples };
       }
-      createBufferSource() { return { connect() { connected = true; }, start() { this.onended(); } }; }
+      createBufferSource() { return { connect(target) { connections.push(target); }, start() { this.onended(); } }; }
     } };
   runInNewContext(`(${installSyntheticBrowser.toString()})({})`, sandbox);
   await window.__qaSynthetic.play(Buffer.from([0, 128, 0, 0, 255, 127]).toString('base64'));
-  assert.equal(connected, true);
+  assert.deepEqual(connections, [microphone, output]);
   assert.deepEqual(Array.from(samples), [-1, 0, 32767 / 32768]);
   for (const bytes of [Buffer.alloc(0), Buffer.alloc(1), Buffer.alloc(24000 * 2 * 30 + 2)]) {
     await assert.rejects(window.__qaSynthetic.play(bytes.toString('base64')), /synthetic_audio_invalid/);

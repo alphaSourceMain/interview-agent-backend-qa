@@ -35,6 +35,7 @@ function installSyntheticBrowser(session) {
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.connect(microphone);
+    source.connect(context.destination);
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => { source.stop(); reject(new Error('synthetic_audio_playback_stalled')); }, (buffer.duration + 3) * 1000);
       source.onended = () => { clearTimeout(timer); resolve(); };

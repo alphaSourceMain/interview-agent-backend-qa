@@ -1,8 +1,9 @@
 'use strict';
-// Pure owner-only wire formatting/readback checks. No credentials or transport.
+// Pure profile-bound wire formatting/readback checks. No credentials/transport.
 const { randomBytes } = require('node:crypto');
 const { renderSupportEmailPreview } = require('../../src/lib/supportEmailPreview');
 const { MAILBOX, OWNER } = require('./qa-config');
+const { assertRuntimeProfile, QA_PROFILE, safeExternalSender } = require('./runtime-profile');
 const { headersAndBody, one } = require('./raw-message');
 const { hex, decodeEnvelope } = require('./gmail-read');
 const fail = () => { throw new Error('SUPPORT_EMAIL_QA_MIME'); };
@@ -10,8 +11,9 @@ const messageId = value => typeof value === 'string' && value.length <= 502 &&
   /^<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,250}@[A-Za-z0-9][A-Za-z0-9.-]{0,249}>$/.test(value);
 const fold64 = bytes => bytes.toString('base64').match(/.{1,76}/g).join('\r\n');
 
-function buildQaMime(record, body) {
-  if (!record || record.sender !== OWNER || record.senderVerified !== true || !hex(record.gmailId) || !hex(record.threadId) ||
+function buildQaMime(record, body, profile = QA_PROFILE) {
+  assertRuntimeProfile(profile);
+  if (!record || (profile.ownerOnly ? record.sender !== OWNER : !safeExternalSender(record.sender)) || record.senderVerified !== true || !hex(record.gmailId) || !hex(record.threadId) ||
     !messageId(record.rfcMessageId) || typeof record.subject !== 'string' || !/^[\x20-\x7e]{1,300}$/.test(record.subject) || record.subject.includes('=?')) fail();
   const preview = renderSupportEmailPreview(body, 'brand-horizontal');
   // Both options are bounded/hash checked, but only the approved default is sent.
@@ -20,7 +22,7 @@ function buildQaMime(record, body) {
   const related = 'alphy-related-' + randomBytes(24).toString('hex');
   const alternative = 'alphy-alternative-' + randomBytes(24).toString('hex');
   const headers = Object.freeze({
-    from: MAILBOX, to: OWNER, subject: record.subject,
+    from: MAILBOX, to: record.sender, subject: record.subject,
     'in-reply-to': record.rfcMessageId, references: record.rfcMessageId,
     'auto-submitted': 'auto-replied', 'x-auto-response-suppress': 'All', 'mime-version': '1.0',
     'content-type': 'multipart/related; boundary="' + related + '"',

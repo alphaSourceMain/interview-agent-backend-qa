@@ -1,13 +1,14 @@
 'use strict';
-// Hosted QA entry point only. Original local installers/grants are never changed.
+// Closed, profile-bound hosted entry. Original installers/grants are unchanged.
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
-const { validateGrant, QA, MAILBOX, OWNER } = require('./qa-config');
+const { validateGrant, MAILBOX, OWNER } = require('./qa-config');
 const { validateSendGrant } = require('./send-config');
 const readPins = require('../../src/lib/supportEmailInstaller');
 const sendPins = require('./send-oauth');
 const READ_REDIRECT = require('../../src/lib/supportEmailOAuth').REDIRECT;
 const { readProjectedJsonSet } = require('./projected-mounts');
+const { getRuntimeProfile, assertRuntimeProfile, QA_PROFILE } = require('./runtime-profile');
 const NAME = 'alphascreen-alphy-mail-qa';
 const PATHS = Object.freeze({ readClient: '/etc/secrets/alphy-read-client.json', readGrant: '/etc/secrets/alphy-read-grant.json',
   sendClient: '/etc/secrets/alphy-send-client.json', sendGrant: '/etc/secrets/alphy-send-grant.json', keys: '/etc/secrets/alphy-runtime-keys.json' });
@@ -16,12 +17,17 @@ const secret = s => typeof s === 'string' && /^[\x21-\x7e]{20,8192}$/.test(s);
 
 function validateRuntimeEnvironment(env) {
   if (env.SUPPORT_EMAIL_WORKER_ENABLED !== 'true') return null;
-  if (env.RENDER !== 'true' || env.RENDER_SERVICE_NAME !== NAME || !/^crn-[a-z0-9]{20,30}$/.test(env.RENDER_SERVICE_ID || '') ||
-      env.SUPABASE_URL !== QA || env.SUPPORT_EMAIL_ENVIRONMENT !== 'qa' || env.SUPPORT_EMAIL_MAILBOX !== MAILBOX ||
-      env.SUPPORT_EMAIL_OWNER_TEST_SENDER !== OWNER || env.SUPPORT_EMAIL_OWNER_TEST_ONLY !== 'true' ||
-      !['qa-draft', 'qa-owner-auto'].includes(env.SUPPORT_EMAIL_WORKER_MODE) || env.SUPPORT_EMAIL_SECRET_MOUNT_APPROVED !== 'true') fail();
-  const auto = env.SUPPORT_EMAIL_WORKER_MODE === 'qa-owner-auto' && env.SUPPORT_EMAIL_WORKER_SEND_APPROVED === 'true' && env.SUPPORT_EMAIL_HUMAN_CC_RULE_APPROVED === 'true';
+  const profile = getRuntimeProfile(env), production = profile.environment === 'production';
+  if (env.RENDER !== 'true' || env.RENDER_SERVICE_NAME !== profile.name || !/^crn-[a-z0-9]{20,30}$/.test(env.RENDER_SERVICE_ID || '') ||
+      env.SUPABASE_URL !== profile.url || env.SUPPORT_EMAIL_ENVIRONMENT !== profile.environment || env.SUPPORT_EMAIL_MAILBOX !== MAILBOX ||
+      env.SUPPORT_EMAIL_OWNER_TEST_SENDER !== OWNER || env.SUPPORT_EMAIL_OWNER_TEST_ONLY !== String(profile.ownerOnly) ||
+      !(production ? ['production-draft', 'production-canary', 'production-auto'] : ['qa-draft', 'qa-owner-auto']).includes(env.SUPPORT_EMAIL_WORKER_MODE) ||
+      env.SUPPORT_EMAIL_SECRET_MOUNT_APPROVED !== 'true') fail();
+  const autoMode = production ? ['production-canary', 'production-auto'].includes(env.SUPPORT_EMAIL_WORKER_MODE) : env.SUPPORT_EMAIL_WORKER_MODE === 'qa-owner-auto';
+  const auto = autoMode && env.SUPPORT_EMAIL_WORKER_SEND_APPROVED === 'true' && env.SUPPORT_EMAIL_HUMAN_CC_RULE_APPROVED === 'true';
+  if (production && autoMode && !auto) fail(); // Never silently downgrade an approved production sending mode.
   return Object.freeze({ mode: auto ? 'qa-owner-auto' : 'qa-draft', serviceId: env.RENDER_SERVICE_ID,
+    profile,
     layout: env.SUPPORT_EMAIL_SECRET_LAYOUT === 'render-projected-v1' ? 'render-projected-v1' : 'direct' });
 }
 function validateManifest(value, layout = 'direct') {
@@ -66,14 +72,15 @@ function validateMountedClient(parsed, kind) {
       (c.javascript_origins && (!Array.isArray(c.javascript_origins) || c.javascript_origins.length)) || !secret(c.client_secret) || c.client_secret.length > 256) fail();
   return Object.freeze({ clientId: c.client_id, clientSecret: c.client_secret });
 }
-function validateRuntimeKeys(keys) {
+function validateRuntimeKeys(keys, profile = QA_PROFILE) {
+  assertRuntimeProfile(profile);
   if (!keys || Object.keys(keys).sort().join(',') !== 'supabaseServiceRoleKey,xaiApiKey' || !secret(keys.supabaseServiceRoleKey) || !secret(keys.xaiApiKey)) fail();
   try {
     const parts = keys.supabaseServiceRoleKey.split('.');
     if (parts.length !== 3 || parts.some(p => !/^[A-Za-z0-9_-]+$/.test(p))) fail();
     const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
     // Binding only; real service credential must pass server RPC before Gmail.
-    if (claims.role !== 'service_role' || claims.ref !== 'yjjxzxoghlpguquknyso' || !Number.isSafeInteger(claims.exp) || claims.exp * 1000 < Date.now() + 240000) fail();
+    if (claims.role !== 'service_role' || claims.ref !== profile.ref || !Number.isSafeInteger(claims.exp) || claims.exp * 1000 < Date.now() + 240000) fail();
   } catch (_) { fail(); }
   return Object.freeze(keys);
 }
@@ -87,7 +94,7 @@ function loadRuntimeConfig() {
   const read = key => mounted ? mounted[key] : readMountedJson(PATHS[key]);
   const readGrant = validateGrant(read('readGrant'));
   const readClient = validateMountedClient(read('readClient'), 'read');
-  const keys = validateRuntimeKeys(read('keys'));
+  const keys = validateRuntimeKeys(read('keys'), settings.profile);
   const sendClient = settings.mode === 'qa-owner-auto' ? validateMountedClient(read('sendClient'), 'send') : null;
   const sendGrant = settings.mode === 'qa-owner-auto' ? validateSendGrant(read('sendGrant')) : null;
   const binding = createHash('sha256').update(JSON.stringify({ settings, manifest, keys, readClient, readGrant, sendClient, sendGrant })).digest('hex');

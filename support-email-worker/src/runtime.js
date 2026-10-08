@@ -1,9 +1,10 @@
 'use strict';
-// Closed hosted QA composition; no arguments, dependency hooks, general customers
-// or old-draft sweeper. Unit replacements exist only in the test process.
+// Closed hosted composition; explicit approved profiles, no arguments, dependency
+// hooks or old-draft sweeper. Unit replacements exist only in the test process.
 const { createHash } = require('node:crypto');
 const { loadRuntimeConfig } = require('./runtime-config');
 const { MAILBOX, OWNER } = require('./qa-config');
+const { assertRuntimeProfile, QA_PROFILE, safeExternalSender } = require('./runtime-profile');
 const { createRuntimeStore } = require('./runtime-store');
 const { readJson } = require('./qa-store');
 const { recognizeRuntimeClient } = require('./runtime-membership');
@@ -14,7 +15,7 @@ const { readHistory } = require('./runtime-history');
 const { headersAndBody, one } = require('./raw-message');
 const { readVerifiedInitial, inspectVerified } = require('./verified-gmail');
 const { buildQaMime, verifyQaSent } = require('./qa-mime');
-const { same } = require('./qa-send');
+const { sameRuntimeRecord } = require('./runtime-record');
 const { readKnowledgeFiles } = require('../../src/lib/supportVoiceKnowledge');
 const { createXaiDraftGenerator } = require('../../src/lib/supportEmailAdapters');
 const { address, buildEmailPrompt, redactQuestion, validateDraft } = require('../../src/lib/supportEmailPolicy');
@@ -23,7 +24,8 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const fail = () => { throw Error('SUPPORT_EMAIL_RUNTIME_HELD'); };
 
 // Only an exclusion filter, NEVER an authenticated eligible decision.
-function excludeEnvelope(envelope, id) {
+function excludeEnvelope(envelope, id, profile = QA_PROFILE) {
+  assertRuntimeProfile(profile);
   const raw = decodeEnvelope(envelope, id);
   let parsed;
   try {
@@ -31,7 +33,7 @@ function excludeEnvelope(envelope, id) {
     parsed = headersAndBody(raw);
     const sender = address(one(parsed.headers, 'from', true));
     if (!sender) fail();
-    if (sender !== OWNER) return 'not_owner';
+    if (profile.ownerOnly ? sender !== OWNER : !safeExternalSender(sender)) return 'not_owner';
     const to = address(one(parsed.headers, 'to', true)), delivered = address(one(parsed.headers, 'delivered-to', true));
     if (!to || !delivered) fail();
     if (to !== 'support@alphasourceai.com' || delivered !== MAILBOX) return 'excluded';
@@ -44,7 +46,8 @@ async function runRuntime() {
   if (arguments.length) fail();
   const deadline = Date.now() + 150000, initial = loadRuntimeConfig();
   if (!initial) return Object.freeze({ status: 'off' });
-  const store = createRuntimeStore(initial.keys.supabaseServiceRoleKey, deadline, initial.mode);
+  const profile = assertRuntimeProfile(initial.profile);
+  const store = createRuntimeStore(initial.keys.supabaseServiceRoleKey, deadline, initial.mode, profile);
   const counts = { skipped: 0, duplicate: 0, draft: 0, review: 0, sent: 0 };
   let nonce;
   function local(reserve = 0) { if (Date.now() + reserve >= deadline || loadRuntimeConfig()?.binding !== initial.binding) fail(); }
@@ -89,7 +92,7 @@ async function runRuntime() {
       const checked = decodeEnvelope(envelope, id); checked.fill(0);
       await processed('accepted_copy'); counts.duplicate++; continue;
     }
-    const excluded = excludeEnvelope(envelope, id);
+    const excluded = excludeEnvelope(envelope, id, profile);
     if (excluded) { await processed(excluded); counts.skipped++; continue; }
     await check(115000); // A partial page holds the cursor; prior claims remain durable.
     const decision = await readVerifiedInitial({ accessToken: auth.accessToken, id, cutoverMs: lease.cutover_ms, baselineHistoryId: initial.readGrant.baselineHistoryId });
@@ -98,13 +101,20 @@ async function runRuntime() {
       await processed('policy'); counts.skipped++; continue;
     }
     const record = inspectVerified(decision);
-    if (!record.senderVerified || record.sender !== OWNER) fail();
+    if (!record.senderVerified || (profile.ownerOnly ? record.sender !== OWNER : !safeExternalSender(record.sender))) fail();
     await check(100000);
     const claim = await store.call('claim', nonce, { thread: record.threadKey, message: record.messageKey, gmail: record.gmailKey });
     if (claim === null) { await processed('duplicate'); counts.duplicate++; continue; }
     if (typeof claim !== 'string' || !UUID.test(claim)) fail();
-    let generated, lookupFailed = false, client = false;
-    try { client = await recognizeRuntimeClient(initial.keys.supabaseServiceRoleKey, record.sender, deadline) === true; } catch (_) { lookupFailed = true; }
+    let generated, client = false;
+    try { client = await recognizeRuntimeClient(initial.keys.supabaseServiceRoleKey, record.sender, deadline, profile) === true; }
+    catch (_) {
+      // Unknown is a successful false result. A failed lookup must not invent
+      // an audience or transmit even redacted customer text to the model.
+      await check(10000);
+      if (await store.call('review', nonce, { id: claim }) !== true) fail();
+      counts.review++; continue;
+    }
     const audience = client ? 'client' : 'public', prompt = prompts[audience];
     // Any ambiguous storage failure halts. Generation/recheck rejection can
     // finish a bodyless review exactly once, never regenerate the same claim.
@@ -116,8 +126,8 @@ async function runRuntime() {
       const fresh = await readVerifiedInitial({ accessToken: auth.accessToken, id, cutoverMs: lease.cutover_ms, baselineHistoryId: initial.readGrant.baselineHistoryId });
       if (!fresh.eligible && fresh.reason === 'unverified_group_delivery') throw Error('VERIFY_TRANSPORT');
       if (fresh.eligible && inspectVerified(fresh).senderVerified !== true) throw Error('VERIFY_TRANSPORT');
-      if (!fresh.eligible || !same(record, inspectVerified(fresh))) throw Error('RECHECK');
-      generated = { body: validated.body, modelReview: generated.human_review || lookupFailed };
+      if (!fresh.eligible || !sameRuntimeRecord(record, inspectVerified(fresh), profile)) throw Error('RECHECK');
+      generated = { body: validated.body, modelReview: generated.human_review };
     } catch (error) {
       if (error.message === 'VERIFY_TRANSPORT') fail();
       await check(10000);
@@ -132,13 +142,13 @@ async function runRuntime() {
     await check(50000);
     if (!sendAuth) sendAuth = await createSendOAuth({ client: initial.sendClient }).refresh(initial.sendGrant.refreshToken);
     if (sendAuth.mailbox !== MAILBOX || sendAuth.expiresAt < deadline + 60000) fail();
-    const wire = buildQaMime(record, generated.body), wireHash = hash(wire.raw), bodyHash = hash(generated.body);
+    const wire = buildQaMime(record, generated.body, profile), wireHash = hash(wire.raw), bodyHash = hash(generated.body);
     const binding = { id: claim, body_hash: bodyHash, knowledge_hash: knowledge.hash, fingerprint: record.fingerprint, wire: wireHash, thread_id: record.threadId };
     let reserved = false, started = false, postInvoked = false, finishing = false;
     async function finalProof() {
       await check(30000);
       const proof = await readVerifiedInitial({ accessToken: auth.accessToken, id, cutoverMs: lease.cutover_ms, baselineHistoryId: initial.readGrant.baselineHistoryId });
-      if (!proof.eligible || !same(record, inspectVerified(proof))) fail();
+      if (!proof.eligible || !sameRuntimeRecord(record, inspectVerified(proof), profile)) fail();
       const current = readKnowledgeFiles();
       if (current.hash !== knowledge.hash || current.version !== knowledge.version) fail();
     }

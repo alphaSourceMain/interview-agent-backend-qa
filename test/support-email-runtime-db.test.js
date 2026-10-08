@@ -27,6 +27,13 @@ test('exact SQL compiles, defaults off; browser RPC and direct table grants deni
   assert.equal(await sql(db,"select count(*) from pg_policies where schemaname='private_support_email' and tablename like 'qa_runtime%'"),'0');
   await assert.rejects(sql(db,"select public.support_email_qa_worker('health',null,'{}')"),e=>/denied/.test(e.stderr));
 });
+test('production purge refuses missing Cron prerequisite without creating a schedule',{skip:!local},async()=>{
+  const db=await fixture();
+  assert.equal(await sql(db,"select count(*) from pg_extension where extname='pg_cron'"),'0');
+  const migration=await readFile('supabase/migrations/20261008181643_support_email_production_body_purge.sql','utf8');
+  await assert.rejects(sql(db,migration),e=>/support email purge prerequisites missing/.test(e.stderr));
+  assert.equal(await sql(db,"select to_regnamespace('cron') is null"),'t');
+});
 test('eight concurrent acquisitions have one winner; fence, mode and skew clocks available',{skip:!local},async()=>{
   const db=await fixture();await ready(db);await sql(db,"update private_support_email.qa_runtime set lease_until=clock_timestamp()-interval '1 second'");
   const leases=await Promise.all(Array.from({length:8},()=>rpc(db,'acquire',null,{baseline:'1'})));const won=leases.filter(Boolean);assert.equal(won.length,1);

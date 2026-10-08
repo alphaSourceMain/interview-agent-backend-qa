@@ -1,16 +1,18 @@
 'use strict';
 // Runtime needs unknown-person vs failed lookup distinguished. The legacy
 // voice/draft boolean deliberately hides failures; leave that behavior intact.
-const { QA, OWNER } = require('./qa-config');
+const { OWNER } = require('./qa-config');
+const { assertRuntimeProfile, QA_PROFILE, safeExternalSender } = require('./runtime-profile');
 const { readJson } = require('./qa-store');
 const { classifyCountResult } = require('../../src/lib/supportVoiceMembership');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const fail = () => { throw Error('SUPPORT_EMAIL_RUNTIME_MEMBERSHIP'); };
-async function recognizeRuntimeClient(token, sender, deadline) {
-  if (sender !== OWNER || typeof token !== 'string' || !Number.isSafeInteger(deadline)) fail();
+async function recognizeRuntimeClient(token, sender, deadline, profile = QA_PROFILE) {
+  assertRuntimeProfile(profile);
+  if ((profile.ownerOnly ? sender !== OWNER : !safeExternalSender(sender)) || typeof token !== 'string' || !Number.isSafeInteger(deadline)) fail();
   async function request(path, body) {
     if (Date.now() + 10000 > deadline) fail();
-    const response = await fetch(QA + '/rest/v1/' + path, { method: body ? 'POST' : 'GET', redirect: 'error', signal: AbortSignal.timeout(10000),
+    const response = await fetch(profile.url + '/rest/v1/' + path, { method: body ? 'POST' : 'GET', redirect: 'error', signal: AbortSignal.timeout(10000),
       headers: { apikey: token, Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(body ? {} : { Prefer: 'count=exact' }) },
       ...(body ? { body: JSON.stringify(body) } : {}) });
     if (!/^application\/json(?:;|$)/i.test(response.headers.get('content-type') || '')) fail();

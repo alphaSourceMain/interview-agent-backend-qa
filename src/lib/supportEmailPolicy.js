@@ -110,9 +110,13 @@ function unsafeOutput(text) {
   const scan = text.normalize('NFKC').replace(/[\t\r\n ]+/g, ' ');
   if (/-----\s*BEGIN\b|\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|\b\d{3}[- ]\d{2}[- ]\d{4}\b/i.test(scan) ||
     /\b(?:password|secret|api[ _-]*key|(?:access[ _-]*)?token|private[ _-]*key)\s*(?:[:=]|\bis\b)\s*\S/i.test(scan) ||
-    /(?<!\w)(?:\+?\d[ ().-]*){10,15}(?!\w)/.test(scan) ||
     /\b(?:candidate\s+(?:name|email|resume|score)|(?:candidate\s+)?transcript)\s*[:=]\s*\S/i.test(scan) ||
     /\bcandidate\s+reports?\s*[:=].*\b(?:score\s*[:=]?\s*\d|(?:name|email)\s*[:=])/i.test(scan)) return true;
+  // The approved static knowledge publishes this company support number.
+  // Compare whole matched tokens; never strip trusted digits out of other PII.
+  for (const match of scan.matchAll(/(?<!\w)(?:\+?\d[ ().-]*){10,}(?!\w)/g)) {
+    if (!['6055998008', '16055998008'].includes(match[0].replace(/\D/g, ''))) return true;
+  }
   for (const match of scan.matchAll(/(?<!\d)(?:\d[ .-]*){13,19}(?!\d)/g)) {
     const digits = match[0].replace(/\D/g, '');
     if (digits.length < 13 || digits.length > 19) continue;

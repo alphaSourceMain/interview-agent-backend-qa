@@ -126,7 +126,10 @@ function installSyntheticBrowser(session) {
           const type = String(data.event_type || data.eventType || data.type || '').toLowerCase();
           const role = String(data.properties?.role || data.role || '').toLowerCase();
           const speech = String(data.properties?.speech || data.properties?.text || data.speech || data.text || '').slice(0, 2000);
-          if (runtime.events.length < 200 && type) runtime.events.push({ type, role, speech, at: Date.now() });
+          // Streaming state/perception messages must not exhaust the transcript budget.
+          if (runtime.events.length < 200 && type === 'conversation.utterance') {
+            runtime.events.push({ type, role, speech, at: Date.now() });
+          }
           const started = /started[._-]speaking$/.test(type);
           const stopped = /stopped[._-]speaking$/.test(type);
           const candidate = ['candidate', 'user', 'participant'].includes(role) || /(?:^|[._-])user[._-]/.test(type);

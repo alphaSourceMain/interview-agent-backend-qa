@@ -33,7 +33,7 @@ test('isolated observer recognizes qualified speaking variants without treating 
     return { on: (name, handler) => { handlers[name] = handler; } };
   } };
   window.DailyIframe.createCallObject();
-  const emit = (type, role) => handlers['app-message']({ data: { eventType: type, properties: { role } } });
+  const emit = (type, role, speech) => handlers['app-message']({ data: { eventType: type, properties: { role, speech } } });
   const runtime = window.__qaSynthetic;
   emit('conversation.stopped_speaking');
   assert.equal(runtime.lastStop, 0);
@@ -49,7 +49,18 @@ test('isolated observer recognizes qualified speaking variants without treating 
   emit('conversation.started_speaking', 'replica');
   emit('conversation.replica.stopped_speaking');
   assert.equal(runtime.speaking, false);
-  assert.equal(runtime.events.length, 8);
+  assert.equal(runtime.events.length, 0);
+  for (let index = 0; index < 250; index += 1) emit('conversation.perception', 'user');
+  emit('conversation.utterance', 'user', ANSWERS[0]);
+  assert.equal(runtime.events.length, 1);
+  assert.equal(runtime.events[0].speech, ANSWERS[0]);
+  assert.equal(scriptedAnswerReceived(runtime.events, ANSWERS[0], 0), true);
+  for (let index = 0; index < 250; index += 1) emit('conversation.utterance', 'replica', 'Bounded test');
+  assert.equal(runtime.events.length, 200);
+  emit('conversation.replica-started-speaking');
+  assert.equal(runtime.speaking, true);
+  emit('conversation.replica.stopped_speaking');
+  assert.equal(runtime.speaking, false);
 });
 
 test('isolated media override never captures camera media and preserves cloned microphone audio', async () => {

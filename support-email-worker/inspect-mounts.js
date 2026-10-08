@@ -1,9 +1,12 @@
 'use strict';
 // Operator metadata command. Never opens a secret, refreshes a grant or connects.
 const fs = require('node:fs');
-const { NAME, PATHS } = require('./src/runtime-config');
+const { PATHS } = require('./src/runtime-config');
+const { getRuntimeProfile } = require('./src/runtime-profile');
 try {
-  if (process.argv.length !== 2 || process.platform !== 'linux' || process.env.RENDER !== 'true' || process.env.RENDER_SERVICE_NAME !== NAME || process.env.SUPPORT_EMAIL_WORKER_ENABLED !== 'false') throw Error();
+  if (process.argv.length !== 2 || process.platform !== 'linux' || process.env.RENDER !== 'true' || process.env.SUPPORT_EMAIL_WORKER_ENABLED !== 'false') throw Error();
+  const profile = getRuntimeProfile(process.env);
+  if (process.env.RENDER_SERVICE_NAME !== profile.name || process.env.SUPABASE_URL !== profile.url) throw Error();
   if (process.env.SUPPORT_EMAIL_SECRET_LAYOUT === 'render-projected-v1') {
     const manifest = require('./src/projected-mounts').inspectProjectedMounts();
     console.log(JSON.stringify({ status: 'metadata_only', layout: 'render-projected-v1', manifest }));

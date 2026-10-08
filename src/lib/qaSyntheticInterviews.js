@@ -53,7 +53,7 @@ function assertQaEnvironment(env = process.env) {
 }
 
 function normalizeSpeech(value) {
-  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return String(value || '').trim().replace(/[\u2010-\u2015]/g, '-').replace(/\s+/g, ' ').toLowerCase();
 }
 
 function spokenWords(value) {

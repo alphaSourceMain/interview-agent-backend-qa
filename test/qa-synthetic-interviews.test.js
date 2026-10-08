@@ -6,7 +6,7 @@ const { randomUUID } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const express = require('express');
 const { SCENARIOS, QUESTIONS, ANSWERS, CLOSING_QUESTION, QA_SERVICE_ID, QA_PERSONA_ID,
-  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, scriptedAnswerReceived } = require('../src/lib/qaSyntheticInterviews');
+  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, normalizeSpeech, scriptedAnswerReceived } = require('../src/lib/qaSyntheticInterviews');
 const { networkAction } = require('../src/lib/qaSyntheticInterviewRunner');
 const { createAdminSyntheticInterviewsRouter } = require('../routes/adminSyntheticInterviews');
 const { installSyntheticBrowser } = require('../src/lib/qaSyntheticBrowser');
@@ -109,6 +109,13 @@ test('answer acknowledgement requires fresh received candidate content, not play
   for (const { reply } of Object.values(SCENARIOS)) {
     assert.equal(scriptedAnswerReceived([{ ...event, speech: reply }], reply, 99), true);
   }
+});
+
+test('vendor hyphen variants preserve question matching without accepting a different question', () => {
+  const question = QUESTIONS[0];
+  assert.equal(normalizeSpeech(question.replace('-', '\u2011')), normalizeSpeech(question));
+  assert.equal(normalizeSpeech(question.replace('-', '\u2010')), normalizeSpeech(question));
+  assert.notEqual(normalizeSpeech('How do you organize your accounting work?'), normalizeSpeech(question));
 });
 
 test('network policy never forwards application API reads or mutations, production or arbitrary URLs', () => {

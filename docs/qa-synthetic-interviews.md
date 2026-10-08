@@ -49,6 +49,8 @@ or a speaking event alone cannot advance the test. The wait is bounded; missing
 acknowledgement fails with synthetic_answer_not_received. Playback completion
 callbacks are not used as success evidence. Failure transcripts retain the most
 recent observed events rather than just the snapshot before playback.
+Vendor Unicode hyphen variants are normalized for scripted question matching;
+different question content still fails rather than advancing the test.
 
 Only within that isolated browser, application status and telemetry are synthetic
 nonpersisting responses. The frontend's real end request is intercepted, checked

@@ -51,6 +51,7 @@ test('database restore contains closure/collision assertions, one transaction lo
   for(const term of ['pg_advisory_xact_lock','demo_fixture_not_closed','demo_client_collision','as restrictive','to anon,authenticated','revoke all on function private.sales_demo_control','grant execute on function public.sales_demo_control','to service_role','set search_path=\'\''])assert.ok(sql.includes(term),term);
   assert.ok(!/delete from public\./i.test(sql));
   assert.ok(sql.includes("r.table_name='clients' or r.table_name='roles'"));
+  assert.ok(sql.includes("c.is_generated='NEVER'"));
 });
 test('batch workers explicitly exclude demo and scoring/messaging cannot process fixture objects',()=>{
   for(const name of ['jobs/sendNightlyDigests.js','scripts/normalizeCandidates.js','scripts/backfillInterviews.js','scripts/rescoreRoleInterviews.js','src/lib/recordingCleanup.js']){

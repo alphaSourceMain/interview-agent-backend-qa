@@ -47,7 +47,8 @@ begin
   foreach t in array array['clients','roles','candidates','interviews','reports'] loop
     for row_data in select value from pg_catalog.jsonb_array_elements(v->t) loop
       select string_agg(format('%I',key),',' order by key),string_agg(format('%1$I=excluded.%1$I',key),',' order by key)
-        into cols,updates from pg_catalog.jsonb_object_keys(row_data) key where key<>'id';
+        into cols,updates from pg_catalog.jsonb_object_keys(row_data) key where key<>'id'
+          and exists(select 1 from information_schema.columns c where c.table_schema='public' and c.table_name=t and c.column_name=key and c.is_generated='NEVER');
       execute format('insert into public.%1$I(id,%2$s) select id,%2$s from jsonb_populate_record(null::public.%1$I,$1) on conflict(id) do update set %3$s',t,cols,updates) using row_data;
     end loop;
   end loop;

@@ -30,11 +30,16 @@ test('actual snapshot route is guarded, rejects foreign/array selectors, and nev
   require.cache[dbPath]={id:dbPath,filename:dbPath,loaded:true,exports:{supabaseAdmin:new Proxy({}, {get(){throw Error('snapshot cannot call provider')}})}};
   delete require.cache[routePath];process.env.SUPABASE_URL=QA_URL;
   try {
-    const router=require(routePath);const middleware=router.stack.filter(l=>!l.route);const handler=router.stack.find(l=>l.route?.path==='/workspace').route.stack[0].handle;
-    function call(overrides={}){const req={isSalesDemo:true,clientIds:[DEMO_CLIENT_ID],memberships:[{client_id:DEMO_CLIENT_ID,role:'manager'}],query:{client_id:DEMO_CLIENT_ID},...overrides};const res={statusCode:200,set(){return this},status(n){this.statusCode=n;return this},json(body){this.body=body;return this},end(){return this}};for(const layer of middleware){let next=false;layer.handle(req,res,()=>{next=true});if(!next)return res;}handler(req,res);return res;}
+    const router=require(routePath);
+    function call(overrides={},path='/workspace'){const index=router.stack.findIndex(l=>l.route?.path===path);assert.ok(index>=0);const req={isSalesDemo:true,clientIds:[DEMO_CLIENT_ID],memberships:[{client_id:DEMO_CLIENT_ID,role:'manager'}],query:{client_id:DEMO_CLIENT_ID},...overrides};const res={statusCode:200,headers:{},set(k,v){this.headers[k]=v;return this},status(n){this.statusCode=n;return this},json(body){this.body=body;return this},end(){return this}};for(const layer of router.stack.slice(0,index).filter(l=>!l.route)){let next=false;layer.handle(req,res,()=>{next=true});if(!next)return res;}router.stack[index].route.stack[0].handle(req,res);return res;}
     assert.equal(call().body.synthetic,true);assert.equal(call({query:{client_id:DEMO_CLIENT_ID}}).statusCode,200);
     for(const query of [{},{client_id:'other'},{client_id:[DEMO_CLIENT_ID,'other']},{client_id:''}]){const result=call({query});assert.equal(result.statusCode,403);assert.equal(result.body,undefined);}
     for(const overrides of [{isSalesDemo:false},{clientIds:[DEMO_CLIENT_ID,'other']},{memberships:[{client_id:DEMO_CLIENT_ID,role:'member'}]}])assert.equal(call(overrides).statusCode,403);
-    process.env.SUPABASE_URL='https://rytlclkkcvvnkoncfaid.supabase.co';assert.equal(call().statusCode,403);assert.ok(authChecks>0&&scopeChecks>0);
+    const admin={isSalesDemo:false,isGlobalAdmin:true,memberships:[],clientIds:[DEMO_CLIENT_ID]};
+    assert.equal(call(admin).body.synthetic,true);assert.equal(call(admin).headers['Cache-Control'],'private, no-store');
+    for(const query of [{},{client_id:'other'},{client_id:[DEMO_CLIENT_ID]}])assert.equal(call({...admin,query}).statusCode,403);
+    for(const overrides of [{isGlobalAdmin:true},{...admin,isGlobalAdmin:'true'},{isSalesDemo:false,body:{isGlobalAdmin:true}},{isSalesDemo:false,query:{client_id:DEMO_CLIENT_ID,isGlobalAdmin:true}},{clientIds:['other']}])assert.equal(call(overrides).statusCode,403);
+    assert.equal(call(admin,'/reset').statusCode,403);assert.equal(call(admin,'/:kind/:id').statusCode,403);
+    process.env.SUPABASE_URL='https://rytlclkkcvvnkoncfaid.supabase.co';assert.equal(call().statusCode,403);assert.equal(call(admin).statusCode,403);assert.ok(authChecks>0&&scopeChecks>0);
   } finally {if(old===undefined)delete process.env.SUPABASE_URL;else process.env.SUPABASE_URL=old;[authPath,dbPath,routePath].forEach((p,i)=>{if(previous[i])require.cache[p]=previous[i];else delete require.cache[p]});}
 });

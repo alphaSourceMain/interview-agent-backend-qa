@@ -9,15 +9,21 @@ const { people } = require('../demo/northstar');
 const { buildWorkspace } = require('../demo/workspace');
 
 const router = express.Router();
-router.use(requireAuth, withClientScope, (req, res, next) => {
+router.use(requireAuth, withClientScope);
+router.get('/workspace', (req,res) => {
+  if (!isQa() || req.query.client_id !== DEMO_CLIENT_ID) return res.status(403).end();
+  const manager = req.isSalesDemo === true && req.isGlobalAdmin !== true && req.clientIds?.length === 1 && req.clientIds[0] === DEMO_CLIENT_ID && (req.memberships || []).some(m => m.client_id === DEMO_CLIENT_ID && m.role === 'manager');
+  // Admin status comes from verified Auth and the active admins table, never request metadata.
+  const adminPreview = req.isGlobalAdmin === true && !req.isSalesDemo;
+  if (!manager && !adminPreview) return res.status(403).end();
+  res.set('Cache-Control','private, no-store');
+  return res.json(buildWorkspace());
+});
+router.use((req, res, next) => {
   const membership = (req.memberships || []).find(m => m.client_id === DEMO_CLIENT_ID && m.role === 'manager');
   if (!isQa() || !req.isSalesDemo || !membership || req.clientIds?.length !== 1) return res.status(403).json({ error: 'demo_access_denied' });
   res.set('Cache-Control','private, no-store');
   next();
-});
-router.get('/workspace', (req,res) => {
-  if (req.query.client_id !== DEMO_CLIENT_ID) return res.status(403).end();
-  return res.json(buildWorkspace());
 });
 router.post('/reset', async (req, res) => {
   if (req.body?.confirmation !== 'RESTORE SHARED DEMO') return res.status(400).json({ error: 'shared_reset_confirmation_required' });

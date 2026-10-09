@@ -6,6 +6,7 @@ const { requireAuth, withClientScope } = require('../src/middleware/auth');
 const { supabaseAdmin } = require('../src/lib/supabaseClient');
 const { DEMO_CLIENT_ID, isQa, uuid } = require('../src/lib/salesDemo');
 const { people } = require('../demo/northstar');
+const { buildWorkspace } = require('../demo/workspace');
 
 const router = express.Router();
 router.use(requireAuth, withClientScope, (req, res, next) => {
@@ -13,6 +14,10 @@ router.use(requireAuth, withClientScope, (req, res, next) => {
   if (!isQa() || !req.isSalesDemo || !membership || req.clientIds?.length !== 1) return res.status(403).json({ error: 'demo_access_denied' });
   res.set('Cache-Control','private, no-store');
   next();
+});
+router.get('/workspace', (req,res) => {
+  if (req.query.client_id !== DEMO_CLIENT_ID) return res.status(403).end();
+  return res.json(buildWorkspace());
 });
 router.post('/reset', async (req, res) => {
   if (req.body?.confirmation !== 'RESTORE SHARED DEMO') return res.status(400).json({ error: 'shared_reset_confirmation_required' });

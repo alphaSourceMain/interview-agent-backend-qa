@@ -36,16 +36,16 @@ function buildCandidateReportPayload({ candidate = {}, interview, role = {}, cli
   const resume = object(candidate.analysis_summary), transcript = object(interview?.transcript_scores), perception = object(interview?.perception_scores);
   const summary = text(interview?.interview_summary);
   const insufficient = interview?.has_substantive_response === false
-    || interview?.failure_code === 'NO_SUBSTANTIVE_CANDIDATE_RESPONSE'
-    || /before any substantive responses were recorded|before substantive responses were captured|insufficient data/i.test(summary);
+    || interview?.failure_code === 'NO_SUBSTANTIVE_CANDIDATE_RESPONSE';
   const resumeScore = score(resume.resume_score ?? resume.resume ?? resume.resume_match_percent ?? resume.resumeMatchPercent);
   let interviewScore = insufficient ? null : score(transcript.overall);
   const display = classifyInterviewDisplayState(interview, { hasScore: interviewScore !== null });
   if (display.state === 'no_response') interviewScore = null;
   const suppressed = insufficient || ['no_response', 'tech_issue'].includes(display.state);
   const demoSignals = syntheticDemo && perception.mode === 'demo' && perception.synthetic === true;
-  const textInterview = perception.mode === 'text' || (perception.unavailable === true && !demoSignals);
-  const unavailable = insufficient || textInterview || ['no_response', 'tech_issue'].includes(display.state);
+  const textInterview = perception.mode === 'text';
+  const mediaUnavailable = textInterview || (perception.unavailable === true && !demoSignals);
+  const unavailable = suppressed || mediaUnavailable;
   const hasInterview = !!summary || interviewScore !== null || Object.keys(transcript).length > 0 || insufficient || ['no_response', 'tech_issue'].includes(display.state);
   const risk = text(transcript.ai_aided_risk).toLowerCase();
   return {
@@ -65,11 +65,11 @@ function buildCandidateReportPayload({ candidate = {}, interview, role = {}, cli
     interview_breakdown: {
       clarity: unavailable ? null : score(perception.clarity), confidence: unavailable ? null : score(perception.confidence),
       engagement: unavailable ? null : score(perception.engagement ?? perception.body_language),
-      evidence_strength: hasInterview && !suppressed && !textInterview ? score(transcript.confidence) : null,
+      evidence_strength: hasInterview && !suppressed && !mediaUnavailable ? score(transcript.confidence) : null,
       ai_aided_risk: hasInterview && !suppressed && ['low', 'medium', 'high'].includes(risk) ? risk : '',
       ai_aided_risk_reason: hasInterview && !suppressed ? text(transcript.ai_aided_risk_reason) : '',
     },
-    reliability_note: insufficient || ['no_response', 'tech_issue'].includes(display.state) ? 'Insufficient usable interview evidence.' : textInterview ? 'Not applicable for text interviews.' : '',
+    reliability_note: suppressed ? 'Insufficient usable interview evidence.' : textInterview ? 'Not applicable for text interviews.' : mediaUnavailable ? 'Media-based signals are unavailable.' : '',
     interview_summary: hasInterview ? summary || 'No interview summary available yet.' : 'Interview not yet completed.',
     unanswered_candidate_questions: hasInterview ? list(interview?.unanswered_candidate_questions) : [],
     interview_analysis_v2: exposeAdvanced && hasInterview && !suppressed ? advanced(interview?.interview_analysis_v2) : advanced(null),

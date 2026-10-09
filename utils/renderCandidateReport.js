@@ -208,7 +208,7 @@ function buildCandidateReportHtml(payload) {
   renderData.resume_rows = ['experience', 'skills', 'education'].map(key => ({ label: enumLabel(key), score: resumeBreakdown[key], color: '#03ACDF' }));
   renderData.interview_rows = ['clarity', 'confidence', 'engagement'].map(key => ({ label: enumLabel(key), score: interviewBreakdown[key], color: '#A37FF5' }));
   renderData.advanced_rows = ['response_specificity', 'answer_directness', 'answer_consistency', 'communication_structure'].map((key, i) => ({ label: enumLabel(key), score: renderData.advanced.scores[key], color: ['#03ACDF','#A37FF5','#00BB88','#EDA311'][i] }));
-  renderData.has_advanced = Object.values(renderData.advanced.scores).some(value => value !== null) || !!renderData.advanced.evidence_summary || renderData.advanced.evidence.length > 0 || renderData.advanced.limitations.length > 0;
+  renderData.has_advanced = Object.values(renderData.advanced.scores).some(value => value !== null) || !!renderData.advanced.evidence_summary || renderData.advanced.evidence.length > 0 || renderData.advanced.limitations.length > 0 || Object.values(renderData.advanced.conditions).some(Boolean) || Object.values(renderData.advanced.risk).some(Boolean);
   renderData.badges = ['evaluation_conditions', 'signal_confidence', 'audio_quality_issues', 'distraction_risk'].filter(key => renderData.advanced.conditions[key]).map(key => ({ label: enumLabel(key), value: enumLabel(renderData.advanced.conditions[key]) }));
   if (renderData.advanced.risk.integrity_risk) renderData.badges.push({ label: 'Integrity risk', value: enumLabel(renderData.advanced.risk.integrity_risk) });
   renderData.risk_label = enumLabel(interviewBreakdown.ai_aided_risk);

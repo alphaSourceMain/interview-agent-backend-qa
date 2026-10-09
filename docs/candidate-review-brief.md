@@ -29,6 +29,8 @@ Advanced v2 is visible only when EXPOSE_INTERVIEW_ANALYSIS_V2 is true, or for th
 
 ## Layout and rendering
 
+Release-review corrections: state suppression is driven by structured has_substantive_response=false, NO_SUBSTANTIVE_CANDIDATE_RESPONSE, and the shared classifier, never diagnostic phrases mentioned in a narrative summary. Unavailable visual media gets its own note and is not labeled text unless mode=text. An open-gate v2 section is usable when ANY safe score, summary, evidence, limitation, condition, integrity-risk level or risk reason exists; conditions-only and risk-only results remain visible, while a truly empty object stays hidden. These are covered by regression tests. The PDF intentionally avoids the existing dashboard's overly broad free-text diagnostic heuristic; canonical completed scores remain authoritative.
+
 Clarifications for the design re-review:
 
 1. State precedence is first-match: no-response/insufficient/technical failure suppresses perception, reliability, AI-aided risk and all v2 content even if mode=text. Otherwise text/unavailable visual media means perception/reliability not applicable, with transcript-based v2 subject to its gate. Otherwise pending missing numerics remain unavailable. Present canonical summaries are retained.

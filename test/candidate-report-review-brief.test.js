@@ -94,3 +94,23 @@ test('Report: long text not sliced and PDF uses report-only landscape settings',
   assert.match(candidateReportPdfOptions.footerTemplate,/totalPages/);
 });
 module.exports={ fixture };
+test('Report: diagnostic phrases in a summary cannot suppress canonical completed scores', () => {
+  for (const phrase of ['insufficient data','before any substantive responses were recorded','before substantive responses were captured']) {
+    const input=fixture(); input.interview.interview_summary='The example discussed '+phrase+' in a previous project.';
+    const result=build(input); assert.equal(result.interview_score,82); assert.equal(result.overall_score,84); assert.equal(result.status,'Scored');
+    assert.equal(result.interview_breakdown.clarity,86); assert.equal(result.interview_analysis_v2.scores.answer_directness,86);
+  }
+});
+test('Report: unavailable video is not mislabeled as a text interview', () => {
+  const input=fixture(); input.interview.perception_scores={ mode:'video', unavailable:true, clarity:99 };
+  const result=build(input); assert.equal(result.interview_breakdown.clarity,null); assert.equal(result.interview_breakdown.evidence_strength,null);
+  assert.equal(result.reliability_note,'Media-based signals are unavailable.'); assert.equal(result.interview_score,82);
+});
+test('Report: supplied conditions-only and risk-only advanced data remain visible on an open gate', () => {
+  for (const value of [{ conditions:{ audio_quality_issues:'minor' } }, { risk:{ integrity_risk:'medium', reason:'Clarify the inconsistency.' } }]) {
+    const input=fixture(); input.interview.interview_analysis_v2=value;
+    const output=html(build(input)); assert.match(output,/class="evidence-page"/);
+    assert.match(output,value.conditions ? /Minor/ : /Clarify the inconsistency/);
+    input.exposeAdvanced=false; assert.doesNotMatch(html(build(input)),/class="evidence-page"/);
+  }
+});

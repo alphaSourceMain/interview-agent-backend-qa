@@ -24,12 +24,15 @@ async function main() {
   const insufficient=structuredClone(base); insufficient.key='insufficient'; insufficient.interview.has_substantive_response=false; insufficient.interview.failure_code='NO_SUBSTANTIVE_CANDIDATE_RESPONSE';
   const closed=structuredClone(base); closed.key='closed-gate'; closed.exposeAdvanced=false;
   const empty=structuredClone(base); empty.key='empty-v2'; empty.interview.interview_analysis_v2={};
+  const conditions=structuredClone(base); conditions.key='conditions-only'; conditions.interview.interview_analysis_v2={ conditions:{ audio_quality_issues:'minor' } };
+  const risk=structuredClone(base); risk.key='risk-only'; risk.interview.interview_analysis_v2={ risk:{ integrity_risk:'medium', reason:'Clarify the inconsistency.' } };
+  const video=structuredClone(base); video.key='unavailable-video'; video.interview.perception_scores={ mode:'video', unavailable:true };
   const long=structuredClone(base); long.key='long';
   long.candidate.analysis_summary.summary=('Long synthetic resume with relevant job examples. ').repeat(65)+'RESUME_END_SENTINEL';
   long.interview.interview_summary=('Long synthetic interview summary with specific evidence. ').repeat(65)+'SUMMARY_END_SENTINEL';
   long.interview.interview_analysis_v2.evidence=Array.from({length:10},(_,i) => ('Synthetic evidence item '+i+'. Detailed actions and results for review. ').repeat(12)+' EVIDENCE_END_'+i);
   long.interview.interview_analysis_v2.limitations=Array.from({length:7},(_,i) => 'Synthetic limitation '+i+': '+('Self-reported context requires follow-up. ').repeat(8)+'LIMIT_END_'+i);
-  scenarios.push(missing,text,insufficient,closed,empty,long);
+  scenarios.push(missing,text,insufficient,closed,empty,conditions,risk,video,long);
   for (const input of scenarios) {
     const payload=buildCandidateReportPayload(input), html=buildCandidateReportHtml(payload);
     assert(!/<script|src="https?:/i.test(html));

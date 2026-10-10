@@ -30,6 +30,8 @@ if (SENTRY_ENABLED) {
         if (event.request?.headers) {
           delete event.request.headers['authorization'];
           delete event.request.headers['cookie'];
+          delete event.request.headers['x-alphasource-ghl-secret'];
+          delete event.request.headers['x-ghl-signature'];
           delete event.request.headers['telnyx-signature-ed25519'];
           delete event.request.headers['telnyx-timestamp'];
         }
@@ -41,7 +43,7 @@ if (SENTRY_ENABLED) {
                 .replace(/(Authorization|Bearer)\s+[A-Za-z0-9\-\._~\+\/]+=*/gi, '$1 REDACTED')
             : s;
         if (event.request?.url) event.request.url = scrub(event.request.url);
-        if (/\/api\/candidate\/(?:submit|verify-otp)(?:\/|$)|\/webhook\/telnyx\/sms(?:\/|$)/.test(String(event.request?.url || ''))) {
+        if (/\/api\/candidate\/(?:submit|verify-otp)(?:\/|$)|\/webhook\/telnyx\/sms(?:\/|$)|\/webhooks\/ghl\/(?:sales-ready)(?:\/|$)/.test(String(event.request?.url || ''))) {
           delete event.request.data;
         }
         if (event.extra) {
@@ -76,6 +78,7 @@ const { requireAuth, withClientScope } = require('./src/middleware/auth')
 const { createRequireSalesRep } = require('./src/middleware/salesAuth')
 const { createSalesRouter } = require('./src/routes/sales/index')
 const { createInternalSalesIntegrationsRouter } = require('./src/routes/internal/salesIntegrations')
+const { createGhlSalesWebhookRouter } = require('./src/routes/webhooks/ghlSales')
 const { createSupportVoiceGateway } = require('./src/services/supportVoiceGateway')
 const { isInterviewRecoveryCoreEnabled, isInterviewRecoveryCoreEmailEnabled } = require('./src/services/interviewAttemptService')
 const {
@@ -121,6 +124,8 @@ const supportVoiceGateway = createSupportVoiceGateway({
 })
 app.use('/api/support/voice', supportVoiceGateway.router)
 app.use('/api/support/phone-handoff', require('./src/services/supportHandoff').createPhoneHandoffRouter())
+app.use('/api/sales/voice-handoff', require('./src/services/salesVoiceHandoff').createSalesVoiceHandoffRouter({ db: supabaseAdmin }))
+app.use('/webhooks/ghl', createGhlSalesWebhookRouter({ db: supabaseAdmin, env: process.env, logger: console }))
 
 // ---------- CORS ----------
 const DEFAULT_ORIGINS = corsDefaultOrigins

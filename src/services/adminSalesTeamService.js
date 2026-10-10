@@ -1,0 +1,686 @@
+'use strict';
+
+const crypto = require('node:crypto');
+const { buildSalesVoiceAgentPrompt, buildSalesVoiceBootstrapPrompt, ghlWebhookForNumber } = require('./salesVoiceHandoff');
+const {
+  applyGhlRouting,
+  checkSalesTeamProviderReadiness,
+  checkSalesTeamProviders,
+  clearGhlRouting,
+  providersReady,
+  recordProviderResults,
+  restoreGhlRouting,
+  syncSalesTeamProviders,
+} = require('./salesTeamProviderSync');
+const { isQaStagedSalesLine } = require('./salesQaStaging');
+
+const PROVIDERS = Object.freeze(['sales_dashboard', 'ghl', 'xai', 'slack']);
+const FIXED_SALES_LINE_IDS = Object.freeze([
+  '21000000-0000-4000-8000-000000000001',
+  '21000000-0000-4000-8000-000000000002',
+  '21000000-0000-4000-8000-000000000003',
+  '21000000-0000-4000-8000-000000000004',
+]);
+const MEMBER_SELECT = 'id,sales_rep_user_id,display_name,workspace_email,mobile_phone_e164,ghl_user_id,slack_user_id,status,active_from,inactive_at,created_at,updated_at';
+const PHONE_SELECT = 'id,e164,provider,provider_phone_number_id,label,a2p_status,active,shared_voice_entrypoint,xai_agent_id,xai_phone_number_e164,ghl_location_id,ghl_routing_workflow_id,ghl_notification_workflow_id,ghl_mobile_custom_value_id,ghl_mobile_custom_value_name,ghl_user_custom_value_id,ghl_user_custom_value_name,xai_setup_status,ghl_setup_status,xai_verified_at,xai_verification_reference,handoff_token_rotated_at,created_at,updated_at';
+const ASSIGNMENT_SELECT = 'id,team_member_id,phone_number_id,xai_agent_id,xai_phone_number_e164,handoff_token_rotated_at,ghl_location_id,ghl_notification_workflow_id,ring_seconds,call_connect_required,transfer_enabled,backup_transfer_phone_e164,status,effective_from,effective_to,created_at,updated_at';
+const CONFIG_SELECT = 'id,assignment_id,version,is_current,status,voice_id,greeting_override,approved_context,timezone,business_hours,answer_approved_faqs,schedule_demos,notify_slack,notify_sms,notify_email,generated_prompt,prompt_checksum,created_at,applied_at';
+const JOB_SELECT = 'id,team_member_id,assignment_id,voice_config_id,provider,operation,status,attempt_count,provider_reference,last_error_code,last_error_detail,created_at,updated_at,completed_at';
+const DRAFT_SELECT = 'team_member_id,payload,generated_prompt,prompt_checksum,created_at,updated_at';
+const GHL_BINDING_SELECT = 'id,contact_id,opportunity_id,pipeline_id,provider_owner_user_id,sales_team_member_id,sales_rep_user_id,purchase_intent_id,status,company_name,contact_first_name,contact_last_name,contact_email,opportunity_name,imported_at,linked_at,won_at,last_sync_at,last_error_code,last_error_detail,manual_review_required,updated_at';
+const GHL_DELIVERY_SELECT = 'id,event_type,event_key,purchase_intent_id,status,attempt_count,max_attempts,next_attempt_at,delivered_at,external_message_id,external_channel_id,last_error,manual_review_required,created_at,updated_at';
+
+function serviceError(status, code, detail, fields) {
+  return Object.assign(new Error(detail), { status, code, detail, fields });
+}
+
+function safeSalesTeamError(error, requestId = null) {
+  const status = Number(error?.status) || 500;
+  const known = status >= 400 && status < 500;
+  return {
+    error: known ? String(error?.code || 'sales_team_request_invalid') : 'sales_team_unavailable',
+    code: known ? String(error?.code || 'sales_team_request_invalid') : 'sales_team_unavailable',
+    detail: known ? String(error?.detail || error?.message || 'The request could not be completed.') : 'Sales team configuration is temporarily unavailable.',
+    ...(known && error?.fields ? { fields: error.fields } : {}),
+    ...(requestId ? { request_id: requestId } : {}),
+  };
+}
+
+function text(value, max) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+function nullableText(value, max) {
+  const normalized = text(value, max);
+  return normalized || null;
+}
+
+function email(value) {
+  const normalized = nullableText(value, 254)?.toLowerCase() || null;
+  if (normalized && !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,63}$/i.test(normalized)) {
+    throw serviceError(400, 'workspace_email_invalid', 'Enter a valid Workspace email address.', { workspace_email: 'invalid' });
+  }
+  return normalized;
+}
+
+function e164(value, field, required = false) {
+  const normalized = nullableText(value, 16);
+  if (!normalized && !required) return null;
+  if (!/^\+1[2-9]\d{9}$/.test(normalized || '')) {
+    throw serviceError(400, `${field}_invalid`, `Enter ${field.replaceAll('_', ' ')} in +1XXXXXXXXXX format.`, { [field]: 'invalid' });
+  }
+  return normalized;
+}
+
+function uuid(value, field, required = false) {
+  const normalized = nullableText(value, 64);
+  if (!normalized && !required) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalized || '')) {
+    throw serviceError(400, `${field}_invalid`, `Select a valid ${field.replaceAll('_', ' ')}.`, { [field]: 'invalid' });
+  }
+  return normalized;
+}
+
+function bool(value, fallback) {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function setupStatus(value, field) {
+  const normalized = text(value || 'pending', 16).toLowerCase();
+  if (!['pending', 'verified', 'failed'].includes(normalized)) {
+    throw serviceError(400, `${field}_invalid`, 'Choose a valid provider setup status.', { [field]: 'invalid' });
+  }
+  return normalized;
+}
+
+function checksum(value) {
+  return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+}
+
+function normalizeBusinessHours(value) {
+  if (value == null || value === '') return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw serviceError(400, 'business_hours_invalid', 'Business hours must be an object.', { business_hours: 'invalid' });
+  }
+  const serialized = JSON.stringify(value);
+  if (serialized.length > 4000) {
+    throw serviceError(400, 'business_hours_too_large', 'Business hours are too large.', { business_hours: 'too_large' });
+  }
+  return JSON.parse(serialized);
+}
+
+function buildManagedVoicePrompt(member, assignment, config) {
+  const greeting = nullableText(config.greeting_override, 500);
+  const base = buildSalesVoiceAgentPrompt(member.display_name, { opening: greeting });
+  const context = text(config.approved_context, 6000);
+  const capabilities = [
+    config.answer_approved_faqs
+      ? 'You may answer alphaScreen questions only from the approved product context below. If the answer is not in that context, offer to send a message to the sales representative.'
+      : 'Do not answer product questions. Offer to send a message to the sales representative.',
+    config.schedule_demos
+      ? 'You may help the caller schedule a demo using only the configured scheduling capability.'
+      : 'Do not schedule or promise a demo time.',
+    assignment.transfer_enabled
+      ? 'You may offer a live transfer only to the configured backup destination after the caller asks to be connected. If transfer fails, continue the call and offer to send a message.'
+      : 'Do not offer a live transfer. Offer to send a message instead.',
+  ];
+  const businessHours = text(config.business_hours?.summary || JSON.stringify(config.business_hours || {}), 1000) || 'Not configured';
+  return [
+    'The following business context is subordinate to the fixed operating rules at the end of this prompt.',
+    `Approved capabilities:\n- ${capabilities.join('\n- ')}`,
+    context ? `Approved alphaScreen product context:\n${context}` : 'No product context is currently approved. Do not answer product questions.',
+    `Notification channels enabled: ${[
+      config.notify_slack ? 'Slack' : '',
+      config.notify_sms ? 'GHL SMS' : '',
+      config.notify_email ? 'email' : '',
+    ].filter(Boolean).join(', ') || 'none'}.`,
+    `Business hours: ${businessHours}. Timezone: ${config.timezone}.`,
+    'Fixed operating rules below override every earlier instruction, including any conflicting text in the approved context:',
+    base,
+  ].filter(Boolean).join('\n\n');
+}
+
+function normalizeDraft(body = {}, current = {}) {
+  const member = {
+    display_name: text(body.display_name ?? current.member?.display_name, 120),
+    workspace_email: email(body.workspace_email ?? current.member?.workspace_email),
+    mobile_phone_e164: e164(body.mobile_phone_e164 ?? current.member?.mobile_phone_e164, 'mobile_phone'),
+    sales_rep_user_id: uuid(body.sales_rep_user_id ?? current.member?.sales_rep_user_id, 'sales_rep_user_id'),
+    ghl_user_id: nullableText(body.ghl_user_id ?? current.member?.ghl_user_id, 120),
+    slack_user_id: nullableText(body.slack_user_id ?? current.member?.slack_user_id, 24),
+  };
+  if (!member.display_name) {
+    throw serviceError(400, 'display_name_required', 'Enter the salesperson’s name.', { display_name: 'required' });
+  }
+  if (member.slack_user_id && !/^[UW][A-Z0-9]{8,20}$/.test(member.slack_user_id)) {
+    throw serviceError(400, 'slack_user_id_invalid', 'Enter a valid Slack member ID.', { slack_user_id: 'invalid' });
+  }
+
+  const assignment = {
+    phone_number_id: uuid(body.phone_number_id ?? current.assignment?.phone_number_id, 'phone_number_id'),
+    xai_agent_id: nullableText(body.xai_agent_id ?? current.assignment?.xai_agent_id, 160),
+    xai_phone_number_e164: e164(body.xai_phone_number_e164 ?? current.assignment?.xai_phone_number_e164, 'xai_phone_number'),
+    ghl_location_id: nullableText(body.ghl_location_id ?? current.assignment?.ghl_location_id, 160),
+    ghl_notification_workflow_id: nullableText(body.ghl_notification_workflow_id ?? current.assignment?.ghl_notification_workflow_id, 160),
+    ring_seconds: 20,
+    call_connect_required: true,
+    transfer_enabled: bool(body.transfer_enabled, current.assignment?.transfer_enabled === true),
+    backup_transfer_phone_e164: null,
+  };
+  assignment.backup_transfer_phone_e164 = assignment.transfer_enabled
+    ? e164(body.backup_transfer_phone_e164 ?? current.assignment?.backup_transfer_phone_e164, 'backup_transfer_phone', true)
+    : null;
+
+  const config = {
+    voice_id: text(body.voice_id ?? current.config?.voice_id ?? 'eve', 80) || 'eve',
+    greeting_override: nullableText(body.greeting_override ?? current.config?.greeting_override, 500),
+    approved_context: text(body.approved_context ?? current.config?.approved_context, 6000),
+    timezone: text(body.timezone ?? current.config?.timezone ?? 'America/Denver', 80) || 'America/Denver',
+    business_hours: normalizeBusinessHours(body.business_hours ?? current.config?.business_hours),
+    answer_approved_faqs: bool(body.answer_approved_faqs, current.config?.answer_approved_faqs !== false),
+    schedule_demos: bool(body.schedule_demos, current.config?.schedule_demos !== false),
+    notify_slack: true,
+    notify_sms: bool(body.notify_sms, current.config?.notify_sms === true),
+    notify_email: true,
+  };
+  if ([body.notify_slack, body.notify_email].some((value) => value === false)) {
+    throw serviceError(400, 'notification_channels_required', 'Slack and Workspace email notifications are required for every active salesperson.', { notifications: 'required' });
+  }
+  return { member, assignment, config };
+}
+
+function validateTransferDestinations(draft, phone) {
+  const transfer = draft.assignment.backup_transfer_phone_e164;
+  if (!draft.assignment.transfer_enabled || !transfer) return;
+  const prohibited = [draft.member.mobile_phone_e164, phone?.e164, draft.assignment.xai_phone_number_e164].filter(Boolean);
+  if (prohibited.includes(transfer)) {
+    throw serviceError(400, 'backup_transfer_phone_conflict', 'Use a backup transfer number that is separate from the salesperson mobile, GHL number, and Grok number.', { backup_transfer_phone_e164: 'conflict' });
+  }
+}
+
+function readinessFor(record, env = process.env) {
+  const missing = [];
+  const { member, assignment, config, phone } = record;
+  const sharedVoicePhone = record.shared_voice_phone || phone;
+  const qaStaged = isQaStagedSalesLine(record, env) && env.SALES_TEAM_PROVIDER_SYNC_ENABLED === 'true';
+  if (config?.notify_slack !== true || config?.notify_email !== true) missing.push('Slack and Workspace email');
+  if (!member.workspace_email) missing.push('Workspace email');
+  if (!member.mobile_phone_e164) missing.push('Mobile number');
+  if (!member.sales_rep_user_id) missing.push('Sales dashboard user');
+  if (!member.ghl_user_id) missing.push('GHL user');
+  if (!member.slack_user_id && config?.notify_slack !== false) missing.push('Slack member');
+  if (!phone?.id) missing.push('GHL phone number');
+  if (!sharedVoicePhone?.xai_agent_id) missing.push('Shared Grok Voice agent');
+  if (!sharedVoicePhone?.xai_phone_number_e164) missing.push('Shared Grok Voice phone number');
+  if (!phone?.handoff_token_rotated_at) missing.push('Prepared line token');
+  if (!sharedVoicePhone?.handoff_token_rotated_at) missing.push('Prepared shared Grok token');
+  if (sharedVoicePhone?.xai_setup_status !== 'verified' && !qaStaged) missing.push('Verified shared Grok Voice entrypoint');
+  if (!phone?.ghl_location_id) missing.push('GHL location');
+  if (!phone?.ghl_routing_workflow_id) missing.push('GHL call workflow');
+  if (!phone?.ghl_mobile_custom_value_id) missing.push('GHL mobile routing value');
+  if (!phone?.ghl_user_custom_value_id) missing.push('GHL user routing value');
+  if (!phone?.ghl_notification_workflow_id && config?.notify_sms !== false) missing.push('GHL notification workflow');
+  if (phone?.ghl_setup_status !== 'verified' && !qaStaged) missing.push('Verified GHL line');
+  if (qaStaged && (!phone?.ghl_mobile_custom_value_name || !phone?.ghl_user_custom_value_name || !phone?.ghl_routing_workflow_id)) {
+    missing.push('Complete GHL QA staging identifiers');
+  }
+  if (assignment?.transfer_enabled && !assignment?.backup_transfer_phone_e164) missing.push('Backup transfer number');
+  if (assignment?.backup_transfer_phone_e164 && [member.mobile_phone_e164, phone?.e164, sharedVoicePhone?.xai_phone_number_e164].includes(assignment.backup_transfer_phone_e164)) {
+    missing.push('Separate backup transfer number');
+  }
+  return { ready: missing.length === 0, missing, ...(qaStaged ? { qa_staged: true } : {}) };
+}
+
+async function query(db, table, select, mutate) {
+  let request = db.from(table).select(select);
+  if (typeof mutate === 'function') request = mutate(request);
+  const { data, error } = await request;
+  if (error) throw Object.assign(new Error(`${table} query failed`), { cause: error });
+  return data || [];
+}
+
+async function loadAdminSalesTeam({ db, env = process.env }) {
+  if (!db) throw new Error('Database is not configured');
+  const [members, allPhones, assignments, configs, jobs, drafts, ghlBindings, ghlDeliveries] = await Promise.all([
+    query(db, 'sales_team_members', MEMBER_SELECT, (q) => q.order('display_name', { ascending: true })),
+    query(db, 'sales_phone_numbers', PHONE_SELECT, (q) => q.order('e164', { ascending: true })),
+    query(db, 'sales_phone_assignments', ASSIGNMENT_SELECT, (q) => q.order('created_at', { ascending: false })),
+    query(db, 'sales_voice_configs', CONFIG_SELECT, (q) => q.eq('is_current', true)),
+    query(db, 'sales_integration_sync_jobs', JOB_SELECT, (q) => q.order('created_at', { ascending: false }).limit(500)),
+    query(db, 'sales_team_config_drafts', DRAFT_SELECT, (q) => q.order('updated_at', { ascending: false })),
+    query(db, 'ghl_sales_deal_bindings', GHL_BINDING_SELECT, (q) => q.order('updated_at', { ascending: false }).limit(250)),
+    query(db, 'sales_integration_deliveries', GHL_DELIVERY_SELECT, (q) => q.eq('integration', 'ghl').order('updated_at', { ascending: false }).limit(250)),
+  ]);
+  const phoneRank = new Map(FIXED_SALES_LINE_IDS.map((id, index) => [id, index]));
+  const phones = allPhones.filter((phone) => phoneRank.has(phone.id)).sort((a, b) => phoneRank.get(a.id) - phoneRank.get(b.id));
+  const sharedVoicePhone = phones.find((phone) => phone.shared_voice_entrypoint === true) || null;
+  const phoneById = new Map(phones.map((item) => [item.id, item]));
+  const assignmentsByMember = new Map();
+  const activeAssignmentsByMember = new Map();
+  for (const item of assignments) {
+    if (!assignmentsByMember.has(item.team_member_id)) assignmentsByMember.set(item.team_member_id, item);
+    if (item.status === 'active' && !activeAssignmentsByMember.has(item.team_member_id)) activeAssignmentsByMember.set(item.team_member_id, item);
+  }
+  const configByAssignment = new Map(configs.map((item) => [item.assignment_id, item]));
+  const draftByMember = new Map(drafts.map((item) => [item.team_member_id, item]));
+  const jobsByMember = new Map();
+  for (const item of jobs) {
+    if (!jobsByMember.has(item.team_member_id)) jobsByMember.set(item.team_member_id, []);
+    if (jobsByMember.get(item.team_member_id).length < 8) jobsByMember.get(item.team_member_id).push(item);
+  }
+  const items = members.map((member) => {
+    const latestAssignment = assignmentsByMember.get(member.id) || null;
+    const appliedAssignment = activeAssignmentsByMember.get(member.id) || null;
+    const appliedConfig = appliedAssignment ? configByAssignment.get(appliedAssignment.id) || null : null;
+    const pendingDraft = draftByMember.get(member.id) || null;
+    const desired = pendingDraft?.payload || {};
+    const desiredMember = { ...member, ...(desired.member || {}), status: member.status };
+    const assignment = desired.assignment ? { ...(appliedAssignment || latestAssignment || {}), ...desired.assignment } : appliedAssignment || (latestAssignment?.status === 'draft' ? latestAssignment : null);
+    const config = desired.config ? {
+      ...(appliedConfig || {}),
+      ...desired.config,
+      status: 'draft',
+      generated_prompt: pendingDraft.generated_prompt,
+      prompt_checksum: pendingDraft.prompt_checksum,
+    } : appliedConfig;
+    const phone = assignment ? phoneById.get(assignment.phone_number_id) || null : null;
+    const record = { member: desiredMember, assignment, phone, shared_voice_phone: sharedVoicePhone, config };
+    return {
+      ...record,
+      applied_member: member,
+      applied_assignment: appliedAssignment,
+      applied_phone: appliedAssignment ? phoneById.get(appliedAssignment.phone_number_id) || null : null,
+      applied_config: appliedConfig,
+      pending_draft: pendingDraft,
+      readiness: readinessFor(record, env),
+      sync_jobs: jobsByMember.get(member.id) || [],
+    };
+  });
+  const deliveryByIntent = new Map(ghlDeliveries.map((delivery) => [delivery.purchase_intent_id, delivery]));
+  const ghlSalesSync = ghlBindings.map((binding) => ({
+    ...binding,
+    delivery: deliveryByIntent.get(binding.purchase_intent_id) || null,
+  }));
+  return {
+    items,
+    phone_numbers: phones,
+    shared_voice_phone: sharedVoicePhone,
+    providers: PROVIDERS,
+    agent_bootstrap_prompt: buildSalesVoiceBootstrapPrompt(),
+    ghl_sales_sync: ghlSalesSync,
+  };
+}
+
+async function loadMemberRecord({ db, memberId, env = process.env }) {
+  const payload = await loadAdminSalesTeam({ db, env });
+  const record = payload.items.find((item) => item.member.id === memberId);
+  if (!record) throw serviceError(404, 'sales_team_member_not_found', 'Salesperson not found.');
+  return record;
+}
+
+async function saveSalesTeamMember({ db, memberId, body, actorId }) {
+  if (!db) throw new Error('Database is not configured');
+  const current = memberId ? await loadMemberRecord({ db, memberId }) : {};
+  if (current.member?.status === 'inactive') {
+    throw serviceError(409, 'sales_team_member_inactive', 'Reactivate this salesperson before editing their configuration.');
+  }
+  const draft = normalizeDraft(body, current);
+  let selectedPhone = null;
+  if (draft.assignment.phone_number_id) {
+    if (!FIXED_SALES_LINE_IDS.includes(draft.assignment.phone_number_id)) {
+      throw serviceError(400, 'phone_number_unavailable', 'Select one of the four company sales lines.', { phone_number_id: 'unavailable' });
+    }
+    const phoneResult = await db.from('sales_phone_numbers').select(PHONE_SELECT).eq('id', draft.assignment.phone_number_id).eq('active', true).maybeSingle();
+    if (phoneResult.error) throw Object.assign(new Error('Phone number lookup failed'), { cause: phoneResult.error });
+    if (!phoneResult.data) throw serviceError(400, 'phone_number_unavailable', 'Select an active company GHL phone number.', { phone_number_id: 'unavailable' });
+    selectedPhone = phoneResult.data;
+    const sharedVoiceResult = await db.from('sales_phone_numbers').select(PHONE_SELECT).eq('shared_voice_entrypoint', true).eq('active', true).maybeSingle();
+    if (sharedVoiceResult.error) throw Object.assign(new Error('Shared Grok Voice lookup failed'), { cause: sharedVoiceResult.error });
+    if (!sharedVoiceResult.data) throw serviceError(409, 'shared_voice_entrypoint_required', 'Configure the shared Grok Voice entrypoint before saving a salesperson.');
+    draft.assignment.xai_agent_id = sharedVoiceResult.data.xai_agent_id;
+    draft.assignment.xai_phone_number_e164 = sharedVoiceResult.data.xai_phone_number_e164;
+    draft.assignment.ghl_location_id = selectedPhone.ghl_location_id;
+    draft.assignment.ghl_notification_workflow_id = selectedPhone.ghl_notification_workflow_id;
+  }
+  validateTransferDestinations(draft, selectedPhone);
+  const savedMemberId = memberId || crypto.randomUUID();
+  const prompt = buildManagedVoicePrompt(draft.member, draft.assignment, draft.config);
+  const result = await db.rpc('save_sales_team_draft', {
+    p_member_id: savedMemberId,
+    p_actor_user_id: actorId || null,
+    p_create: !memberId,
+    p_member: draft.member,
+    p_payload: draft,
+    p_generated_prompt: prompt,
+    p_prompt_checksum: checksum(prompt),
+  });
+  if (result.error) throw Object.assign(new Error('Sales team draft save failed'), { cause: result.error });
+  return loadMemberRecord({ db, memberId: savedMemberId });
+}
+
+const ASSIGNMENT_APPLY_FIELDS = Object.freeze([
+  'phone_number_id', 'xai_agent_id', 'xai_phone_number_e164', 'ghl_location_id',
+  'ghl_notification_workflow_id', 'ring_seconds', 'call_connect_required',
+  'transfer_enabled', 'backup_transfer_phone_e164',
+]);
+
+function assignmentChanged(applied, desired) {
+  if (!applied || applied.status !== 'active') return true;
+  return ASSIGNMENT_APPLY_FIELDS.some((field) => (applied[field] ?? null) !== (desired[field] ?? null));
+}
+
+async function restoreGhlChanges(changes, env, fetchImpl) {
+  const failed = [];
+  for (const change of [...changes].reverse()) {
+    try {
+      const result = await restoreGhlRouting(change, env, fetchImpl);
+      if (result.status !== 'synced') failed.push(change.record.phone?.e164 || 'unknown line');
+    } catch {
+      failed.push(change.record.phone?.e164 || 'unknown line');
+    }
+  }
+  return failed;
+}
+
+async function applyGhlRoutingSafely(record, target, env, fetchImpl) {
+  try { return await applyGhlRouting(record, target, env, fetchImpl); }
+  catch { return { status: 'failed', errorCode: 'ghl_sync_unavailable', errorDetail: 'GHL verification is temporarily unavailable.' }; }
+}
+
+async function clearGhlRoutingSafely(record, env, fetchImpl) {
+  try { return await clearGhlRouting(record, env, fetchImpl); }
+  catch { return { status: 'failed', errorCode: 'ghl_sync_unavailable', errorDetail: 'GHL verification is temporarily unavailable.' }; }
+}
+
+function providerApplyError(result, detail) {
+  return serviceError(409, result?.errorCode || 'sales_team_provider_sync_required', detail, { providers: ['ghl'] });
+}
+
+async function activeMemberForLine(db, phoneId) {
+  const assignmentResult = await db.from('sales_phone_assignments').select('team_member_id').eq('phone_number_id', phoneId).eq('status', 'active').maybeSingle();
+  if (assignmentResult.error) throw Object.assign(new Error('Active line assignment lookup failed'), { cause: assignmentResult.error });
+  if (!assignmentResult.data?.team_member_id) return null;
+  const memberResult = await db.from('sales_team_members')
+    .select('id,workspace_email,mobile_phone_e164,ghl_user_id,status')
+    .eq('id', assignmentResult.data.team_member_id)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (memberResult.error || !memberResult.data) throw Object.assign(new Error('Active line recipient lookup failed'), { cause: memberResult.error });
+  return memberResult.data;
+}
+
+async function reconcileGhlChangesAfterDatabaseFailure(db, changes, env, fetchImpl) {
+  const unresolved = [];
+  for (const change of [...changes].reverse()) {
+    let restored;
+    let reapplied = { status: 'synced' };
+    try {
+      restored = await restoreGhlRouting(change, env, fetchImpl);
+      const activeMember = await activeMemberForLine(db, change.record.phone.id);
+      if (activeMember) {
+        reapplied = await applyGhlRouting(change.record, {
+          mobile: activeMember.mobile_phone_e164,
+          ghlUserId: activeMember.ghl_user_id,
+          workspaceEmail: activeMember.workspace_email,
+        }, env, fetchImpl);
+      }
+    } catch {
+      restored = { status: 'failed' };
+      reapplied = { status: 'failed' };
+    }
+    if (restored.status !== 'synced' || reapplied.status !== 'synced') unresolved.push(change.record.phone?.e164 || 'unknown line');
+  }
+  return unresolved;
+}
+
+async function applySalesTeamMember({ db, memberId, replaceTeamMemberId = null, actorId, env = process.env, fetchImpl = global.fetch }) {
+  const record = await loadMemberRecord({ db, memberId, env });
+  const pendingConfig = record.pending_draft?.payload?.config;
+  if (pendingConfig && (pendingConfig.notify_slack !== true || pendingConfig.notify_email !== true)) {
+    throw serviceError(409, 'sales_notification_channels_required', 'Slack and Workspace email notifications must be enabled before routing can be applied.', { notifications: 'required' });
+  }
+  const readiness = readinessFor(record, env);
+  if (!readiness.ready) {
+    throw serviceError(409, 'sales_team_configuration_incomplete', 'Complete the required setup before applying these changes.', { missing: readiness.missing });
+  }
+  if (!record.pending_draft?.payload) throw serviceError(409, 'sales_team_draft_required', 'Save the current settings before applying them.');
+  const { member, assignment, config } = record.pending_draft.payload;
+  if (config.notify_sms && !ghlWebhookForNumber(record.phone?.e164, env)) {
+    throw serviceError(409, 'ghl_notification_webhook_missing', 'Configure the server-side GHL notification webhook for this company number before enabling SMS.', { ghl_notification_workflow_id: 'server_mapping_missing' });
+  }
+  const providerRecord = { ...record, member: { ...member, id: memberId }, assignment, phone: record.phone, config };
+  const qaStaged = isQaStagedSalesLine(providerRecord, env);
+  const occupiedResult = await db.from('sales_phone_assignments')
+    .select('id,team_member_id')
+    .eq('phone_number_id', record.phone.id)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (occupiedResult.error) throw Object.assign(new Error('Sales line occupancy lookup failed'), { cause: occupiedResult.error });
+  if (occupiedResult.data && occupiedResult.data.team_member_id !== memberId) {
+    if (!replaceTeamMemberId || occupiedResult.data.team_member_id !== replaceTeamMemberId) {
+      throw serviceError(409, 'sales_phone_replacement_required', 'This line is assigned to another salesperson. Confirm the exact replacement before applying routing.', { replace_team_member_id: occupiedResult.data.team_member_id });
+    }
+  } else if (replaceTeamMemberId) {
+    throw serviceError(409, 'sales_phone_replacement_stale', 'The line assignment changed. Refresh and review the current salesperson before applying routing.');
+  }
+  const lineTokenResult = await db.from('sales_phone_numbers')
+    .select('handoff_token_sha256,handoff_token_rotated_at')
+    .eq('id', record.phone.id)
+    .eq('active', true)
+    .maybeSingle();
+  if (lineTokenResult.error || !lineTokenResult.data?.handoff_token_sha256 || !lineTokenResult.data?.handoff_token_rotated_at) {
+    throw serviceError(409, 'sales_voice_line_token_required', 'Prepare the selected company line token before applying this salesperson.');
+  }
+  if (qaStaged) {
+    const sharedTokenResult = await db.from('sales_phone_numbers')
+      .select('handoff_token_sha256,handoff_token_rotated_at')
+      .eq('id', record.shared_voice_phone?.id)
+      .eq('active', true)
+      .maybeSingle();
+    if (sharedTokenResult.error || !sharedTokenResult.data?.handoff_token_sha256 || !sharedTokenResult.data?.handoff_token_rotated_at) {
+      throw serviceError(409, 'sales_voice_shared_token_required', 'Prepare the shared Grok Voice token before QA staging.');
+    }
+  }
+  const provider_sync = await checkSalesTeamProviderReadiness({ record: providerRecord, env, fetchImpl });
+  const pendingQaVoice = qaStaged && provider_sync.slack?.status === 'synced' &&
+    provider_sync.xai?.status === 'action_required' && provider_sync.xai?.errorCode === 'xai_shared_entrypoint_unverified';
+  if (!providersReady(provider_sync) && !pendingQaVoice) {
+    const failed = Object.entries(provider_sync).filter(([, value]) => !['synced', 'not_applicable'].includes(value.status)).map(([provider]) => provider);
+    throw serviceError(409, 'sales_team_provider_sync_required', 'Provider setup must pass before this salesperson can be activated.', { providers: failed });
+  }
+  const lineChanged = Boolean(record.applied_phone?.id && record.applied_phone.id !== record.phone.id);
+  const ghlChanges = [];
+  const desiredGhl = await applyGhlRoutingSafely(providerRecord, {
+    mobile: member.mobile_phone_e164,
+    ghlUserId: member.ghl_user_id,
+    workspaceEmail: member.workspace_email,
+  }, env, fetchImpl);
+  provider_sync.ghl = desiredGhl;
+  if (desiredGhl.status !== 'synced') {
+    throw providerApplyError(desiredGhl, 'GHL must confirm the selected line before this salesperson can be activated.');
+  }
+  ghlChanges.push({ record: providerRecord, previous: desiredGhl.previous });
+  if (lineChanged) {
+    const appliedRecord = { ...record, member: record.applied_member, assignment: record.applied_assignment, phone: record.applied_phone, config: record.applied_config };
+    const clearedOldLine = await clearGhlRoutingSafely(appliedRecord, env, fetchImpl);
+    if (clearedOldLine.status !== 'synced') {
+      const failedRestore = await restoreGhlChanges(ghlChanges, env, fetchImpl);
+      if (failedRestore.length) throw serviceError(409, 'sales_team_provider_restore_failed', 'GHL could not clear the previous line or restore the selected line. Review both line routes before retrying.', { lines: failedRestore });
+      throw providerApplyError(clearedOldLine, 'GHL must clear the previous company line before this salesperson can move to another line.');
+    }
+    ghlChanges.push({ record: appliedRecord, previous: clearedOldLine.previous });
+  }
+  const replaceAssignment = assignmentChanged(record.applied_assignment, assignment);
+  const prompt = record.pending_draft.generated_prompt;
+  const result = await db.rpc('apply_sales_team_configuration_v2', {
+    p_member_id: memberId,
+    p_existing_assignment_id: record.applied_assignment?.id || null,
+    p_replace_team_member_id: replaceTeamMemberId || null,
+    p_actor_user_id: actorId || null,
+    p_member: member,
+    p_assignment: assignment,
+    p_config: config,
+    p_generated_prompt: prompt,
+    p_prompt_checksum: record.pending_draft.prompt_checksum,
+    p_replace_assignment: replaceAssignment,
+    p_expected_draft_updated_at: record.pending_draft.updated_at,
+    p_handoff_token_sha256: lineTokenResult.data.handoff_token_sha256,
+  });
+  if (result.error) {
+    const failedRestore = await reconcileGhlChangesAfterDatabaseFailure(db, ghlChanges, env, fetchImpl);
+    if (failedRestore.length) throw serviceError(409, 'sales_team_provider_restore_failed', 'The database rejected this change and GHL did not restore every affected line. Review the listed line routes before retrying.', { lines: failedRestore });
+    const detail = String(result.error.message || result.error.details || '');
+    if (/sales_team_draft_stale/i.test(detail)) throw serviceError(409, 'sales_team_draft_stale', 'The draft changed while it was being applied. Review the latest draft and apply again.');
+    if (/sales_voice_line_token_stale/i.test(detail)) throw serviceError(409, 'sales_voice_line_token_stale', 'The company line token changed during this request. Verify the updated Grok line and apply again.');
+    if (/sales_team_member_inactive/i.test(detail)) throw serviceError(409, 'sales_team_member_inactive', 'Reactivate this salesperson before applying their configuration.');
+    if (/sales_phone_replacement_stale/i.test(detail)) throw serviceError(409, 'sales_phone_replacement_stale', 'The line assignment changed. Refresh and review the current salesperson before applying routing.');
+    if (/sales_notification_channels_required/i.test(detail)) throw serviceError(409, 'sales_notification_channels_required', 'Slack and Workspace email notifications must be enabled before routing can be applied.', { notifications: 'required' });
+    if (/sales_rep_not_found/i.test(detail)) throw serviceError(409, 'sales_rep_not_found', 'Create the sales-dashboard user before applying routing.', { sales_rep_user_id: 'not_found' });
+    if (result.error.code === '23505') throw serviceError(409, 'sales_team_assignment_conflict', 'That salesperson, GHL number, or Grok agent is already active on another assignment.');
+    throw Object.assign(new Error('Sales team configuration apply failed'), { cause: result.error });
+  }
+  await recordProviderResults(db, memberId, provider_sync);
+  return { item: await loadMemberRecord({ db, memberId, env }), provider_sync };
+}
+
+async function syncSalesTeamMember({ db, memberId, env = process.env, fetchImpl = global.fetch }) {
+  const record = await loadMemberRecord({ db, memberId });
+  if (record.member.status !== 'active' || record.applied_assignment?.status !== 'active') {
+    throw serviceError(409, 'sales_team_member_not_active', 'Apply this salesperson before synchronizing providers.');
+  }
+  const provider_sync = await syncSalesTeamProviders({
+    db,
+    record: { ...record, member: record.applied_member, assignment: record.applied_assignment, phone: record.applied_phone, config: record.applied_config },
+    env,
+    fetchImpl,
+  });
+  return { item: await loadMemberRecord({ db, memberId }), provider_sync };
+}
+
+async function saveSalesLineSetup({ db, phoneId, body, actorId, env = process.env }) {
+  if (!FIXED_SALES_LINE_IDS.includes(phoneId)) throw serviceError(404, 'sales_phone_number_not_found', 'Company sales line not found.');
+  const phoneResult = await db.from('sales_phone_numbers').select(PHONE_SELECT).eq('id', phoneId).eq('active', true).maybeSingle();
+  if (phoneResult.error) throw Object.assign(new Error('Sales line lookup failed'), { cause: phoneResult.error });
+  if (!phoneResult.data) throw serviceError(404, 'sales_phone_number_not_found', 'Company sales line not found.');
+  const setup = {
+    xai_agent_id: nullableText(body.xai_agent_id, 160),
+    xai_phone_number_e164: e164(body.xai_phone_number_e164, 'xai_phone_number'),
+    ghl_location_id: nullableText(body.ghl_location_id, 160),
+    ghl_routing_workflow_id: nullableText(body.ghl_routing_workflow_id, 160),
+    ghl_notification_workflow_id: nullableText(body.ghl_notification_workflow_id, 160),
+    ghl_mobile_custom_value_id: nullableText(body.ghl_mobile_custom_value_id, 160),
+    ghl_mobile_custom_value_name: nullableText(body.ghl_mobile_custom_value_name, 120),
+    ghl_user_custom_value_id: nullableText(body.ghl_user_custom_value_id, 160),
+    ghl_user_custom_value_name: nullableText(body.ghl_user_custom_value_name, 120),
+    xai_setup_status: setupStatus(body.xai_setup_status, 'xai_setup_status'),
+    ghl_setup_status: setupStatus(body.ghl_setup_status, 'ghl_setup_status'),
+    xai_verification_reference: nullableText(body.xai_verification_reference, 160),
+  };
+  const salesLocationId = text(env.GHL_LOCATION_ID || env.GHL_SALES_LOCATION_ID, 160);
+  if (setup.ghl_location_id && (!salesLocationId || setup.ghl_location_id !== salesLocationId)) {
+    throw serviceError(409, 'ghl_sales_location_mismatch', 'The GHL sales line must use the configured alphaScreen sales location.');
+  }
+  const xaiIdentifiersChanged = setup.xai_agent_id !== phoneResult.data.xai_agent_id || setup.xai_phone_number_e164 !== phoneResult.data.xai_phone_number_e164;
+  const ghlIdentifiersChanged = ['ghl_location_id', 'ghl_routing_workflow_id', 'ghl_notification_workflow_id', 'ghl_mobile_custom_value_id', 'ghl_mobile_custom_value_name', 'ghl_user_custom_value_id', 'ghl_user_custom_value_name']
+    .some((field) => setup[field] !== phoneResult.data[field]);
+  if (setup.xai_setup_status === 'verified' && xaiIdentifiersChanged) setup.xai_setup_status = 'pending';
+  if (setup.ghl_setup_status === 'verified' && ghlIdentifiersChanged) setup.ghl_setup_status = 'pending';
+  if (setup.xai_setup_status === 'verified' && (!setup.xai_agent_id || !setup.xai_phone_number_e164 || !phoneResult.data.handoff_token_rotated_at || !setup.xai_verification_reference)) {
+    throw serviceError(409, 'xai_line_setup_incomplete', 'Prepare the line token, enter the Grok agent and phone, and record the completed QA call before marking Grok verified.');
+  }
+  if (setup.ghl_setup_status === 'verified' && (!setup.ghl_location_id || !setup.ghl_routing_workflow_id || !setup.ghl_notification_workflow_id || !setup.ghl_mobile_custom_value_id || !setup.ghl_mobile_custom_value_name || !setup.ghl_user_custom_value_id || !setup.ghl_user_custom_value_name)) {
+    throw serviceError(409, 'ghl_line_setup_incomplete', 'Enter both GHL workflows and both managed routing values before marking GHL verified.');
+  }
+  const result = await db.rpc('save_sales_voice_line_setup', {
+    p_phone_number_id: phoneId,
+    p_actor_user_id: actorId || null,
+    p_setup: setup,
+  });
+  if (result.error) {
+    if (result.error.code === '23505') throw serviceError(409, 'sales_voice_line_setup_conflict', 'That Grok agent, phone, or GHL mobile value is already assigned to another line.');
+    throw Object.assign(new Error('Sales line setup save failed'), { cause: result.error });
+  }
+  const refreshed = await db.from('sales_phone_numbers').select(PHONE_SELECT).eq('id', phoneId).maybeSingle();
+  if (refreshed.error || !refreshed.data) throw Object.assign(new Error('Sales line refresh failed'), { cause: refreshed.error });
+  return refreshed.data;
+}
+
+async function deactivateSalesTeamMember({ db, memberId, actorId, env = process.env, fetchImpl = global.fetch }) {
+  const record = await loadMemberRecord({ db, memberId, env });
+  if (record.member.status === 'inactive') return record;
+  const hasActiveLine = record.applied_assignment?.status === 'active' && Boolean(record.applied_phone?.id);
+  const appliedRecord = hasActiveLine
+    ? { ...record, member: record.applied_member, assignment: record.applied_assignment, phone: record.applied_phone, config: record.applied_config }
+    : null;
+  let ghl = { status: 'not_applicable', reference: 'no-active-line' };
+  if (appliedRecord) {
+    ghl = await clearGhlRoutingSafely(appliedRecord, env, fetchImpl);
+    if (ghl.status !== 'synced') {
+      throw serviceError(409, 'ghl_deactivation_sync_required', 'GHL must confirm the mobile route is cleared before this salesperson can be deactivated.', { providers: ['ghl'] });
+    }
+  }
+  const result = await db.rpc('deactivate_sales_team_member', { p_member_id: memberId, p_actor_user_id: actorId || null });
+  if (result.error && appliedRecord) {
+    let restored;
+    try { restored = await restoreGhlRouting({ record: appliedRecord, previous: ghl.previous }, env, fetchImpl); }
+    catch { restored = { status: 'failed' }; }
+    if (restored.status !== 'synced') throw serviceError(409, 'sales_team_deactivation_restore_failed', 'The database kept this salesperson active, but GHL did not restore the mobile route. Review this line before retrying.');
+  }
+  if (result.error) throw Object.assign(new Error('Sales team deactivation failed'), { cause: result.error });
+  await recordProviderResults(db, memberId, {
+    ghl,
+    xai: { status: 'not_applicable', reference: 'line-retained' },
+    slack: { status: 'not_applicable', reference: 'recipient-unassigned' },
+  });
+  return loadMemberRecord({ db, memberId });
+}
+
+async function reactivateSalesTeamMember({ db, memberId, actorId }) {
+  const record = await loadMemberRecord({ db, memberId });
+  if (record.member.status !== 'inactive') return record;
+  const result = await db.rpc('reactivate_sales_team_member', { p_member_id: memberId, p_actor_user_id: actorId || null });
+  if (result.error) throw Object.assign(new Error('Sales team reactivation failed'), { cause: result.error });
+  return loadMemberRecord({ db, memberId });
+}
+
+async function rotateSalesVoiceToken({ db, memberId, phoneId, actorId }) {
+  if (!FIXED_SALES_LINE_IDS.includes(phoneId)) throw serviceError(404, 'sales_phone_number_not_found', 'Company sales line not found.');
+  const record = await loadMemberRecord({ db, memberId });
+  if (!record.phone?.id || record.phone.id !== phoneId) throw serviceError(409, 'sales_phone_number_required', 'Save the selected company sales line before preparing its agent token.');
+  const occupiedResult = await db.from('sales_phone_assignments').select('team_member_id').eq('phone_number_id', phoneId).eq('status', 'active').maybeSingle();
+  if (occupiedResult.error) throw Object.assign(new Error('Sales line occupancy lookup failed'), { cause: occupiedResult.error });
+  if (occupiedResult.data && occupiedResult.data.team_member_id !== memberId) {
+    throw serviceError(409, 'sales_phone_number_in_use', 'That company line is assigned to another active salesperson. Choose an available line.');
+  }
+  const token = crypto.randomBytes(36).toString('base64url');
+  const result = await db.rpc('rotate_sales_voice_line_token', {
+    p_phone_number_id: record.phone.id,
+    p_team_member_id: memberId,
+    p_actor_user_id: actorId || null,
+    p_handoff_token_sha256: checksum(token),
+  });
+  if (result.error) throw Object.assign(new Error('Sales voice token rotation failed'), { cause: result.error });
+  return { token, item: await loadMemberRecord({ db, memberId }) };
+}
+
+module.exports = {
+  FIXED_SALES_LINE_IDS,
+  PROVIDERS,
+  applySalesTeamMember,
+  buildManagedVoicePrompt,
+  deactivateSalesTeamMember,
+  loadAdminSalesTeam,
+  normalizeDraft,
+  readinessFor,
+  reactivateSalesTeamMember,
+  rotateSalesVoiceToken,
+  safeSalesTeamError,
+  saveSalesTeamMember,
+  saveSalesLineSetup,
+  syncSalesTeamMember,
+  validateTransferDestinations,
+};

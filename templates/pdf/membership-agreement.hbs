@@ -157,6 +157,57 @@
       text-align: right;
     }
 
+    /* Keep the itemized purchase summary and its acknowledgments together. */
+    .package-page .logo-wrap {
+      margin-bottom: 4px;
+    }
+
+    .package-page .logo-wrap img {
+      width: 200px;
+    }
+
+    .package-page .subtitle {
+      margin-bottom: 10px;
+    }
+
+    .package-page .details-table {
+      margin-bottom: 8px;
+    }
+
+    .package-page .details-table td {
+      height: 58px;
+      padding: 6px 9px 7px;
+    }
+
+    .package-page .cell-label {
+      margin-bottom: 5px;
+    }
+
+    .package-page .triplet {
+      margin-bottom: 7px;
+    }
+
+    .package-page .triplet td {
+      height: 80px;
+      padding: 7px 9px;
+    }
+
+    .package-page .triplet-label {
+      margin-bottom: 5px;
+    }
+
+    .package-page .ack-title {
+      margin: 8px 0 5px;
+    }
+
+    .package-page .ack-item {
+      margin-bottom: 4px;
+    }
+
+    .package-page .generated-note {
+      margin-top: 6px;
+    }
+
     .page-break {
       page-break-before: always;
       break-before: page;
@@ -182,6 +233,8 @@
       font-size: 14px;
       font-weight: 800;
       color: #08165B;
+      break-after: avoid-page;
+      page-break-after: avoid;
     }
 
     .section-paragraph {
@@ -260,7 +313,7 @@
   </style>
 </head>
 <body>
-  <section class="page">
+  <section class="page{{#if show_package_terms}} package-page{{/if}}">
     <div class="logo-wrap">
       {{#if logo_src}}
       <img src="{{logo_src}}" alt="alphaSource logo" />

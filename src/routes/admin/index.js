@@ -14,6 +14,7 @@ const { requireAuth } = require('../../middleware/auth');
 const { requireAdmin } = require('../../middleware/requireAdmin');
 const { supabaseAdmin } = require('../../clients/supabase');
 const { createAdminSalesPayrollRouter } = require('./salesPayroll');
+const { createAdminSalesTeamRouter } = require('./salesTeam');
 
 const router = express.Router();
 
@@ -38,8 +39,9 @@ router.use(require('./candidates'));
 router.use(require('./reports'));
 router.use(require('./members'));
 
-// Mount admin sub-routers (Sales payroll + Billing + Accommodation Requests)
+// Mount admin sub-routers (Sales payroll + Sales team + Billing + Accommodation Requests)
 router.use('/sales-payroll', requireAuth, requireAdmin, createAdminSalesPayrollRouter({ db: supabaseAdmin }))
+router.use('/sales-team', requireAuth, requireAdmin, createAdminSalesTeamRouter({ db: supabaseAdmin }))
 try {
   router.use('/billing', requireAuth, requireAdmin, require('./billingRouter'))
 } catch (e) {

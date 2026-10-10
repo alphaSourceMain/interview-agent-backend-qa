@@ -1,5 +1,8 @@
 .DS_Store
 node_modules/
+
+# Supabase CLI links are machine-local and must never select a deployed project from Git.
+/supabase/.temp/
 .env
 node_modules/
 

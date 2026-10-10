@@ -9,7 +9,7 @@ const SESSION_ID = 'A'.repeat(22);
 const DIGEST = 'b'.repeat(64);
 const USER = 'c'.repeat(64);
 
-test('store uses only the five service-role RPC contracts with bounded arguments', async () => {
+test('store uses seven service-role RPC contracts with bounded arguments and private scope binding', async () => {
   const calls = [];
   const db = {
     async rpc(name, args) {
@@ -19,6 +19,8 @@ test('store uses only the five service-role RPC contracts with bounded arguments
       if (name === 'service_consume_support_voice_session') return { data: [{ status: 'consumed', session_id: SESSION_ID, user_fingerprint: USER, expires_at: new Date(Date.now() + 600_000).toISOString() }], error: null };
       if (name === 'service_close_support_voice_session') return { data: [{ status: 'closed', session_id: SESSION_ID, expires_at: new Date(Date.now() + 600_000).toISOString() }], error: null };
       if (name === 'service_close_pending_support_voice_sessions') return { data: 1, error: null };
+      if (name === 'service_bind_support_voice_scope') return { data: true, error: null };
+      if (name === 'service_read_support_voice_scope') return { data: [{ user_id: '00000000-0000-4000-8000-000000000001', client_id: '00000000-0000-4000-8000-000000000002' }], error: null };
       throw new Error('unexpected RPC');
     },
   };
@@ -28,12 +30,16 @@ test('store uses only the five service-role RPC contracts with bounded arguments
   assert.equal((await store.consume({ credentialDigest: DIGEST })).status, 'consumed');
   assert.equal((await store.close({ sessionId: SESSION_ID, reason: 'ended' })).status, 'closed');
   assert.equal(await store.closePending({ userFingerprint: USER }), 1);
+  await store.bindScope({ sessionId: SESSION_ID, userId: '00000000-0000-4000-8000-000000000001', clientId: '00000000-0000-4000-8000-000000000002', userFingerprint: USER });
+  assert.equal((await store.readScope({ sessionId: SESSION_ID })).client_id, '00000000-0000-4000-8000-000000000002');
   assert.deepEqual(calls.map((call) => call.name), [
     'service_support_voice_session_health',
     'service_reserve_support_voice_session',
     'service_consume_support_voice_session',
     'service_close_support_voice_session',
     'service_close_pending_support_voice_sessions',
+    'service_bind_support_voice_scope',
+    'service_read_support_voice_scope',
   ]);
   assert.deepEqual(calls[1].args, {
     p_session_id: SESSION_ID,

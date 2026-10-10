@@ -133,9 +133,24 @@ function createSupportVoiceSessionStore(options = {}) {
     return result.data;
   }
 
+  async function bindScope({ sessionId, userId, clientId, userFingerprint }) {
+    const result = await rpc('service_bind_support_voice_scope', {
+      p_session_id: sessionId, p_user_id: userId, p_client_id: clientId, p_user_fingerprint: userFingerprint,
+    });
+    if (result?.error || result?.data !== true) throw new Error('SUPPORT_VOICE_SCOPE_BIND');
+  }
+
+  async function readScope({ sessionId }) {
+    const result = await rpc('service_read_support_voice_scope', { p_session_id: sessionId });
+    if (result?.error) throw new Error('SUPPORT_VOICE_SCOPE_READ');
+    return firstRow(result?.data);
+  }
+
   return {
     close,
     closePending,
+    bindScope,
+    readScope,
     consume,
     isHealthy,
     probe,

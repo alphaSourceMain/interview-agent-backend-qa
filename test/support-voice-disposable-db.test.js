@@ -61,16 +61,42 @@ before(() => {
     if not exists (select 1 from pg_roles where rolname='service_role') then create role service_role noinherit; end if;
   end $$;`, { database: DATABASE });
   apply();
+  sql("create schema auth; create table auth.users(id uuid primary key); create table public.clients(id uuid primary key);");
+  const scopedMigration = command('psql', [...args(), '-f', path.join(__dirname, '..', 'supabase', 'migrations', '20261010192950_support_voice_selected_scope.sql')]);
+  assert.equal(scopedMigration.status, 0, scopedMigration.stderr);
 });
 
 beforeEach(() => {
   if (!ENABLED) return;
-  sql('truncate table private_support.support_voice_sessions;');
+  sql('truncate table private_support.support_voice_sessions cascade;');
 });
 
 after(() => {
   if (!ENABLED) return;
   command('dropdb', ['-h', SOCKET, '-p', PORT, '-U', USER, '--if-exists', DATABASE]);
+});
+
+test('selected scope DB: service-only RPCs, immutable binding, active-only read and unbound denial', { skip: !ENABLED }, () => {
+  const user = '00000000-0000-4000-8000-000000000001';
+  const client = '00000000-0000-4000-8000-000000000002';
+  sql(`insert into auth.users values ('${user}') on conflict do nothing; insert into public.clients values ('${client}') on conflict do nothing;`);
+  const functions = ['public.service_bind_support_voice_scope(text,uuid,uuid,text)', 'public.service_read_support_voice_scope(text)'];
+  for (const fn of functions) {
+    assert.equal(sql(`select has_function_privilege('anon','${fn}','EXECUTE'),has_function_privilege('authenticated','${fn}','EXECUTE'),has_function_privilege('service_role','${fn}','EXECUTE');`).stdout, 'f|f|t');
+  }
+  assert.equal(sql("select has_table_privilege('service_role','private_support.support_voice_scopes','SELECT'),has_table_privilege('authenticated','private_support.support_voice_scopes','SELECT');").stdout, 'f|f');
+  assert.equal(sql(reserve(990)).stdout, 'created');
+  const bind = `select public.service_bind_support_voice_scope('${sessionId(990)}','${user}','${client}','${hex64(101)}');`;
+  assert.equal(sql(`set role service_role; ${bind}`).stdout, 't');
+  assert.notEqual(sql(`set role service_role; ${bind}`, { allowFailure: true }).status, 0);
+  assert.equal(sql(`set role service_role; select count(*) from public.service_read_support_voice_scope('${sessionId(990)}');`).stdout, '0');
+  assert.equal(sql(`set role service_role; select status from public.service_consume_support_voice_session('${hex64(990)}');`).stdout, 'consumed');
+  assert.equal(sql(`set role service_role; select user_id,client_id from public.service_read_support_voice_scope('${sessionId(990)}');`).stdout, `${user}|${client}`);
+  sql(`set role service_role; select status from public.service_close_support_voice_session('${sessionId(990)}','ended');`);
+  assert.equal(sql(`set role service_role; select count(*) from public.service_read_support_voice_scope('${sessionId(990)}');`).stdout, '0');
+  assert.equal(sql(reserve(991, 102)).stdout, 'created');
+  sql(`set role service_role; select status from public.service_consume_support_voice_session('${hex64(991)}');`);
+  assert.equal(sql(`set role service_role; select count(*) from public.service_read_support_voice_scope('${sessionId(991)}');`).stdout, '0');
 });
 
 test('dedicated schema/table are inaccessible to every application role', { skip: !ENABLED }, () => {
@@ -146,5 +172,5 @@ test('migration replay is catalog-safe and preserves exact policy/index counts',
   apply();
   assert.equal(sql("select count(*) from pg_indexes where schemaname='private_support' and tablename='support_voice_sessions';").stdout, '4');
   assert.equal(sql("select count(*) from pg_policies where schemaname='private_support' and tablename='support_voice_sessions';").stdout, '0');
-  assert.equal(sql("select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname like 'service%support_voice%';").stdout, '5');
+  assert.equal(sql("select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname like 'service%support_voice%';").stdout, '7');
 });

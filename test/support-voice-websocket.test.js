@@ -116,6 +116,7 @@ async function setup(options = {}) {
     env,
     logger: { warn(event, metadata) { logs.push({ event, metadata }); } },
     serviceDb: membershipDb(),
+    eligibilityCheck: options.eligibilityCheck || (async () => true),
     sessionStore,
     WebSocketClient: FakeUpstream,
     requireAuth(req, res, next) {
@@ -138,9 +139,10 @@ async function setup(options = {}) {
   gateway.attach(server);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const response = await fetch(`${origin}/api/support/voice/sessions`, { method: 'POST', headers: { Origin: ORIGIN, Authorization: 'Bearer token' } });
+  const response = await fetch(`${origin}/api/support/voice/sessions?client_id=00000000-0000-4000-8000-000000000001`, { method: 'POST', headers: { Origin: ORIGIN, Authorization: 'Bearer token' } });
   assert.equal(response.status, 201);
   const created = await response.json();
+  await options.beforeAuthenticate?.({ backing, sessionStore, created });
   const socket = new WebSocket(`${origin.replace(/^http:/, 'ws:')}/api/support/voice`, 'alphascreen-support-v1', {
     headers: { Origin: ORIGIN },
     perMessageDeflate: false,
@@ -175,6 +177,45 @@ async function waitFor(predicate, timeoutMs = 1000) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
+
+test('revoked eligibility on consume or immediately before dial never opens provider audio', async () => {
+  for (const deniedAt of [2, 3]) {
+    let checks = 0;
+    const h = await setup({ eligibilityCheck: async () => ++checks < deniedAt });
+    try {
+      await waitFor(() => h.socket.readyState === WebSocket.CLOSED);
+      await waitFor(() => [...h.backing.sessions.values()].every(row => row.phase === 'closed'));
+      assert.equal(FakeUpstream.instances.length, 0);
+      assert.equal(h.messages.some(message => message.type === 'ready'), false);
+    } finally { await h.close(); }
+  }
+});
+
+test('a legacy unbound session fails closed without provider dial', async () => {
+  const h = await setup({ beforeAuthenticate({ backing }) {
+    for (const row of backing.sessions.values()) delete row.scope;
+  } });
+  try {
+    await waitFor(() => h.socket.readyState === WebSocket.CLOSED);
+    await waitFor(() => [...h.backing.sessions.values()].every(row => row.phase === 'closed'));
+    assert.equal(FakeUpstream.instances.length, 0);
+  } finally { await h.close(); }
+});
+
+test('heartbeat revocation closes both legs and durable session without leaking binding', async () => {
+  let allowed = true;
+  const h = await setup({ eligibilityCheck: async () => allowed, heartbeatIntervalMs: 20, heartbeatGraceMs: 100 });
+  try {
+    await waitFor(() => h.messages.some(message => message.type === 'ready'));
+    const provider = FakeUpstream.instances[0];
+    assert.doesNotMatch(JSON.stringify(provider.sent), /voice-user|00000000-0000-4000-8000-000000000001/);
+    allowed = false;
+    await waitFor(() => h.socket.readyState === WebSocket.CLOSED);
+    await waitFor(() => [...h.backing.sessions.values()].every(row => row.phase === 'closed'));
+    assert.equal(provider.readyState, WebSocket.CLOSED);
+    assert.doesNotMatch(JSON.stringify(h.logs), /voice-user|00000000-0000-4000-8000-000000000001/);
+  } finally { await h.close(); }
+});
 
 test('support handoff executes once and resumes voice only after the response finishes', async () => {
   const sends = [];

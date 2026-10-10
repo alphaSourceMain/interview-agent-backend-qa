@@ -87,6 +87,15 @@ function createMemorySupportVoiceStore(options = {}) {
       }
       return count;
     },
+    async bindScope({ sessionId, userId, clientId, userFingerprint }) {
+      const row = backing.sessions.get(sessionId);
+      if (!row || row.phase !== 'pending' || row.userFingerprint !== userFingerprint || row.scope) throw new Error('scope_bind');
+      row.scope = { user_id: userId, client_id: clientId };
+    },
+    async readScope({ sessionId }) {
+      const row = backing.sessions.get(sessionId);
+      return row?.phase === 'active' ? row.scope ?? null : null;
+    },
     _state: {
       setHealthyForTest(value) { healthy = value === true; },
       setCloseFailuresForTest(value) { closeFailures = value; },

@@ -96,6 +96,28 @@ const buy = (app, body) =>
   request(app).post('/clients/billing/additional-interviews/checkout-session')
     .send({ client_id: CLIENT, role_id: ROLE, quantity: 5, ...body });
 
+test('unknown or invalid billing configuration cannot create a top-up or Stripe session', async () => {
+  for (const options of [
+    { billingModel: 'invalid', planTier: 'pro' },
+    { billingModel: null, planTier: 'unknown' },
+    { billingModel: '', planTier: null }
+  ]) {
+    const db = makeDb(options);
+    const { app, sessions } = loadApp(db);
+    const response = await buy(app);
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error, 'BILLING_MODEL_UNAVAILABLE');
+    assert.deepEqual(sessions, []);
+    assert.deepEqual(db.tables.role_interview_purchases, []);
+  }
+});
+
+test('a known legacy tier with a null model retains its existing top-up behavior', async () => {
+  const { app, sessions } = loadApp(makeDb({ billingModel: null, planTier: 'pro' }));
+  assert.equal((await buy(app)).status, 200);
+  assert.equal(sessions.length, 1);
+});
+
 test('a Pro client buys the quantity it asked for at its own stored price', async () => {
   const db = makeDb({ additionalInterviewFee: 35 });
   const { app, sessions } = loadApp(db);

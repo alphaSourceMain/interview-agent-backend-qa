@@ -48,6 +48,7 @@ async function makeInstance(backing, options = {}) {
       SUPPORT_VOICE_XFF_MODE: 'best_effort', XAI_API_KEY: 'xai-test-key-not-a-real-secret',
     },
     serviceDb: membershipDb(),
+    eligibilityCheck: async () => true,
     sessionStore,
     WebSocketClient: OpeningUpstream,
     requireAuth(req, res, next) {
@@ -87,7 +88,7 @@ test('credential reserved on instance A is atomically consumed on instance B', a
   const b = await makeInstance(backing);
   let socket;
   try {
-    const response = await fetch(`${a.httpOrigin}/api/support/voice/sessions`, {
+    const response = await fetch(`${a.httpOrigin}/api/support/voice/sessions?client_id=00000000-0000-4000-8000-000000000001`, {
       method: 'POST', headers: { Origin: ORIGIN, Authorization: 'Bearer token' },
     });
     assert.equal(response.status, 201);
@@ -115,7 +116,7 @@ test('same-user conflict is global across gateway instances', async () => {
   const a = await makeInstance(backing);
   const b = await makeInstance(backing);
   try {
-    const request = (instance) => fetch(`${instance.httpOrigin}/api/support/voice/sessions`, {
+    const request = (instance) => fetch(`${instance.httpOrigin}/api/support/voice/sessions?client_id=00000000-0000-4000-8000-000000000001`, {
       method: 'POST', headers: { Origin: ORIGIN, Authorization: 'Bearer token' },
     });
     const responses = await Promise.all([request(a), request(b)]);
@@ -134,7 +135,7 @@ test('a second browser frame while durable consume is in flight closes before xA
   const b = await makeInstance(backing, { consumeDelayMs: 40 });
   let socket;
   try {
-    const response = await fetch(`${a.httpOrigin}/api/support/voice/sessions`, {
+    const response = await fetch(`${a.httpOrigin}/api/support/voice/sessions?client_id=00000000-0000-4000-8000-000000000001`, {
       method: 'POST', headers: { Origin: ORIGIN, Authorization: 'Bearer token' },
     });
     const created = await response.json();

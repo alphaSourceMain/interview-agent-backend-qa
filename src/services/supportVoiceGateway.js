@@ -3,7 +3,7 @@ const express = require('express');
 const net = require('node:net');
 const WebSocket = require('ws');
 const { WebSocketServer } = WebSocket;
-const { hasAnyActiveClientMembership } = require('./supportVoiceMembership');
+const { supportVoiceEligible, validScopeId } = require('./supportVoiceEligibility');
 const { createSupportVoiceSessionStore } = require('./supportVoiceSessionStore');
 const { buildSupportVoicePrompt, getSupportVoiceKnowledgeReadiness, SUPPORT_GREETING } = require('./supportVoiceKnowledge');
 const { createSupportVoiceProviderCanary } = require('./supportVoiceProviderCanary');
@@ -221,6 +221,9 @@ function createSupportVoiceGateway(options = {}) {
   const WebSocketClient = options.WebSocketClient || WebSocket;
   const captureProviderAlert = typeof options.captureProviderAlert === 'function' ? options.captureProviderAlert : () => {};
   const sessionStore = options.sessionStore || createSupportVoiceSessionStore({ serviceDb });
+  const eligible = env.NODE_ENV === 'test' && typeof options.eligibilityCheck === 'function'
+    ? options.eligibilityCheck
+    : (scope) => supportVoiceEligible({ serviceDb, ...scope });
   const providerCanary = options.providerCanary || (env.NODE_ENV === 'test'
     ? {
         ready: () => true,
@@ -313,6 +316,8 @@ function createSupportVoiceGateway(options = {}) {
     const expiresAt = Date.parse(row.expires_at);
     return {
       sessionId: row.session_id,
+      userId: row.user_id,
+      clientId: row.client_id,
       phase: 'consumed',
       expiresAt,
       browser: null,
@@ -402,26 +407,35 @@ function createSupportVoiceGateway(options = {}) {
     next();
   });
 
-  router.options(['/sessions', '/sessions/pending'], (req, res) => {
+  router.options(['/sessions', '/sessions/pending', '/eligibility'], (req, res) => {
     const requestedMethod = String(req.headers['access-control-request-method'] || '');
     const requestedHeaders = String(req.headers['access-control-request-headers'] || '').toLowerCase().split(',').map((value) => value.trim()).filter(Boolean);
-    if (!['POST', 'DELETE'].includes(requestedMethod) || requestedHeaders.some((value) => value !== 'authorization')) return res.status(403).end();
-    res.setHeader('Access-Control-Allow-Methods', 'POST, DELETE, OPTIONS');
+    const allowedMethods = req.path === '/eligibility' ? ['GET'] : req.path === '/sessions' ? ['POST'] : ['DELETE'];
+    if (!allowedMethods.includes(requestedMethod) || requestedHeaders.some((value) => value !== 'authorization')) return res.status(403).end();
+    res.setHeader('Access-Control-Allow-Methods', `${allowedMethods.join(', ')}, OPTIONS`);
     res.setHeader('Access-Control-Allow-Headers', 'Authorization');
     return res.status(204).end();
   });
 
+  router.get('/eligibility', rejectRequestBody, requireAuth, async (req, res) => {
+    const clientId = req.query.client_id;
+    if (!validScopeId(clientId)) return res.status(400).json({ error: 'client_id_required' });
+    const allowed = await eligible({ userId: req.user?.id, clientId });
+    return res.json({ client_id: clientId, eligible: allowed === true });
+  });
+
   router.post('/sessions', rejectRequestBody, requireAuth, async (req, res) => {
     const rawUserId = req.user?.id;
-    const isAdmin = req.isGlobalAdmin === true;
+    const clientId = req.query.client_id;
     let sessionId = null;
     let reserveDeadline = 0;
     delete req.userToken;
     if (req.user) req.user.email = null;
     if (typeof rawUserId !== 'string' || !rawUserId) return res.status(401).json({ error: 'support_voice_unauthorized' });
+    if (!validScopeId(clientId)) return res.status(400).json({ error: 'client_id_required' });
     const userHash = digest(rawUserId);
     try {
-      const member = isAdmin || await hasAnyActiveClientMembership({ serviceDb, userId: rawUserId });
+      const member = await eligible({ userId: rawUserId, clientId });
       if (!member) return res.status(403).json({ error: 'support_voice_forbidden' });
       const config = configuration();
       if (!config.ready) return res.status(503).json({ error: 'support_voice_unavailable' });
@@ -438,6 +452,7 @@ function createSupportVoiceGateway(options = {}) {
       });
       if (reserved.status === 'conflict') return res.status(409).json({ error: 'support_voice_already_open' });
       if (reserved.status !== 'created') return res.status(503).json({ error: 'support_voice_unavailable' });
+      await sessionStore.bindScope({ sessionId, userId: rawUserId, clientId, userFingerprint: userHash });
       const expiresAt = Date.parse(reserved.expires_at);
       const onClose = () => {
         if (!res.writableFinished) scheduleDurableClose(sessionId, 'response_failed', expiresAt);
@@ -496,7 +511,17 @@ function createSupportVoiceGateway(options = {}) {
       scheduleDurableClose(consumed.session_id, 'protocol_error', Date.parse(consumed.expires_at));
       return null;
     }
-    const entry = createActiveEntry(consumed);
+    let scope;
+    try { scope = await sessionStore.readScope({ sessionId }); }
+    catch {
+      scheduleDurableClose(sessionId, 'support_voice_unavailable', Date.parse(consumed.expires_at));
+      return null;
+    }
+    if (!scope || !await eligible({ userId: scope.user_id, clientId: scope.client_id })) {
+      scheduleDurableClose(sessionId, 'support_voice_unavailable', Date.parse(consumed.expires_at));
+      return null;
+    }
+    const entry = createActiveEntry({ ...consumed, ...scope });
     sessions.set(entry.sessionId, entry);
     return entry;
   }
@@ -551,10 +576,12 @@ function createSupportVoiceGateway(options = {}) {
   function startHeartbeat(entry) {
     const schedulePing = () => {
       if (entry.phase === 'terminal') return;
-      const timer = setTimeout(() => {
+      const timer = setTimeout(async () => {
         entry.timers.delete(timer);
         entry.heartbeatTimer = null;
         if (entry.phase === 'terminal' || entry.browser?.readyState !== WebSocket.OPEN) return finalize(entry, 'support_voice_unavailable');
+        if (!await eligible({ userId: entry.userId, clientId: entry.clientId })) return finalize(entry, 'support_voice_unavailable');
+        if (entry.phase === 'terminal') return;
         entry.awaitingPong = true;
         try { entry.browser.ping(); } catch { return finalize(entry, 'support_voice_unavailable'); }
         const deadline = setTimeout(() => {
@@ -782,6 +809,8 @@ function createSupportVoiceGateway(options = {}) {
         maximum.unref?.();
         entry.timers.add(maximum);
         startHeartbeat(entry);
+        if (!await eligible({ userId: entry.userId, clientId: entry.clientId })) return finalize(entry, 'support_voice_unavailable');
+        if (entry.phase === 'terminal') return;
         try { connectUpstream(entry); } catch { finalize(entry, 'support_voice_unavailable'); }
         return;
       }

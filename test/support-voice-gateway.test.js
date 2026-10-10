@@ -55,6 +55,10 @@ async function harness({ memberCount = 1, enabled = true, globalAdmin = false, r
   const gateway = createSupportVoiceGateway({
     env,
     serviceDb: db,
+    async eligibilityCheck(scope) {
+      if (!globalAdmin) db.calls.push({ operation: 'eligibility', ...scope });
+      return globalAdmin || memberCount > 0;
+    },
     sessionStore,
     requireAuth(req, res, next) {
       authCalls += 1;
@@ -72,7 +76,11 @@ async function harness({ memberCount = 1, enabled = true, globalAdmin = false, r
     rateTimeoutMs,
     providerCanary,
   });
-  app.use('/api/support/voice', gateway.router);
+  // Existing protocol tests use a single explicit synthetic scope.
+  app.use('/api/support/voice', (req, _res, next) => {
+    if (req.path === '/sessions') req.url += `${req.url.includes('?') ? '&' : '?'}client_id=00000000-0000-4000-8000-000000000001`;
+    next();
+  }, gateway.router);
   const server = http.createServer(app);
   gateway.attach(server);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -105,7 +113,7 @@ test('create is bodyless, authenticated, membership-gated, no-store, and returns
     assert.match(body.session_id, /^[A-Za-z0-9_-]{22}$/);
     assert.match(body.credential, /^[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/);
     assert.equal(body.credential.slice(0, 22), body.session_id);
-    assert.equal(h.db.calls.length, 2);
+    assert.equal(h.db.calls.length, 1);
     assert.deepEqual(h.rateCalls.map((call) => call.routeName), ['support_voice_session_create:user']);
     assert.equal(JSON.stringify(body).includes('user-one'), false);
   } finally {
@@ -323,7 +331,7 @@ test('limiter denial, timeout, exception, and malformed results fail closed with
   }
 });
 
-test('global admin bypass is boolean-only and reserves the same minimal session schema', async () => {
+test('authorized selected scopes reserve the same schema; identifiers live only in the private binding', async () => {
   const member = await harness();
   const admin = await harness({ memberCount: 0, globalAdmin: true });
   try {
@@ -333,7 +341,9 @@ test('global admin bypass is boolean-only and reserves the same minimal session 
     const adminEntry = [...admin.backing.sessions.values()][0];
     assert.deepEqual(Object.keys(memberEntry).sort(), Object.keys(adminEntry).sort());
     for (const entry of [memberEntry, adminEntry]) {
-      const serialized = JSON.stringify(entry);
+      const { scope, ...registryEntry } = entry;
+      assert.ok(scope.user_id && scope.client_id);
+      const serialized = JSON.stringify(registryEntry);
       assert.equal(serialized.includes('member'), false);
       assert.equal(serialized.includes('admin'), false);
       assert.equal(serialized.includes('client'), false);
@@ -391,7 +401,7 @@ test('positive preflight is exact and side-effect free', async () => {
     });
     assert.equal(response.status, 204);
     assert.equal(response.headers.get('access-control-allow-origin'), ORIGIN);
-    assert.equal(response.headers.get('access-control-allow-methods'), 'POST, DELETE, OPTIONS');
+    assert.equal(response.headers.get('access-control-allow-methods'), 'POST, OPTIONS');
     assert.equal(response.headers.get('access-control-allow-headers'), 'Authorization');
     assert.equal(h.authCalls, 0);
     assert.equal(h.rateCalls.length, 0);

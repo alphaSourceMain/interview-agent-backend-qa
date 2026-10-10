@@ -255,10 +255,18 @@ router.post('/clients/billing/additional-interviews/checkout-session', requireAu
 
     const { data: planSettings, error: planSettingsErr } = await supabaseAdmin
       .from('client_plan_settings')
-      .select('additional_interview_fee')
+      .select('additional_interview_fee,billing_model,plan_tier')
       .eq('client_id', billingClientId)
       .maybeSingle()
     if (planSettingsErr) return res.status(500).json({ error: 'plan_settings_lookup_failed', detail: planSettingsErr.message })
+
+    // Preserve known legacy tier fallback, but do not let the general resolver's
+    // default turn an unknown/invalid configuration into a paid purchase.
+    const storedModel = String(planSettings?.billing_model ?? '').trim().toLowerCase()
+    const storedTier = String(planSettings?.plan_tier ?? '').trim().toLowerCase()
+    const confirmedModel = ['fixed', 'rollover', 'usage'].includes(storedModel)
+      || (!storedModel && ['basic', 'essential', 'pro', 'enterprise'].includes(storedTier))
+    if (!confirmedModel) return res.status(409).json({ error: 'BILLING_MODEL_UNAVAILABLE' })
 
     // Usage clients are invoiced for interviews beyond the included count after
     // the fact, so buying them in advance would charge twice. Refused with its
@@ -268,6 +276,9 @@ router.post('/clients/billing/additional-interviews/checkout-session', requireAu
     // Resolved the way every other billing reader resolves it: a null column
     // follows the plan tier, and a child entity is charged under its parent.
     const { billing_model: billingModel } = await resolveBillingModel({ db: supabaseAdmin, clientId })
+    if (!['fixed', 'rollover', 'usage'].includes(billingModel)) {
+      return res.status(409).json({ error: 'BILLING_MODEL_UNAVAILABLE' })
+    }
     if (billingModel === 'usage') {
       return res.status(409).json({
         error: 'usage_billing_no_top_ups',

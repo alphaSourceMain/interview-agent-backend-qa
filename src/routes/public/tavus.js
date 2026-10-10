@@ -34,6 +34,7 @@ const END_REASON_MAP = Object.freeze({
   time_limit_warning: 'completed_normally',
   time_limit_graceful_close: 'completed_normally',
   time_limit_force_close: 'completed_normally',
+  time_limit_avatar_farewell_complete: 'completed_normally',
   progress_stalled: 'watchdog_timeout',
   watchdog_timeout: 'watchdog_timeout',
   disconnected: 'reconnect_failed',
@@ -506,3 +507,4 @@ router._setTavusHttpClientForTest = (client) => {
 };
 module.exports.createClientTelemetryHandler = createClientTelemetryHandler;
 module.exports.isIdempotentEndState = isIdempotentEndState;
+module.exports.normalizeEndReason = normalizeEndReason;

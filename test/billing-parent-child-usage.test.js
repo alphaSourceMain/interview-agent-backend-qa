@@ -247,6 +247,7 @@ test('the invoice item names the entity and the ledger is written against the pa
   const items = [];
   const stripe = {
     invoiceItems: {
+      list: async () => ({ data: [], has_more: false }),
       create: async (payload) => {
         items.push(payload);
         return { id: `ii_${items.length}` };
@@ -284,6 +285,7 @@ test('a resumed invoice keeps the entity label on the rebuilt line', async () =>
   const items = [];
   const stripe = {
     invoiceItems: {
+      list: async () => ({ data: [], has_more: false }),
       create: async (payload) => {
         items.push(payload);
         return { id: 'ii_1' };
@@ -344,6 +346,7 @@ test('a run that overlaps another bills nothing it did not reserve', async () =>
   const items = [];
   const stripe = {
     invoiceItems: {
+      list: async () => ({ data: [], has_more: false }),
       create: async (payload) => {
         items.push(payload);
         return { id: `ii_${items.length}` };
@@ -378,6 +381,7 @@ test('an overlap that takes only some interviews bills only the rest', async () 
   const items = [];
   const stripe = {
     invoiceItems: {
+      list: async () => ({ data: [], has_more: false }),
       create: async (payload) => {
         items.push(payload);
         return { id: `ii_${items.length}` };
@@ -415,7 +419,7 @@ test('a stamp claims only rows reserved against its own invoice', async () => {
     ]
   });
   const stripe = {
-    invoiceItems: { create: async () => ({ id: 'ii_1' }) }
+    invoiceItems: { list: async () => ({ data: [], has_more: false }), create: async () => ({ id: 'ii_1' }) }
   };
 
   await applyUsageToInvoice({

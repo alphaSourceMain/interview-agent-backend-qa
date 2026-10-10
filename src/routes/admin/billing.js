@@ -550,7 +550,17 @@ router.post('/clients/:id/usage-invoice', requireAuth, requireAdmin, async (req,
     })
   }
 
-  const requestFingerprint = fingerprintOf({ client_id: clientId, period_end: req.body?.period_end ?? null })
+  if (req.body != null && (typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length)) {
+    return res.status(400).json({
+      error: 'invalid_request', code: 'PERIOD_NOT_SELECTABLE',
+      detail: 'Use an empty body. Usage billing covers the prior UTC calendar month.',
+      hint: null, request_id
+    })
+  }
+  const parentGuard = await rejectChildClientForAdminBilling(req, res, { route: 'admin_clients_usage_invoice' })
+  if (!parentGuard) return
+
+  const requestFingerprint = fingerprintOf({ client_id: clientId })
 
   const { data: seen, error: seenError } = await supabaseAdmin
     .from('billing_idempotency_keys')
@@ -617,16 +627,15 @@ router.post('/clients/:id/usage-invoice', requireAuth, requireAdmin, async (req,
     return res.status(status).json(body)
   }
 
-  const parentGuard = await rejectChildClientForAdminBilling(req, res, { route: 'admin_clients_usage_invoice' })
-  if (!parentGuard) return
-
   try {
     const stripe = require('../../clients/stripe')
+    const billingClock = new Date()
     const result = await createImmediateUsageInvoice({
       db: supabaseAdmin,
       stripe,
       clientId,
-      periodEnd: req.body?.period_end || null,
+      asOf: billingClock,
+      now: billingClock,
       requestId: request_id,
       reason: 'admin_request'
     })

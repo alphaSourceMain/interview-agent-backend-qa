@@ -6,8 +6,9 @@
 --
 -- billing_model is nullable with no default. Null means "follow the plan tier"
 -- (basic -> fixed, pro -> rollover, enterprise -> usage), resolved in
--- src/services/billingModel.js; a stored value is an explicit choice for that
--- client. A default would be wrong: a row inserted without the column, as
+-- src/services/billingModel.js. Reads honor a stored value, but managed
+-- subscription webhooks replace it with the tier-derived model; this is not a
+-- user-selectable setting. A default would be wrong: a row inserted without the column, as
 -- apply_public_purchase_billing does, would silently become 'fixed'.
 --
 -- public.client_plan_settings is not created by any migration in this repository;

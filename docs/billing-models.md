@@ -9,15 +9,16 @@ exactly one of them, recorded as `billing_model` on their plan settings.
 | `rollover` | Pro | Become client credit, usable for 90 days |
 | `usage` | Enterprise | Interviews past the included count are invoiced |
 
-A client's model is set from their plan tier when their subscription starts, and
-can be changed afterwards by an administrator. Clients whose records predate this
+A client's model is set from their plan tier on managed subscription webhooks.
+It is not a user-selectable setting. A manual database override lasts only until
+the next managed subscription webhook. Clients whose records predate this
 feature behave as their tier implies, so nothing had to be migrated by hand.
 
 **An empty `billing_model` means "follow the plan tier".** The column has no
 default and may be left empty. When it is empty, the client is billed as their
 tier implies: Essentials → `fixed`, Pro → `rollover`, Enterprise → `usage`. When
-it holds a value, that value is a deliberate choice for that client and wins
-over the tier. Every part of the backend that decides money reads the model the
+it holds a value, reads use that value rather than the tier; the subscription
+webhook can subsequently replace it with the tier-derived model. Every part of the backend that decides money reads the model the
 same way, through one function, so an empty value can never be read as
 "fixed" by accident.
 
@@ -211,14 +212,26 @@ POST /admin/clients/:id/usage-invoice
 Idempotency-Key: <8 to 255 characters; letters, digits and . : _ - >
 ```
 
-Invoices everything unbilled immediately, rather than waiting for the cycle. This
-is the path for a one-time order at signup.
+Invoices unbilled usage from the prior UTC calendar month immediately, rather
+than waiting for the cycle. Send an empty body; date selectors and other fields
+are rejected with `PERIOD_NOT_SELECTABLE` before reserving an idempotency key.
 
 The `Idempotency-Key` header is **required**. Sending the same key twice returns
 the first answer rather than raising a second invoice. Sending the same key with
 different data is refused.
 
 Returns `{ "skipped": true, "reason": "..." }` when there is nothing to bill.
+Successful invoices include the reserved `period_start` and `period_end`.
+
+Provider items are reconciled using a stable usage-operation hash before retries
+create anything. Ambiguous or legacy unstamped items are held for review. A
+standalone invoice is created with automatic advancement off and enabled only
+when all items are stamped and finalization succeeds. Failed standalone invoices
+remain held drafts; an outstanding reservation or draft reports
+`USAGE_INVOICE_REQUIRES_REVIEW` instead of silently skipping or replacing it.
+An operator must reconcile that draft before retrying with a new admin key.
+Invoice scans/batches at the 1,000-row boundary fail closed rather than billing
+a truncated set; provider-item scans have a bounded, paginated 10,000-item limit.
 
 ### Read everything about a client's billing
 

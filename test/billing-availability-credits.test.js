@@ -116,6 +116,33 @@ const credit = (overrides = {}) => ({
 
 const availabilityFor = (db) => getRoleInterviewAvailability({ db, roleId: ROLE, clientId: CLIENT });
 
+test('rollover availability and billing credit readback are scoped to the role entity', async () => {
+  const { allocateInterviews } = require('../src/services/interviewAllocation');
+  const { readBillingForClient } = require('../src/services/billingReadModel');
+  for (const creditOwner of [CLIENT, 'child_1']) {
+    const db = makeDb({ included: 0 });
+    db.tables.clients.push({ id: 'child_1', parent_client_id: CLIENT, name: 'Synthetic Entity' });
+    db.tables.roles.push({ id: 'child_role', client_id: 'child_1', title: 'Synthetic Role' });
+    db.tables.interview_credits.push(credit({ client_id: creditOwner, quantity: 5 }));
+    db.tables.interviews.push({
+      id: 'synthetic_entity_iv', client_id: creditOwner === CLIENT ? 'child_1' : CLIENT,
+      role_id: creditOwner === CLIENT ? 'child_role' : ROLE,
+      status: 'completed', completed_at: '2026-09-10T00:00:00.000Z'
+    });
+    const allocation = await allocateInterviews({ db, billingClientId: CLIENT, asOf: NOW });
+    assert.equal(allocation.entries[0].source_id, null, 'another entity cannot draw the credit');
+    assert.equal(allocation.credits[0].allocated, 0);
+    for (const [clientId, roleId] of [[CLIENT, ROLE], ['child_1', 'child_role']]) {
+      const available = await getRoleInterviewAvailability({ db, clientId, roleId, allocation });
+      const expected = clientId === creditOwner ? 5 : 0;
+      assert.equal(available.credit_interviews, expected);
+      assert.equal(available.remaining_interviews, expected);
+      const billing = await readBillingForClient({ db, clientId, asOf: NOW });
+      assert.equal(available.credit_interviews, billing.credits.total_remaining);
+    }
+  }
+});
+
 // --- the response shape ----------------------------------------------------
 
 test('an Essentials client sees exactly the numbers it saw before credits existed', async () => {

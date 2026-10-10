@@ -66,6 +66,7 @@ function makeStripe({ failFinalize = false, failDelete = false } = {}) {
   return {
     calls,
     invoices: {
+      retrieve: async id => ({ id, status: 'open' }),
       create: async (payload) => {
         calls.invoices.push(payload);
         return { id: `in_${calls.invoices.length}` };
@@ -82,6 +83,7 @@ function makeStripe({ failFinalize = false, failDelete = false } = {}) {
       }
     },
     invoiceItems: {
+      list: async () => ({ data: [], has_more: false }),
       create: async (payload) => {
         calls.items.push(payload);
         return { id: `ii_${calls.items.length}` };
@@ -138,7 +140,7 @@ test('an immediate invoice bills the unbilled usage and finalizes', async () => 
   assert.equal(result.total_cents, 4 * 2500);
   assert.equal(stripe.calls.invoices[0].customer, CUSTOMER);
   assert.equal(stripe.calls.invoices[0].collection_method, 'charge_automatically');
-  assert.equal(stripe.calls.invoices[0].auto_advance, true);
+  assert.equal(stripe.calls.invoices[0].auto_advance, false, 'a draft cannot charge while it is incomplete');
   assert.equal(stripe.calls.invoices[0].metadata.source, 'usage_billing');
   assert.equal(stripe.calls.invoices[0].metadata.reason, 'admin_request');
   assert.equal(stripe.calls.items.length, 1);
@@ -600,23 +602,35 @@ test('reusing a key with the same body replays the first answer', async (t) => {
   assert.equal(stripe.calls.invoices.length, 1, 'and must not raise a second invoice');
 });
 
-test('reusing a key with a different body is refused', async (t) => {
-  t.mock.timers.enable({ apis: ['Date'], now: new Date(NOW) });
-  const db = makeDb({ interviews: usedInterviews(3) });
+test('nonempty bodies are refused before reserving a key or charging, and that key remains usable', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-05T12:00:00.000Z') });
+  const db = makeDb({ interviews: [
+    ...usedInterviews(3),
+    { id: 'september_iv', client_id: CLIENT, role_id: 'role_1', status: 'completed', completed_at: '2026-09-15T00:00:00.000Z' }
+  ] });
   const stripe = makeStripe();
   const originalLog = console.log;
   console.log = () => {};
   let second;
   try {
     const app = loadAdmin(db, stripe);
-    await postUsageInvoice(app, 'usage-invoice-key-3', { period_end: '2026-09-01T00:00:00.000Z' });
-    second = await postUsageInvoice(app, 'usage-invoice-key-3', { period_end: '2026-10-01T00:00:00.000Z' });
+    for (const body of [{ period_end: '2026-08-01T00:00:00.000Z' }, { asOf: NOW }, { unexpected: true }]) {
+      const rejected = await postUsageInvoice(app, 'usage-invoice-key-3', body);
+      assert.equal(rejected.status, 400);
+      assert.equal(rejected.body.code, 'PERIOD_NOT_SELECTABLE');
+      assert.deepEqual(db.tables.billing_idempotency_keys, []);
+      assert.deepEqual(stripe.calls.invoices, []);
+    }
+    second = await postUsageInvoice(app, 'usage-invoice-key-3', {});
   } finally {
     console.log = originalLog;
   }
 
-  assert.equal(second.status, 409);
-  assert.equal(second.body.code, 'IDEMPOTENCY_KEY_REUSED');
+  assert.equal(second.status, 200);
+  assert.equal(second.body.period_start, '2026-09-01T00:00:00.000Z');
+  assert.equal(second.body.period_end, '2026-10-01T00:00:00.000Z');
+  assert.equal(second.body.total_cents, 2500);
+  assert.deepEqual(db.tables.usage_billing_ledger.map(row => row.interview_id), ['september_iv']);
   assert.equal(stripe.calls.invoices.length, 1);
 });
 
@@ -629,7 +643,7 @@ test('a key seen while the first call is still running is refused', async () => 
       idempotency_key: 'usage-invoice-key-4',
       request_fingerprint: require('node:crypto')
         .createHash('sha256')
-        .update(JSON.stringify({ client_id: CLIENT, period_end: null }))
+        .update(JSON.stringify({ client_id: CLIENT }))
         .digest('hex'),
       response_status: null,
       response_body: null
@@ -646,10 +660,14 @@ test('a key seen while the first call is still running is refused', async () => 
 
 test('a child client is refused', async () => {
   const stripe = makeStripe();
-
-  const res = await postUsageInvoice(loadAdmin(makeDb(), stripe, { isChildClient: true }), 'usage-invoice-key-5');
-
-  assert.equal(res.status, 403);
+  const db = makeDb();
+  const app = loadAdmin(db, stripe, { isChildClient: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await postUsageInvoice(app, 'usage-invoice-key-5');
+    assert.equal(res.status, 403);
+    assert.notEqual(res.body.code, 'REQUEST_IN_PROGRESS');
+  }
+  assert.deepEqual(db.tables.billing_idempotency_keys, []);
   assert.deepEqual(stripe.calls.invoices, []);
 });
 

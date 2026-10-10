@@ -121,6 +121,10 @@ async function getRoleInterviewAvailability({ db, roleId, clientId, allocation =
   const allowance = resolved.allowance_by_role?.get(String(roleId));
   const includedInterviewsPerRole = resolved.included_per_role ?? 0;
   const purchasedInterviews = Math.max(0, (allowance ?? includedInterviewsPerRole) - includedInterviewsPerRole);
+  // Credit belongs to the entity that earned it, not the whole payer family.
+  const clientCreditBalance = billingModel === ROLLOVER_BILLING_MODEL
+    ? (resolved.credit_balance_by_client?.get(String(clientId)) || 0)
+    : 0;
 
   return {
     included_interviews_per_role: includedInterviewsPerRole,
@@ -132,9 +136,9 @@ async function getRoleInterviewAvailability({ db, roleId, clientId, allocation =
     // told a role is full. The pool figure below is what a dashboard shows.
     remaining_interviews: billingModel === USAGE_BILLING_MODEL
       ? null
-      : counters.own_remaining + resolved.totals.credit_balance,
+      : counters.own_remaining + clientCreditBalance,
     own_remaining_interviews: counters.own_remaining,
-    credit_interviews: billingModel === ROLLOVER_BILLING_MODEL ? resolved.totals.credit_balance : 0,
+    credit_interviews: clientCreditBalance,
     pool_remaining_interviews: billingModel === USAGE_BILLING_MODEL ? resolved.totals.pool_remaining : 0,
     credit_drawn_offset: counters.drawn_from_revoked,
     billing_model: billingModel

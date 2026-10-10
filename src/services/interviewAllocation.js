@@ -335,11 +335,15 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
   }
 
   let creditBalance = 0;
+  const creditBalanceByClient = new Map();
   for (const credit of credits) {
     if (toIso(credit.revoked_at)) continue;
     const expiresAt = toIso(credit.expires_at);
     if (expiresAt && asOfIso >= expiresAt) continue;
-    creditBalance += Math.max(0, credit.quantity - credit.allocated);
+    const remaining = Math.max(0, credit.quantity - credit.allocated);
+    const owner = String(credit.client_id);
+    creditBalanceByClient.set(owner, (creditBalanceByClient.get(owner) || 0) + remaining);
+    creditBalance += remaining;
   }
 
   let poolRemaining = 0;
@@ -361,6 +365,7 @@ async function allocateInterviews({ db, billingClientId, asOf } = {}) {
     // What a metered interview costs, for the billing path.
     usage_interview_fee_cents: parseWholeNonNegative(billing.usage_interview_fee_cents),
     totals,
+    credit_balance_by_client: creditBalanceByClient,
     credits,
     pools,
     roles: roleRows || [],

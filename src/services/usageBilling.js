@@ -20,6 +20,7 @@
 // review/BILLING-LOG.md.
 
 const { SOURCE_USAGE } = require('./interviewAllocation');
+const { createHash } = require('node:crypto');
 
 const USAGE_BILLING_MODEL = 'usage';
 
@@ -205,6 +206,7 @@ async function recordUsageLines({ db, clientId, lines, stripeInvoiceId, periodSt
     }
   }
   if (!rows.length) return { inserted: 0, rows: [] };
+  if (rows.length >= 1000) throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: reservation batch limit');
 
   // unit_price_cents comes back because the caller rebuilds its invoice lines
   // from these rows, and must bill them at the price they were reserved at.
@@ -265,6 +267,7 @@ async function listLedgerRowsForInvoice({ db, stripeInvoiceId } = {}) {
     .select('id,client_id,role_id,interview_id,unit_price_cents,stripe_invoice_item_id,billed_at,period_start,period_end')
     .eq('stripe_invoice_id', stripeInvoiceId);
   if (error) throw new Error(error.message || 'Usage billing ledger lookup failed');
+  if ((data || []).length >= 1000) throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: invoice ledger scan limit');
   return data || [];
 }
 
@@ -317,14 +320,47 @@ function linesFromLedgerRows(rows, roleMetaById) {
   return [...byRole.values()];
 }
 
+// A Stripe write can succeed even when its response, or our ledger stamp, fails.
+// Reconcile provider items before retrying; a short-lived idempotency key alone
+// is not sufficient after Stripe expires its cache. Never infer a legacy item's
+// interview set from its role label, or silently pick one of two matches.
+async function findExistingUsageItem({ stripe, invoiceId, customerId, clientId, line, operationKey }) {
+  let cursor;
+  const matches = [];
+  for (let page = 0; page < 100; page++) {
+    const result = await stripe.invoiceItems.list({ invoice: invoiceId, limit: 100, ...(cursor ? { starting_after: cursor } : {}) });
+    if (!Array.isArray(result?.data)) throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: invalid provider item response');
+    for (const item of result.data) {
+      if (item.metadata?.source !== 'usage_billing' || item.metadata?.role_id !== line.role_id) continue;
+      if (!item.metadata.usage_operation) throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: legacy usage item');
+      if (item.metadata.usage_operation === operationKey) matches.push(item);
+    }
+    if (!result.has_more) {
+      if (matches.length > 1) throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: duplicate provider items');
+      const item = matches[0];
+      if (item && (!item.id || (item.invoice?.id || item.invoice) !== invoiceId
+        || (item.customer?.id || item.customer) !== customerId
+        || item.metadata.client_id !== clientId || item.currency !== 'usd'
+        || Number(item.quantity) !== line.quantity || Number(item.amount) !== line.amount_cents)) {
+        throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: provider item does not match reserved usage');
+      }
+      return item || null;
+    }
+    const next = result.data.at(-1)?.id;
+    if (!next || next === cursor) throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: invalid provider cursor');
+    cursor = next;
+  }
+  throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: provider item scan limit');
+}
+
 /**
  * Adds one usage item per role to a Stripe invoice and records the ledger.
  *
  * Ordering is what makes a partial failure recoverable: the ledger rows are
  * reserved first with billed_at null, then each Stripe item is created, then the
- * rows it paid for are stamped. A retry finds the reserved rows and creates
- * items only for the ones still unstamped, so nothing is billed twice and
- * nothing is silently dropped.
+ * rows it paid for are stamped. A retry reconciles unstamped rows against
+ * provider items before creating anything, using a stable idempotency key for
+ * concurrent requests. Ambiguous provider history is held for manual review.
  *
  * Stripe failures are rethrown so the caller can let Stripe retry.
  */
@@ -356,6 +392,7 @@ async function applyUsageToInvoice({
   if (existing.length) {
     periodStart = existing[0]?.period_start || null;
     periodEnd = existing[0]?.period_end || null;
+    billedLabel = monthLabel(periodStart);
     // Resume: bill exactly what the failed attempt reserved.
     lines = linesFromLedgerRows(existing.filter((row) => row.billed_at == null), roleMetaById);
   } else {
@@ -388,7 +425,12 @@ async function applyUsageToInvoice({
   let items = 0;
   let totalCents = 0;
   for (const line of lines) {
-    const item = await stripe.invoiceItems.create({
+    const operationKey = createHash('sha256').update(JSON.stringify({
+      invoiceId, clientId, roleId: line.role_id, price: line.unit_price_cents,
+      interviews: [...line.interview_ids].sort()
+    })).digest('hex');
+    const existingItem = await findExistingUsageItem({ stripe, invoiceId, customerId, clientId, line, operationKey });
+    const item = existingItem || await stripe.invoiceItems.create({
       customer: customerId,
       invoice: invoiceId,
       currency: 'usd',
@@ -398,12 +440,14 @@ async function applyUsageToInvoice({
         ? `Interviews — ${line.entity_label} · ${line.role_title} [${line.role_status || roleMetaById.get(String(line.role_id))?.role_status || 'open'}] (${label})`
         : `Interviews — ${line.role_title} [${line.role_status || roleMetaById.get(String(line.role_id))?.role_status || 'open'}] (${label})`,
       metadata: {
+        ...(metadata || {}),
         client_id: clientId,
         role_id: line.role_id,
         source: 'usage_billing',
-        ...(metadata || {})
+        usage_operation: operationKey
       }
-    });
+    }, { idempotencyKey: `usage-item-${operationKey}` });
+    if (!item?.id) throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: provider returned no item id');
 
     await markUsageLinesBilled({
       db,
@@ -447,6 +491,28 @@ async function createImmediateUsageInvoice({
   const stripeCustomerId = String(customerId || client.stripe_customer_id || '').trim();
   if (!stripeCustomerId) return { skipped: true, reason: 'no_stripe_customer' };
 
+  // Immediate-invoice retries do not have Stripe's webhook invoice id. A held
+  // reservation must be surfaced for reconciliation, never silently skipped or
+  // replaced with a fresh invoice. Keep failed drafts unable to auto-collect.
+  const { start, end } = priorMonthBounds(asOf);
+  const { data: held, error: heldError } = await db.from('usage_billing_ledger')
+    .select('stripe_invoice_id,billed_at,period_start,period_end')
+    .eq('client_id', clientId).order('id', { ascending: true }).limit(1000);
+  if (heldError) throw new Error(heldError.message || 'Usage invoice reservation lookup failed');
+  if ((held || []).length >= 1000) throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: reservation scan limit');
+  if ((held || []).some(row => row.stripe_invoice_id && !row.billed_at)) {
+    throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: unstamped invoice reservation');
+  }
+  const periodInvoiceIds = new Set((held || [])
+    .filter(row => toIso(row.period_start) === start && toIso(row.period_end) === end)
+    .map(row => row.stripe_invoice_id).filter(Boolean));
+  for (const id of periodInvoiceIds) {
+    const existingInvoice = await stripe.invoices.retrieve(id);
+    if (!existingInvoice || existingInvoice.status === 'draft') {
+      throw new Error('USAGE_INVOICE_REQUIRES_REVIEW: held draft invoice');
+    }
+  }
+
   // Checked before creating an invoice, so an empty one is never raised.
   const usage = await computeUnbilledUsage({ db, clientId, asOf });
   if (!usage.lines.length) return { skipped: true, reason: usage.reason || 'nothing_unbilled' };
@@ -454,7 +520,7 @@ async function createImmediateUsageInvoice({
   const invoice = await stripe.invoices.create({
     customer: stripeCustomerId,
     collection_method: 'charge_automatically',
-    auto_advance: true,
+    auto_advance: false,
     metadata: {
       client_id: clientId,
       source: 'usage_billing',
@@ -492,10 +558,12 @@ async function createImmediateUsageInvoice({
     return { skipped: true, reason: applied.reason || 'nothing_applied' };
   }
 
-  await stripe.invoices.finalizeInvoice(invoiceId);
+  await stripe.invoices.finalizeInvoice(invoiceId, { auto_advance: true });
 
   return {
     invoice_id: invoiceId,
+    period_start: usage.period_start,
+    period_end: usage.period_end,
     total_cents: applied.total_cents,
     lines: applied.lines || usage.lines
   };

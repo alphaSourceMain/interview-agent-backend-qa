@@ -84,6 +84,7 @@ function makeStripe() {
   return {
     calls,
     invoiceItems: {
+      list: async () => ({ data: [], has_more: false }),
       create: async (payload) => {
         calls.items.push(payload);
         return { id: `ii_${calls.items.length}` };

@@ -330,14 +330,19 @@ bug worth reporting.
 
 ### POST /admin/clients/:id/usage-invoice
 
-Raises a usage invoice immediately instead of waiting for the cycle.
+Raises a usage invoice for the prior UTC calendar month instead of waiting for
+the cycle. Send `{}` (or no body). A date selector or any other body field is
+rejected with 400 `PERIOD_NOT_SELECTABLE` before reserving the key or charging.
 
 Requires an `Idempotency-Key` header: 8–255 characters of letters, digits and
 `. : _ -`. The same key with the same body replays the first answer; the same
 key with a different body is refused.
 
-Returns either `{ "ok": true, "invoice_id": …, "total_cents": … }` or
+Returns either `{ "ok": true, "invoice_id": …, "total_cents": …,
+"period_start": …, "period_end": … }` or
 `{ "ok": true, "skipped": true, "reason": … }` when there is nothing to bill.
+If `USAGE_INVOICE_FAILED` includes `USAGE_INVOICE_REQUIRES_REVIEW`, do not suggest
+blind retries. The operator must reconcile the held Stripe draft/reservation.
 
 ---
 
@@ -415,6 +420,7 @@ specific upper-case `code`. Match on `code`.
 | 400 | `CLIENT_ID_REQUIRED` | |
 | 400 | `INVALID_BILLING_CYCLE` | Billing interval is neither monthly nor annual. |
 | 400 | `IDEMPOTENCY_KEY_REQUIRED` | The usage-invoice header is missing or malformed. |
+| 400 | `PERIOD_NOT_SELECTABLE` | The usage-invoice request contains unsupported body fields. |
 | 400 | `ACTOR_REQUIRED` | No administrator identity on the request. |
 | 404 | `CLIENT_NOT_FOUND` | |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | Same key, different body. |

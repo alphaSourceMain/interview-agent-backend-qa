@@ -125,6 +125,7 @@ function loadApp(event, db, { invoiceItemsCreate } = {}) {
     webhooks: { constructEvent: () => event },
     subscriptions: { retrieve: async () => ({ id: SUBSCRIPTION, status: 'active', items: { data: [] }, metadata: {} }) },
     invoiceItems: {
+      list: async () => ({ data: [], has_more: false }),
       create: async (payload) => {
         itemCalls.push(payload);
         if (invoiceItemsCreate) return invoiceItemsCreate(payload, itemCalls.length);

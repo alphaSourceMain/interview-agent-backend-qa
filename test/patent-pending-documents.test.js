@@ -54,9 +54,9 @@ test('new candidate reports use the static alphaScreen vector lockup and one sec
 
   assert.equal(count(html, 'alphaScreen technology — Patent Pending'), 1)
   assert.match(html, /data:image\/svg\+xml;base64,/)
-  assert.match(html, /class="brand-wordmark">alphaScreen<\/div>/)
-  assert.match(html, /<h2>Candidate Report<\/h2>\s*<p class="patent-notice">alphaScreen technology — Patent Pending<\/p>/)
-  assert.match(html, /\.patent-notice[\s\S]*font-size: 11px/)
+  assert.match(html, /alphaScreen \/ Candidate review brief/)
+  assert.match(html, /<header class="hero">[\s\S]*<p class="patent-notice">alphaScreen technology — Patent Pending<\/p>[\s\S]*<\/header>/)
+  assert.match(html, /\.patent-notice[\s\S]*font-size:9px/)
   assert.match(candidateReportMark, /<path\b/)
   assert.doesNotMatch(candidateReportMark, /<image\b|data:image/i)
 })

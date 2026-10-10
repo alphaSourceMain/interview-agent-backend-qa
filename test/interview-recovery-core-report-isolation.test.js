@@ -142,12 +142,12 @@ async function withRouter(db, callback) {
   const capture = { payloads: [] };
   const originalLoad = Module._load;
   Module._load = function patchedLoad(request, parent, isMain) {
-    if (request === '../src/clients/supabase' && /routes\/reportsPdf\.js$/.test(parent?.filename || '')) {
+    if (request === '../../clients/supabase' && /routes[\\/]client[\\/]reportsPdf\.js$/.test(parent?.filename || '')) {
       return { supabaseAdmin: db, supabase: db };
     }
-    if (request === '../src/render/pdfRenderer' && /routes\/reportsPdf\.js$/.test(parent?.filename || '')) return { htmlToPdf: async (html) => Buffer.from(html) };
-    if (request === '../src/render/candidateReport' && /routes\/reportsPdf\.js$/.test(parent?.filename || '')) {
-      return { buildCandidateReportHtml: (payload) => { capture.payloads.push(payload); return JSON.stringify(payload); } };
+    if (request === '../../render/pdfRenderer' && /routes[\\/]client[\\/]reportsPdf\.js$/.test(parent?.filename || '')) return { htmlToPdf: async (html) => Buffer.from(html) };
+    if (request === '../../render/candidateReport' && /routes[\\/]client[\\/]reportsPdf\.js$/.test(parent?.filename || '')) {
+      return { buildCandidateReportHtml: (payload) => { capture.payloads.push(payload); return JSON.stringify(payload); }, getCandidateReportPdfOptions: () => ({ landscape: true }) };
     }
     return originalLoad.call(this, request, parent, isMain);
   };

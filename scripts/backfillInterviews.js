@@ -273,6 +273,7 @@ function normalizeAnalysis(analysis) {
 }
 
 async function analyzeInterviewTranscriptById(interviewId, opts = {}) {
+  if (/^d38ade00-2026-4000-8000-/i.test(String(interviewId))) return {ok:false,error:'demo_scoring_disabled'};
   const requestId = opts?.request_id || null;
   const dryRun = opts?.dry_run === true;
   const forceRescore = opts?.force_rescore === true;
@@ -388,6 +389,7 @@ async function main() {
   let query = supabase
     .from('interviews')
     .select('id, role_id, created_at, transcript, transcript_url, analysis, transcript_scores, interview_summary, perception_scores')
+    .neq('client_id', require('../src/services/salesDemo').DEMO_CLIENT_ID)
     .order('created_at', { ascending: true })
     .order('id', { ascending: true })
     .limit(BACKFILL_LIMIT);

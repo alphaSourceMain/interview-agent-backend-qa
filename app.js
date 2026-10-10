@@ -174,6 +174,8 @@ app.use('/webhook/sendgrid', express.json({
 app.use('/webhook', require('./src/routes/webhooks/tavus'))
 
 app.use(express.json({ limit: '10mb' }))
+app.use(require('./src/services/salesDemo').demoFence)
+app.use('/demo', require('./src/routes/client/salesDemo'))
 
 // ---------- CSP: allow Wix to embed (frame-ancestors) ----------
 app.use((req, res, next) => {

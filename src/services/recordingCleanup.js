@@ -77,6 +77,7 @@ async function cleanupNoSubstantiveRecordings(options = {}) {
   const { data: rows, error } = await db
     .from('interviews')
     .select('id, recording_metadata, recording_status, recording_expires_at, interview_summary, transcript')
+    .neq('client_id', require('./salesDemo').DEMO_CLIENT_ID)
     .eq('recording_status', 'ready');
 
   if (error) throw error;

@@ -9,6 +9,7 @@ const { supabase } = require('../../clients/supabase');
 const { requireAuth, withClientScope } = require('../../middleware/auth');
 const { entityFieldsForClientId, loadEntityMap, resolveEntityFilter } = require('../../services/entityScopeFilter');
 const { classifyInterviewDisplayState } = require('../../services/interviewDisplayState');
+const { DEMO_CLIENT_ID, isQa } = require('../../services/salesDemo');
 
 
 const router = express.Router();
@@ -417,7 +418,7 @@ router.get('/rows', requireAuth, withClientScope, async (req, res) => {
         'conversation_progress_state',
         'has_substantive_response'
       ];
-      if (EXPOSE_INTERVIEW_ANALYSIS_V2) interviewSelect.push('interview_analysis_v2');
+      if (EXPOSE_INTERVIEW_ANALYSIS_V2 || (isQa() && clientId === DEMO_CLIENT_ID)) interviewSelect.push('interview_analysis_v2');
 
       let interviewQuery = supabase
         .from('interviews')
@@ -610,7 +611,8 @@ router.get('/rows', requireAuth, withClientScope, async (req, res) => {
         overall_score,
         resume_analysis,
         interview_analysis,
-        interview_analysis_v2: EXPOSE_INTERVIEW_ANALYSIS_V2 ? (parseJsonObject(iv?.interview_analysis_v2) || null) : undefined,
+        is_sales_demo: isQa() && c.client_id === DEMO_CLIENT_ID && /^d38ade00-2026-4000-8000-/.test(c.id),
+        interview_analysis_v2: (EXPOSE_INTERVIEW_ANALYSIS_V2 || (isQa() && c.client_id === DEMO_CLIENT_ID && /^d38ade00-2026-4000-8000-/.test(c.id))) ? (parseJsonObject(iv?.interview_analysis_v2) || null) : undefined,
         latest_report_url,
         report_generated_at: rep?.created_at || null,
       };

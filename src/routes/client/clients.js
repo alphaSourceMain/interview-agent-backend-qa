@@ -44,6 +44,7 @@ router.get('/clients/my', requireAuth, withClientScope, async (req, res) => {
         client_id: c.id,
         name: c.name,
         role: membership.role || 'member',
+        is_sales_demo: require('../../services/salesDemo').isQa() && require('../../services/salesDemo').isDemo(c.id),
         inherited,
         inherited_from_client_id: inherited ? (membership.inherited_from_client_id || c.parent_client_id || null) : null,
         ...clientScopeMetadata(scopeContext, c.id),

@@ -642,6 +642,7 @@ async function sendApprovedAutomationActionSchedulingEmail({
 } = {}) {
   requireDb(db);
   if (!action?.id) throw actionError('automation_action_required', 'automation action is required.', 400);
+  if (require('./salesDemo').isDemo(action.client_id)) throw actionError('demo_automation_disabled','Demo actions cannot send messages.',403);
   if (['sent', 'delivered'].includes(action.state)) {
     throw actionError(
       'automation_action_already_sent',

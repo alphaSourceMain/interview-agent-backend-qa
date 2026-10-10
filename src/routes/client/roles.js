@@ -360,6 +360,16 @@ router.post('/', requireAuth, withClientScope, async (req, res) => {
 });
 
 router.patch('/:id/status', requireAuth, withClientScope, async (req, res) => {
+  // Demo roles have exactly one writer: the locked, fixed-fixture RPC.
+  // Service-role operators/admins must never fall through to the normal writer.
+  if (/^d38ade00-2026-4000-8000-\d{12}$/i.test(String(req.params.id || '')) && !req.isSalesDemo) {
+    return res.status(403).json({ error: 'demo_access_denied' });
+  }
+  if (req.isSalesDemo) {
+    const { data, error } = await supabaseAdmin.rpc('sales_demo_control', { p_operation:'role_status', p_target:req.params.id, p_status:req.body?.status });
+    if (error) return res.status(409).json({error:'demo_role_update_failed'});
+    return res.json(data);
+  }
   try {
     const roleId = String(req.params.id || '').trim();
     const status = normalizeRoleStatus(req.body?.status, '');

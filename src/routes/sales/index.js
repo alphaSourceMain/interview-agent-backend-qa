@@ -3,6 +3,9 @@
 const express = require('express')
 const crypto = require('crypto')
 const { supabaseAdmin } = require('../../clients/supabase')
+const { salesRepProfile } = require('../../services/salesRepProfile')
+const { salesHubMetrics } = require('../../services/salesHubMetrics')
+const { verifyReadyGhlBinding } = require('../../services/ghlSalesIntegration')
 const { htmlToPdf } = require('../../render/pdfRenderer')
 const { buildMembershipAgreementHtml } = require('../../render/membershipAgreement')
 const {
@@ -18,6 +21,7 @@ const {
   fingerprint,
   listSalesPackages,
   makeSalesError,
+  mergeDealTimeline,
   normalizeSalesDraft,
   safeDeal,
   safePromotionSummary,
@@ -52,6 +56,14 @@ const AGREEMENT_COLUMNS = [
   'client_id', 'sent_at', 'opened_at', 'signed_at', 'signer_token_expires_at',
   'agreement_expires_at', 'checkout_created_at', 'template_snapshot', 'draft_pdf_path',
   'initial_term_start', 'initial_renewal_date', 'superseded_by_agreement_id'
+].join(',')
+const GHL_BINDING_COLUMNS = [
+  'id', 'location_id', 'contact_id', 'opportunity_id', 'pipeline_id', 'ready_stage_id',
+  'provider_owner_user_id', 'sales_team_member_id', 'sales_rep_user_id', 'purchase_intent_id',
+  'status', 'company_name', 'contact_first_name', 'contact_last_name', 'contact_email',
+  'contact_phone', 'contact_title', 'opportunity_name', 'opportunity_source',
+  'provider_updated_at', 'imported_at', 'linked_at', 'won_at', 'last_sync_at',
+  'last_error_code', 'last_error_detail', 'manual_review_required', 'updated_at'
 ].join(',')
 
 function nowIso() {
@@ -150,6 +162,8 @@ function createSalesRouter(options = {}) {
   const buildSignUrl = options.buildSignUrl || buildMembershipAgreementSignUrl
   const getStripe = options.getStripe || stripeClient
   const rateLimit = options.rateLimit || checkAndIncrementRateLimit
+  const ghlFetchImpl = options.ghlFetchImpl || global.fetch
+  const ghlEnv = options.ghlEnv || process.env
 
   async function enforceSalesRateLimit(req, res, action) {
     const maxCount = SALES_RATE_LIMITS[action]
@@ -380,6 +394,67 @@ function createSalesRouter(options = {}) {
     return { intent, agreement: agreements.get(intent.agreement_id) || null }
   }
 
+  function safeGhlImport(binding) {
+    return {
+      id: binding.id,
+      status: binding.status,
+      company_name: binding.company_name || '',
+      buyer_first_name: binding.contact_first_name || '',
+      buyer_last_name: binding.contact_last_name || '',
+      buyer_email: binding.contact_email || '',
+      buyer_phone: binding.contact_phone || '',
+      buyer_title: binding.contact_title || '',
+      opportunity_name: binding.opportunity_name || '',
+      opportunity_source: binding.opportunity_source || '',
+      ghl_contact_id: binding.contact_id,
+      ghl_opportunity_id: binding.opportunity_id,
+      purchase_intent_id: binding.purchase_intent_id || null,
+      imported_at: binding.imported_at,
+      updated_at: binding.updated_at,
+      sync_state: binding.manual_review_required ? 'manual_review' : binding.status,
+      provider_url: `https://app.gohighlevel.com/v2/location/${encodeURIComponent(binding.location_id)}/opportunities/list`
+    }
+  }
+
+  async function loadOwnedGhlImport(importId, repUserId) {
+    const { data, error } = await db
+      .from('ghl_sales_deal_bindings')
+      .select(GHL_BINDING_COLUMNS)
+      .eq('id', importId)
+      .eq('sales_rep_user_id', repUserId)
+      .maybeSingle()
+    if (error) throw makeSalesError(503, 'ghl_import_lookup_failed', 'The GHL sales draft could not be loaded.')
+    if (!data) throw makeSalesError(404, 'ghl_import_not_found', 'The GHL sales draft was not found.')
+    return data
+  }
+
+  async function resolveSalesDraft(req, input) {
+    const draft = normalizeSalesDraft(input)
+    const importId = String(draft.ghl_import_id || '').trim()
+    draft.ghl_contact_id = ''
+    draft.ghl_opportunity_id = ''
+    if (!importId) return draft
+    if (req.salesRep.access_role !== 'sales_rep') {
+      throw makeSalesError(403, 'ghl_import_rep_required', 'The assigned salesperson must complete this GHL sales draft.')
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(importId)) {
+      throw makeSalesError(400, 'ghl_import_id_invalid', 'The GHL sales draft identifier is invalid.')
+    }
+    const binding = await loadOwnedGhlImport(importId, req.salesRep.user_id)
+    if (binding.purchase_intent_id) {
+      throw makeSalesError(409, 'ghl_import_already_linked', 'This GHL opportunity is already linked to an alphaScreen sale.', {
+        deal_id: binding.purchase_intent_id
+      })
+    }
+    if (binding.status !== 'ready' || binding.manual_review_required) {
+      throw makeSalesError(409, 'ghl_import_not_ready', 'This GHL sales draft requires administrator review before it can be completed.')
+    }
+    await verifyReadyGhlBinding(binding, { db, env: ghlEnv, fetchImpl: ghlFetchImpl })
+    draft.ghl_contact_id = binding.contact_id
+    draft.ghl_opportunity_id = binding.opportunity_id
+    return draft
+  }
+
   async function idempotentResult(repUserId, routeKey, key, body) {
     const requestFingerprint = fingerprint(body)
     const { data, error } = await db
@@ -437,10 +512,51 @@ function createSalesRouter(options = {}) {
     }
   }
 
-  router.get('/me', (req, res) => res.json(req.salesRep))
+  router.get('/me', async (req, res) => {
+    try {
+      return res.json(await salesRepProfile(req.salesRep, db))
+    } catch (_error) {
+      return res.status(503).json({ code: 'sales_profile_unavailable', detail: 'Your sales profile could not be loaded. Please try again.' })
+    }
+  })
+
+  router.get('/hub-metrics', async (_req, res) => {
+    try {
+      return res.json(await salesHubMetrics(db))
+    } catch (_error) {
+      return res.status(503).json({ code: 'sales_hub_metrics_unavailable', detail: 'Team metrics could not be loaded. Please try again.' })
+    }
+  })
 
   router.get('/packages', (_req, res) => {
     return res.json({ items: listSalesPackages({ env: process.env }) })
+  })
+
+  router.get('/imports', async (req, res) => {
+    try {
+      if (req.salesRep.access_role !== 'sales_rep') return res.json({ items: [] })
+      const { data, error } = await db
+        .from('ghl_sales_deal_bindings')
+        .select(GHL_BINDING_COLUMNS)
+        .eq('sales_rep_user_id', req.salesRep.user_id)
+        .order('imported_at', { ascending: false })
+        .limit(250)
+      if (error) throw makeSalesError(503, 'ghl_import_list_failed', 'GHL sales drafts could not be loaded.')
+      return res.json({ items: (data || []).map(safeGhlImport) })
+    } catch (error) {
+      return respondError(res, req, error)
+    }
+  })
+
+  router.get('/imports/:id', async (req, res) => {
+    try {
+      if (req.salesRep.access_role !== 'sales_rep') {
+        throw makeSalesError(403, 'ghl_import_rep_required', 'The assigned salesperson must complete this GHL sales draft.')
+      }
+      return res.json(safeGhlImport(await loadOwnedGhlImport(req.params.id, req.salesRep.user_id)))
+    } catch (error) {
+      return respondError(res, req, error)
+    }
   })
 
   router.post('/promotion-codes/validate', async (req, res) => {
@@ -460,7 +576,7 @@ function createSalesRouter(options = {}) {
   router.post('/deals/preview', async (req, res) => {
     try {
       normalizeIdempotencyKey(req)
-      const draft = validateSalesDraft(normalizeSalesDraft(req.body))
+      const draft = validateSalesDraft(await resolveSalesDraft(req, req.body))
       const promotion = draft.promotion_code ? await validatePromotion(draft.promotion_code, draft) : null
       const { package_snapshot: packageSnapshot, pricing } = calculatePricing(draft, promotion)
       const schedule = agreementSchedule()
@@ -519,9 +635,10 @@ function createSalesRouter(options = {}) {
     let createdAgreementId = ''
     let createdAgreementPdfPath = ''
     let dealReadyForRecovery = false
+    let draft = null
     try {
       key = normalizeIdempotencyKey(req)
-      const draft = validateSalesDraft(normalizeSalesDraft(req.body))
+      draft = validateSalesDraft(await resolveSalesDraft(req, req.body))
       const previewId = String(req.body?.preview_id || '').trim()
       if (!previewId) throw makeSalesError(409, 'preview_required', 'Preview the agreement before sending it.')
       const idem = await idempotentResult(req.salesRep.user_id, routeKey, key, { ...draft, preview_id: previewId })
@@ -586,6 +703,16 @@ function createSalesRouter(options = {}) {
         throw makeSalesError(409, 'existing_signup_conflict', 'This buyer already has an account or an in-progress purchase. Ask an administrator to review it.')
       }
 
+      // Preview and creation are separate requests. Re-check GHL immediately
+      // before the atomic database claim so a moved/closed lead cannot become
+      // a prefilled agreement on the strength of an old imported snapshot.
+      if (draft.ghl_import_id) {
+        await verifyReadyGhlBinding(
+          await loadOwnedGhlImport(draft.ghl_import_id, req.salesRep.user_id),
+          { db, env: ghlEnv, fetchImpl: ghlFetchImpl }
+        )
+      }
+
       const intentId = crypto.randomUUID()
       const agreementId = crypto.randomUUID()
       const now = nowIso()
@@ -638,6 +765,21 @@ function createSalesRouter(options = {}) {
         throw makeSalesError(503, 'deal_create_failed', 'The sales transaction could not be created.')
       }
       createdIntentId = intentId
+
+      if (draft.ghl_import_id) {
+        const { error: claimError } = await db.rpc('claim_ghl_sales_binding', {
+          p_binding_id: draft.ghl_import_id,
+          p_purchase_intent_id: intentId,
+          p_sales_rep_user_id: req.salesRep.user_id,
+          p_claimed_at: now
+        })
+        if (claimError) {
+          if (/not_claimable/i.test(String(claimError.message || ''))) {
+            throw makeSalesError(409, 'ghl_import_already_linked', 'This GHL opportunity was linked to another sale. Refresh the sales workspace.')
+          }
+          throw makeSalesError(503, 'ghl_import_link_failed', 'The GHL opportunity could not be linked to this sale.')
+        }
+      }
 
       const agreementScheduleSnapshot = {
         effective_date: preview.agreement_effective_date,
@@ -769,6 +911,12 @@ function createSalesRouter(options = {}) {
             }
           }
           if (createdIntentId) {
+            if (draft?.ghl_import_id) {
+              await cleanup('ghl_binding', () => db.from('ghl_sales_deal_bindings')
+                .update({ purchase_intent_id: null, status: 'ready', linked_at: null, updated_at: nowIso() })
+                .eq('id', draft.ghl_import_id)
+                .eq('purchase_intent_id', createdIntentId))
+            }
             await cleanup('purchase_intent', () => db.from('public_purchase_intents').delete().eq('id', createdIntentId).eq('created_by_user_id', req.salesRep.user_id))
           }
           if (createdAgreementId) {
@@ -820,7 +968,7 @@ function createSalesRouter(options = {}) {
         candidate_assistance_email: intent.candidate_assistance_email || '',
         ghl_contact_id: intent.ghl_contact_id || null,
         sales_note: intent.sales_note || '',
-        timeline: events || []
+        timeline: mergeDealTimeline(events || [], agreement)
       })
     } catch (error) {
       return respondError(res, req, error)
@@ -946,30 +1094,16 @@ function createSalesRouter(options = {}) {
           if (code !== 'resource_missing') throw error
         }
       }
-      const now = nowIso()
-      const { data: updated, error } = await db
-        .from('public_purchase_intents')
-        .update({ status: 'canceled', canceled_at: now, updated_at: now })
-        .eq('id', intent.id)
-        .eq('created_by_user_id', req.salesRep.user_id)
-        .neq('status', 'completed')
-        .is('activated_at', null)
-        .is('activation_claimed_at', null)
-        .select(INTENT_COLUMNS)
-        .maybeSingle()
+      const { data: cancellation, error } = await db.rpc('cancel_sales_assisted_purchase', {
+        p_intent_id: intent.id,
+        p_agreement_id: agreement?.id || null,
+        p_user_id: req.salesRep.user_id
+      })
       if (error) throw makeSalesError(503, 'deal_cancel_failed', 'The unpaid transaction could not be canceled.')
-      if (!updated) throw makeSalesError(409, 'agreement_already_paid', 'Payment completed while cancellation was being processed. An administrator must review this deal.')
-      if (agreement?.id) {
-        const { data: voidedAgreement, error: voidError } = await db
-          .from('membership_agreements')
-          .update({ status: 'voided', is_current: false, updated_at: now })
-          .eq('id', agreement.id)
-          .neq('checkout_status', 'paid')
-          .select('id')
-          .maybeSingle()
-        if (voidError) throw makeSalesError(503, 'agreement_void_failed', 'The transaction was canceled, but the agreement could not be voided.')
-        if (!voidedAgreement) throw makeSalesError(409, 'agreement_already_paid', 'Payment completed while cancellation was being processed. An administrator must review this deal.')
+      if (cancellation?.status !== 'canceled' || !cancellation.intent) {
+        throw makeSalesError(409, 'agreement_already_paid', 'Payment completed while cancellation was being processed. An administrator must review this deal.')
       }
+      const updated = cancellation.intent
       await event(intent.id, req.salesRep.user_id, 'deal_canceled')
       const body = { deal: safeDeal(updated, { ...(agreement || {}), status: 'voided' }), message: 'The unpaid transaction was canceled.' }
       await finishIdempotency(req.salesRep.user_id, routeKey, key, 200, body)

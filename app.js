@@ -276,10 +276,6 @@ app.use('/api/public-analytics', require('./src/routes/public/analytics'))
 app.use('/api/public-leads', require('./src/routes/public/leads'))
 app.use('/sales', requireAuth, createRequireSalesRep(), createSalesRouter())
 
-// ---------- Dashboard: scoped rows ----------
-// Registered after the shared router mounts above, which is where these paths
-// resolved before: routes/dashboard.js answers GET /dashboard/interviews too.
-app.use('/', require('./src/routes/client/dashboard'))
 app.use('/', require('./src/routes/client/invites'))
 /* ========================= Admin guard + Admin API (with JD→Rubric→KB) ========================= */
 

@@ -2,12 +2,7 @@
 
 const express = require('express');
 const crypto = require('crypto');
-let stripe = null;
-try {
-  stripe = require('../../clients/stripe');
-} catch (e) {
-  console.error('[billing] stripe_client_load_failed', e?.message || e);
-}
+const stripe = require('../../clients/stripe');
 const { supabaseAnon, supabaseAdmin } = require('../../clients/supabase');
 const { requireParentClient } = require('../../services/clientBillingScope');
 const { htmlToPdf } = require('../../render/pdfRenderer');
@@ -1290,7 +1285,6 @@ router.post('/invoices/send', async (req, res) => {
 
     const computedSumCents = normalizedItems.reduce((sum, li) => sum + (Number.isFinite(li.line_total_cents) ? li.line_total_cents : 0), 0);
 
-    console.log('[billing/send] normalized_items', { request_id, items: normalizedItems });
 
     let billingCustomer = null;
     if (billing_customer_id) {

@@ -49,8 +49,6 @@ try {
 } catch (e) {
   console.error('[mount] Failed to load routes/adminBilling:', e?.message || e)
 }
-try {
-  router.use('/accommodation-requests', requireAuth, requireAdmin, require('../public/accommodationRequests'))
-} catch (_) {}
+router.use('/accommodation-requests', requireAuth, requireAdmin, require('../public/accommodationRequests'))
 
 module.exports = router;

@@ -8,7 +8,22 @@
       "Bash(sed -i \"282s/additional_interview_price, 30\\)/additional_interview_price, 25\\)/; 332s/additional_interview_fee, 35\\)/additional_interview_fee, 30\\)/; 525s/additional_interview_price: 30,/additional_interview_price: 25,/; 526s/additional_interview_fee: 30,/additional_interview_fee: 25,/; 527s/overage_price: 30,/overage_price: 25,/\" test/alphascreen-purchase-intents.test.js)",
       "Bash(sed -i \"185s/additional_interview_fee: 35,/additional_interview_fee: 30,/\" test/billing-model-provisioning.test.js)",
       "Bash(sed -i \"s#^const { syncInterviewCreditDraw } = require\\('../interviewCredits'\\);#const { syncInterviewCreditDraw } = require\\('../interviewCredits'\\);\\\\nconst { markInterviewCompleted } = require\\('../interviewCompletion'\\);#\" src/services/tavusEvents/index.js)",
-      "Bash(sed -i \"s#^const { syncInterviewCreditDraw } = require\\('../../services/interviewCredits'\\);#const { syncInterviewCreditDraw } = require\\('../../services/interviewCredits'\\);\\\\nconst { markInterviewCompleted } = require\\('../../services/interviewCompletion'\\);#\" src/routes/public/textInterview.js)"
+      "Bash(sed -i \"s#^const { syncInterviewCreditDraw } = require\\('../../services/interviewCredits'\\);#const { syncInterviewCreditDraw } = require\\('../../services/interviewCredits'\\);\\\\nconst { markInterviewCompleted } = require\\('../../services/interviewCompletion'\\);#\" src/routes/public/textInterview.js)",
+      "Bash(timeout 180 node --test --test-reporter=tap --test-name-pattern=\"current Tavus end_call\" test/final-transcript-serialization-webhook.test.js)",
+      "Bash(timeout 60 node --test --test-reporter=tap test/interview-recovery-core-r1-red-regressions.test.js)",
+      "Bash(grep -v \":0$\")",
+      "Bash(sort -t: -k2 -rn)",
+      "Bash(timeout 120 node --test --test-reporter=tap test/interview-recovery-core-report-isolation.test.js)",
+      "Bash(timeout 120 node --test --test-reporter=tap test/final-transcript-serialization-disposable-db.test.js)",
+      "Bash(timeout 60 node --test --test-reporter=tap --test-name-pattern=\"serialization migration is additive\" test/final-transcript-reconciliation-helper.test.js)",
+      "Bash(git config *)",
+      "Bash(git check-ignore *)",
+      "Bash(awk '/failing tests:/{f=1} f && /^test at /{loc=$3} f && /^✖ /{sub\\(/ \\\\\\([0-9.]+ms\\\\\\)$/,\"\"\\); print loc \" :: \" $0}')",
+      "Bash(awk '/failing tests:/{f=1} f && /^test at /{loc=$3} f && /^✖ /{print loc}')",
+      "Bash(grep -E \"^ℹ \\(tests|pass|fail|skipped\\)|^✖ test\\\\\\\\\\\\\\\\\")",
+      "Bash(grep -n -B1 -A1 \"^  DEAL_STATUSES,$\" src/services/salesWorkspace.js)",
+      "Bash(awk '{a+=$1; d+=$2; print} END {print \"TOTAL +\"a\" -\"d}')",
+      "Bash(awk '{a+=$1; d+=$2} END {print \"excluding package files: +\"a\" -\"d}')"
     ],
     "deny": [
       "Read(//c/Users/**)",

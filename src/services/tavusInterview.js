@@ -80,24 +80,6 @@ async function createTavusInterviewHandler(candidate, role, webhookUrl, options 
     throw err;
   }
 
-  const envFlags = {
-    TAVUS_API_KEY: !!process.env.TAVUS_API_KEY,
-    TAVUS_REPLICA_ID: !!process.env.TAVUS_REPLICA_ID,
-    TAVUS_PERSONA_ID: !!process.env.TAVUS_PERSONA_ID,
-    TAVUS_ENABLE_RECORDING: recordingRequested,
-    recording_config_complete: recordingConfigComplete,
-    recording_config_included: recordingConfigComplete,
-    has_recording_aws_assume_role_arn: !!RECORDING_AWS_ASSUME_ROLE_ARN,
-    has_recording_s3_bucket_region: !!RECORDING_S3_BUCKET_REGION,
-    has_recording_s3_bucket_name: !!RECORDING_S3_BUCKET_NAME
-  };
-  console.log('[tavus-interview-debug]', {
-    stage: 'handler_start',
-    candidate_id: candidate?.id || candidate?.candidate_id || null,
-    role_id: role?.id || null,
-    client_id: role?.client_id || candidate?.client_id || options?.clientId || null,
-    env: envFlags
-  });
   if (recordingRequested && !recordingConfigComplete) {
     console.warn('[tavus-interview] recording_config_incomplete', {
       candidate_id: candidate?.id || candidate?.candidate_id || null,

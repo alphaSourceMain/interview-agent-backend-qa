@@ -146,13 +146,7 @@ function buildTavusCostEstimate({ env, estimatedMinutes }) {
   const rateCard = tavusRateCard(env);
   const overageMinutes = Math.max(0, minutes - rateCard.includedConversationMinutes);
   const variableConversationCost = overageMinutes * rateCard.conversationMinuteRateUsd;
-  const lipsyncMinutes = 0;
-  const generatedVideoMinutes = 0;
-  const replicasTrained = 0;
-  const lipsyncCost = lipsyncMinutes * rateCard.lipsyncMinuteRateUsd;
-  const generatedVideoCost = generatedVideoMinutes * rateCard.generatedVideoMinuteRateUsd;
-  const replicaTrainingCost = replicasTrained * rateCard.replicaTrainingRateUsd;
-  const variableUsageCost = roundCurrency(variableConversationCost + lipsyncCost + generatedVideoCost + replicaTrainingCost);
+  const variableUsageCost = roundCurrency(variableConversationCost);
   const blendedMinuteCost = rateCard.blendedReferenceMinutes > 0
     ? rateCard.monthlyAllocationUsd / rateCard.blendedReferenceMinutes
     : null;

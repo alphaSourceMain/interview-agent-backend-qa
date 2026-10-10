@@ -12,16 +12,6 @@ const {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const SALES_BUSINESS_TIME_ZONE = 'America/Denver'
-const DEAL_STATUSES = Object.freeze([
-  'agreement_sent',
-  'signed_payment_needed',
-  'checkout_in_progress',
-  'setup_in_progress',
-  'activated',
-  'needs_attention',
-  'expired',
-  'canceled'
-])
 
 function makeSalesError(status, code, detail, fields = null) {
   const error = new Error(detail || code || 'sales_workspace_error')
@@ -319,7 +309,6 @@ function safeDeal(intent, agreement = null) {
 }
 
 module.exports = {
-  DEAL_STATUSES,
   agreementInputFromDraft,
   agreementSchedule,
   calculatePricing,

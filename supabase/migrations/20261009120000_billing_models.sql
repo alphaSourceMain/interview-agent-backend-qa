@@ -4,6 +4,12 @@
 --   rollover - unused allowance becomes client-wide credit for rollover_days
 --   usage    - interviews beyond the included count are billed on the platform invoice
 --
+-- billing_model is nullable with no default. Null means "follow the plan tier"
+-- (basic -> fixed, pro -> rollover, enterprise -> usage), resolved in
+-- src/services/billingModel.js; a stored value is an explicit choice for that
+-- client. A default would be wrong: a row inserted without the column, as
+-- apply_public_purchase_billing does, would silently become 'fixed'.
+--
 -- public.client_plan_settings is not created by any migration in this repository;
 -- it exists only in the hosted database, so this file can only alter it. Every
 -- statement below is guarded, so re-running the migration is a no-op.
@@ -19,9 +25,17 @@ begin
       and column_name = 'billing_model'
   ) then
     alter table public.client_plan_settings
-      add column billing_model text not null default 'fixed';
+      add column billing_model text;
     billing_model_added := true;
   end if;
+
+  -- A database that already has the column from an earlier version of this
+  -- migration (not null default 'fixed') is brought to the same shape. Both
+  -- statements are no-ops when the column is already nullable with no default.
+  alter table public.client_plan_settings
+    alter column billing_model drop not null;
+  alter table public.client_plan_settings
+    alter column billing_model drop default;
 
   if not exists (
     select 1 from information_schema.columns

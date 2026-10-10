@@ -209,7 +209,7 @@ test('the failed status the webhook writes is permitted by the constraint', () =
     'the webhook marks a permanently failed payment this way');
 
   const migration = fs.readFileSync(
-    path.join(ROOT, 'supabase', 'migrations', '20260924120000_role_interview_purchase_failed_status.sql'),
+    path.join(ROOT, 'supabase', 'migrations', '20261009160000_role_interview_purchase_failed_status.sql'),
     'utf8'
   );
   assert.match(migration, /check \(status in \('pending', 'paid', 'failed', 'voided', 'refunded'\)\)/i,

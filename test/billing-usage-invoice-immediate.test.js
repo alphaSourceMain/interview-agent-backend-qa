@@ -365,6 +365,42 @@ test('clients on other billing models are never considered', async () => {
   }));
 });
 
+test('a client whose billing_model is null follows its tier: Enterprise is invoiced, Pro is not', async () => {
+  // Null means "follow the plan tier", so the cron cannot select usage clients
+  // by filtering the column for 'usage' — that would skip every Enterprise
+  // client left on its tier's model.
+  await withCronSecret(() => onTheFirst(async () => {
+    const today = new Date();
+    const anchor = `2025-01-${String(today.getUTCDate()).padStart(2, '0')}T00:00:00.000Z`;
+    const db = makeDb({
+      clients: [
+        { id: 'client_ent', parent_client_id: null, stripe_customer_id: 'cus_ent', billing_interval: 'annual', contract_start_at: anchor },
+        { id: 'client_pro', parent_client_id: null, stripe_customer_id: 'cus_pro', billing_interval: 'annual', contract_start_at: anchor }
+      ],
+      planSettings: [
+        { client_id: 'client_ent', plan_tier: 'enterprise', billing_model: null, included_interviews_per_role: 0, per_role_fee: 0, usage_interview_fee_cents: 2500, rollover_days: 90 },
+        { client_id: 'client_pro', plan_tier: 'pro', billing_model: null, included_interviews_per_role: 0, per_role_fee: 699, usage_interview_fee_cents: 2500, rollover_days: 90 }
+      ],
+      roles: [
+        { id: 'role_ent', client_id: 'client_ent', title: 'Hygienist' },
+        { id: 'role_pro', client_id: 'client_pro', title: 'Front Desk' }
+      ],
+      interviews: [
+        ...usedInterviews(2, { clientId: 'client_ent', roleId: 'role_ent', prefix: 'ent' }),
+        ...usedInterviews(3, { clientId: 'client_pro', roleId: 'role_pro', prefix: 'pro' })
+      ]
+    });
+    const stripe = makeStripe();
+
+    const res = await runCron(loadCron(db, stripe));
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.considered, 1, 'only the Enterprise client resolves to usage');
+    assert.equal(res.body.invoiced, 1);
+    assert.deepEqual(stripe.calls.invoices.map((invoice) => invoice.customer), ['cus_ent']);
+  }));
+});
+
 test('the cron does nothing on the 2nd, or any other day', async () => {
   await withCronSecret(() => onTheSecond(async () => {
     // The schedule runs daily and the handler decides, so a missed day is a
@@ -628,7 +664,7 @@ test('both new routes are registered with the auth they need', () => {
 
 test('the idempotency migration mirrors the sales one', () => {
   const sql = fs.readFileSync(
-    path.join(ROOT, 'supabase', 'migrations', '20260921150000_billing_idempotency_keys.sql'),
+    path.join(ROOT, 'supabase', 'migrations', '20261009150000_billing_idempotency_keys.sql'),
     'utf8'
   );
 

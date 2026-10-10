@@ -8,7 +8,7 @@ const { buildClientDashboardReturnUrl } = require('../../config/urlConfig');
 const { resolveBillingOwnerForScope } = require('../../services/clientBillingScope');
 const { canViewLegalBillingForClient } = require('../../services/clientScope');
 const { supabaseAdmin } = require('../../clients/supabase');
-const { normalizeBillingModel } = require('../../services/billingModel');
+const { resolveBillingModel } = require('../../services/billingModel');
 const { readBillingForClient } = require('../../services/billingReadModel');
 const { requireAuth, withClientScope } = require('../../middleware/auth');
 const {
@@ -255,7 +255,7 @@ router.post('/clients/billing/additional-interviews/checkout-session', requireAu
 
     const { data: planSettings, error: planSettingsErr } = await supabaseAdmin
       .from('client_plan_settings')
-      .select('additional_interview_fee,plan_tier,billing_model')
+      .select('additional_interview_fee')
       .eq('client_id', billingClientId)
       .maybeSingle()
     if (planSettingsErr) return res.status(500).json({ error: 'plan_settings_lookup_failed', detail: planSettingsErr.message })
@@ -265,7 +265,9 @@ router.post('/clients/billing/additional-interviews/checkout-session', requireAu
     // own code, before the price check — an Enterprise client on this model is
     // normally configured with no top-up price at all, and the generic
     // invalid_additional_interview_fee reads like a misconfiguration.
-    const billingModel = normalizeBillingModel(planSettings?.billing_model, planSettings?.plan_tier)
+    // Resolved the way every other billing reader resolves it: a null column
+    // follows the plan tier, and a child entity is charged under its parent.
+    const { billing_model: billingModel } = await resolveBillingModel({ db: supabaseAdmin, clientId })
     if (billingModel === 'usage') {
       return res.status(409).json({
         error: 'usage_billing_no_top_ups',

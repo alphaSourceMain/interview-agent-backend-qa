@@ -166,7 +166,7 @@ test('an unreadable discount percentage charges list price and says so', async (
 
 test('the migration pins the thresholds, the bounds and service-role access', () => {
   const sql = fs.readFileSync(
-    path.join(ROOT, 'supabase', 'migrations', '20260925120000_enterprise_pool_discounts.sql'),
+    path.join(ROOT, 'supabase', 'migrations', '20261009170000_enterprise_pool_discounts.sql'),
     'utf8'
   );
 

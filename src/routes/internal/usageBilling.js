@@ -12,6 +12,7 @@ const express = require('express');
 
 const { supabaseAdmin } = require('../../clients/supabase');
 const { createImmediateUsageInvoice } = require('../../services/usageBilling');
+const { normalizeBillingModel } = require('../../services/billingModel');
 const { secretsMatch } = require('../../services/secretCompare');
 
 const router = express.Router();
@@ -69,16 +70,20 @@ router.post('/billing/usage-invoices', async (req, res) => {
   }
 
   try {
+    // A null billing_model means "follow the plan tier", so filtering the column
+    // for 'usage' in SQL would miss every Enterprise client left on its tier's
+    // model. The rows are resolved with the same rule resolveBillingModel uses.
     const { rows: settings, error: settingsError } = await readAllPages(() => supabaseAdmin
       .from('client_plan_settings')
-      .select('client_id')
-      .eq('billing_model', 'usage')
+      .select('client_id,plan_tier,billing_model')
       .order('client_id', { ascending: true }))
     if (settingsError) {
       return res.status(500).json({ error: 'usage_clients_lookup_failed', detail: settingsError.message })
     }
 
-    const clientIds = [...new Set((settings || []).map((row) => String(row?.client_id || '')).filter(Boolean))]
+    const usageSettings = (settings || [])
+      .filter((row) => normalizeBillingModel(row?.billing_model, row?.plan_tier) === 'usage')
+    const clientIds = [...new Set(usageSettings.map((row) => String(row?.client_id || '')).filter(Boolean))]
     if (!clientIds.length) {
       console.log('usage_billing_cron_summary', { request_id: requestId, considered: 0, invoiced: 0, skipped: 0, failed: 0, total_cents: 0 })
       return res.json({ ok: true, considered: 0, invoiced: 0, skipped: 0, failed: 0, total_cents: 0, results: [] })

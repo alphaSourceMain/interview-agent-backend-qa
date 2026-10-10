@@ -13,7 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
 
-const MIGRATION = path.join(__dirname, '..', 'supabase', 'migrations', '20260921120000_billing_models.sql');
+const MIGRATION = path.join(__dirname, '..', 'supabase', 'migrations', '20261009120000_billing_models.sql');
 const sql = fs.readFileSync(MIGRATION, 'utf8');
 
 test('every column is added behind an existence check', () => {
@@ -27,7 +27,16 @@ test('every column is added behind an existence check', () => {
 });
 
 test('the new columns carry the defaults the plan specifies', () => {
-  assert.match(sql, /add column billing_model text not null default 'fixed'/i);
+  // billing_model has no default and allows null: null means "follow the plan
+  // tier". A default would make a row inserted without the column — as
+  // apply_public_purchase_billing does — silently 'fixed'.
+  assert.match(sql, /add column billing_model text;/i);
+  assert.doesNotMatch(sql, /add column billing_model text not null/i);
+  assert.doesNotMatch(sql, /add column billing_model text[^;]*default/i);
+  assert.match(sql, /alter column billing_model drop not null/i,
+    'a database that already has the column must lose not null too');
+  assert.match(sql, /alter column billing_model drop default/i,
+    'a database that already has the column must lose the default too');
   assert.match(sql, /add column usage_interview_fee_cents integer/i);
   assert.match(sql, /add column rollover_days integer not null default 90/i);
 });
@@ -37,6 +46,9 @@ test('each constraint is added only once and allows exactly the intended values'
     sql,
     /conname = 'client_plan_settings_billing_model_check'[\s\S]*?check \(billing_model in \('fixed', 'rollover', 'usage'\)\)/i
   );
+  // A Postgres CHECK passes when its expression is null, so this constraint
+  // allows a null billing_model without saying so explicitly.
+  assert.doesNotMatch(sql, /billing_model is not null/i);
   assert.match(
     sql,
     /conname = 'client_plan_settings_usage_interview_fee_cents_check'[\s\S]*?check \(usage_interview_fee_cents is null or usage_interview_fee_cents >= 0\)/i

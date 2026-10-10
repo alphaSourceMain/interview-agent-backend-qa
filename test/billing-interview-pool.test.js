@@ -216,7 +216,7 @@ test('the other models are untouched by the pool', async () => {
 
 test('the migration pins the invariants the service relies on', () => {
   const sql = fs.readFileSync(
-    path.join(ROOT, 'supabase', 'migrations', '20260925130000_client_interview_pools.sql'),
+    path.join(ROOT, 'supabase', 'migrations', '20261009180000_client_interview_pools.sql'),
     'utf8'
   );
 

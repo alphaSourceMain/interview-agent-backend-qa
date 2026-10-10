@@ -384,7 +384,7 @@ test('rows across several roles are all written', async () => {
 
 test('the ledger migration pins the invariants the service relies on', () => {
   const sql = fs.readFileSync(
-    path.join(ROOT, 'supabase', 'migrations', '20260921140000_usage_billing_ledger.sql'),
+    path.join(ROOT, 'supabase', 'migrations', '20261009140000_usage_billing_ledger.sql'),
     'utf8'
   );
 

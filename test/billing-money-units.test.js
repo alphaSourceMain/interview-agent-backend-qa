@@ -15,7 +15,7 @@ const { test } = require('node:test');
 
 const ROOT = path.join(__dirname, '..');
 const MIGRATION = path.join(
-  ROOT, 'supabase', 'migrations', '20260927120000_client_plan_settings_money_units.sql'
+  ROOT, 'supabase', 'migrations', '20261009200000_client_plan_settings_money_units.sql'
 );
 const sql = fs.readFileSync(MIGRATION, 'utf8');
 

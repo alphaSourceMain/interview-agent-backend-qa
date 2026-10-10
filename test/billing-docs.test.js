@@ -46,7 +46,7 @@ test('the env var and cron path in the document are the ones the route uses', ()
 
 test('every billing migration on disk is listed, and every listed one exists', () => {
   const migrations = fs.readdirSync(path.join(ROOT, 'supabase', 'migrations'))
-    .filter((name) => /^2026092[0-9]\d{6}_(billing_models|interview_credits|usage_billing_ledger|billing_idempotency_keys|role_interview_purchase_failed_status|enterprise_pool_discounts|client_interview_pools|interviews_completed_at|client_plan_settings_money_units)\.sql$/.test(name));
+    .filter((name) => /^20261009\d{6}_(billing_models|interview_credits|usage_billing_ledger|billing_idempotency_keys|role_interview_purchase_failed_status|enterprise_pool_discounts|client_interview_pools|interviews_completed_at|client_plan_settings_money_units)\.sql$/.test(name));
 
   assert.equal(migrations.length, 9, 'expected the nine billing migrations');
   for (const name of migrations) {
@@ -125,7 +125,7 @@ test('the migrations that change tables this repository does not define are call
 
 test('the completed_at migration still changes no access, as the document claims', () => {
   const migration = fs.readFileSync(
-    path.join(ROOT, 'supabase', 'migrations', '20260926120000_interviews_completed_at.sql'), 'utf8'
+    path.join(ROOT, 'supabase', 'migrations', '20261009190000_interviews_completed_at.sql'), 'utf8'
   );
   // Comments are stripped: the migration says in prose that it deliberately
   // grants nothing, and that sentence must not read as a grant.

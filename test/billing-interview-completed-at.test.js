@@ -128,7 +128,7 @@ test('a failed stamp is logged and never fails the interview', () => {
 
 test('the migration adds the column, the index and a guarded backfill', () => {
   const sql = fs.readFileSync(
-    path.join(ROOT, 'supabase', 'migrations', '20260926120000_interviews_completed_at.sql'),
+    path.join(ROOT, 'supabase', 'migrations', '20261009190000_interviews_completed_at.sql'),
     'utf8'
   );
 
@@ -143,7 +143,7 @@ test('the migration adds the column, the index and a guarded backfill', () => {
 
 test('the migration does not change how interviews are accessed', () => {
   const raw = fs.readFileSync(
-    path.join(ROOT, 'supabase', 'migrations', '20260926120000_interviews_completed_at.sql'),
+    path.join(ROOT, 'supabase', 'migrations', '20261009190000_interviews_completed_at.sql'),
     'utf8'
   );
   // Only what actually executes — the file explains this choice in prose, which

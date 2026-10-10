@@ -13,6 +13,20 @@ A client's model is set from their plan tier when their subscription starts, and
 can be changed afterwards by an administrator. Clients whose records predate this
 feature behave as their tier implies, so nothing had to be migrated by hand.
 
+**An empty `billing_model` means "follow the plan tier".** The column has no
+default and may be left empty. When it is empty, the client is billed as their
+tier implies: Essentials → `fixed`, Pro → `rollover`, Enterprise → `usage`. When
+it holds a value, that value is a deliberate choice for that client and wins
+over the tier. Every part of the backend that decides money reads the model the
+same way, through one function, so an empty value can never be read as
+"fixed" by accident.
+
+This matters because not everything that writes plan settings fills the column
+in. The public purchase activation (the database function
+`apply_public_purchase_billing`) creates a client's plan settings without it. If
+the column had a default of `fixed`, every Pro client activated that way would
+silently lose rollover credit.
+
 ---
 
 ## What counts as a billable interview
@@ -177,7 +191,9 @@ fields are in dollars. This follows the existing column conventions.
 
 `billing_model` is not a field anyone sets. It is derived from the tier every
 time the webhook runs — Essentials → `fixed`, Pro → `rollover`, Enterprise →
-`usage`. `rollover_days` is 90 for every client; there is no setting for it.
+`usage`. A client activated through the public purchase flow gets no value at
+all, which means the same thing: follow the tier. `rollover_days` is 90 for
+every client; there is no setting for it.
 
 > **The Agreement Generator form does not yet have a field for the Enterprise
 > per-interview usage price.** The backend accepts `usage_interview_fee_cents`
@@ -302,15 +318,31 @@ timestamps, so alphabetical order is run order.
 
 | File | What it does |
 | --- | --- |
-| `20260921120000_billing_models.sql` | Adds `billing_model`, `usage_interview_fee_cents` and `rollover_days` to `client_plan_settings`, and backfills each existing client to the model its tier implies |
-| `20260921130000_interview_credits.sql` | Creates `interview_credits` — what was minted and when it lapses, with a partial unique index giving a closed role at most one live credit |
-| `20260921140000_usage_billing_ledger.sql` | Creates `usage_billing_ledger`, with a unique constraint on `interview_id` — the guard that stops an interview being billed twice |
-| `20260921150000_billing_idempotency_keys.sql` | Creates `billing_idempotency_keys`, for the `Idempotency-Key` contract on the money-spending admin routes |
-| `20260924120000_role_interview_purchase_failed_status.sql` | Widens the status check on `role_interview_purchases` to allow `failed`, which the code already wrote |
-| `20260925120000_enterprise_pool_discounts.sql` | Creates `enterprise_pool_discounts` and seeds the volume bands for pool pricing |
-| `20260925130000_client_interview_pools.sql` | Creates `client_interview_pools` — what was bought and whether it was paid for |
-| `20260926120000_interviews_completed_at.sql` | Adds `completed_at` to `interviews`, indexes `(client_id, completed_at)`, and backfills existing rows |
-| `20260927120000_client_plan_settings_money_units.sql` | Comments only: records which `client_plan_settings` money columns are dollars and which are cents, and that a zero included count is a setting. Changes no column and no value |
+| `20261009120000_billing_models.sql` | Adds `billing_model` (no default, may be empty: empty means "follow the plan tier"), `usage_interview_fee_cents` and `rollover_days` to `client_plan_settings`, and backfills each existing client to the model its tier implies. On a database that already has `billing_model` from an earlier version of this migration, it removes the old `not null` and `default 'fixed'` |
+| `20261009130000_interview_credits.sql` | Creates `interview_credits` — what was minted and when it lapses, with a partial unique index giving a closed role at most one live credit |
+| `20261009140000_usage_billing_ledger.sql` | Creates `usage_billing_ledger`, with a unique constraint on `interview_id` — the guard that stops an interview being billed twice |
+| `20261009150000_billing_idempotency_keys.sql` | Creates `billing_idempotency_keys`, for the `Idempotency-Key` contract on the money-spending admin routes |
+| `20261009160000_role_interview_purchase_failed_status.sql` | Widens the status check on `role_interview_purchases` to allow `failed`, which the code already wrote |
+| `20261009170000_enterprise_pool_discounts.sql` | Creates `enterprise_pool_discounts` and seeds the volume bands for pool pricing |
+| `20261009180000_client_interview_pools.sql` | Creates `client_interview_pools` — what was bought and whether it was paid for |
+| `20261009190000_interviews_completed_at.sql` | Adds `completed_at` to `interviews`, indexes `(client_id, completed_at)`, and backfills existing rows |
+| `20261009200000_client_plan_settings_money_units.sql` | Comments only: records which `client_plan_settings` money columns are dollars and which are cents, and that a zero included count is a setting. Changes no column and no value |
+
+### Why these run after the client's own migrations
+
+These nine files used to be dated September (`20260921…` to `20260927…`), in
+between migrations from the client's own sales work. They were re-dated to
+`20261009120000` onwards, in the same order, so they now run after all of the
+client's migrations (the last is `20261008215557`). None of the client's
+migrations depends on anything these create, and none of these depends on a
+client migration dated after them, so a fresh database ends up the same.
+
+If any environment had already applied them under their old names, its
+migration history would list the nine old versions, and the next
+`supabase db push` would see nine "new" files and nine unknown old versions.
+That environment would need its migration history repaired first. As recorded in
+`review/BILLING-LOG.md`, none of them had been applied to the client's database
+when they were re-dated.
 
 ### Which of these touch tables this repository does not define
 
@@ -321,11 +353,11 @@ that touches one is changing a table whose access model is **not** visible here.
 
 | Migration | Foreign table it changes | What that means |
 | --- | --- | --- |
-| `20260921120000_billing_models.sql` | `client_plan_settings` | Adds three columns and backfills them. No change to who can read the table. |
-| `20260926120000_interviews_completed_at.sql` | `interviews` | Adds one column and one index, and backfills it. |
-| `20260927120000_client_plan_settings_money_units.sql` | `client_plan_settings` | Comments only. No column, value or access changes. |
+| `20261009120000_billing_models.sql` | `client_plan_settings` | Adds three columns and backfills them. No change to who can read the table. |
+| `20261009190000_interviews_completed_at.sql` | `interviews` | Adds one column and one index, and backfills it. |
+| `20261009200000_client_plan_settings_money_units.sql` | `client_plan_settings` | Comments only. No column, value or access changes. |
 
-**`20260926120000_interviews_completed_at.sql` deliberately contains no RLS,
+**`20261009190000_interviews_completed_at.sql` deliberately contains no RLS,
 `grant` or `revoke` statement**, and a test asserts it never gains one.
 `public.interviews` is not in the containment migration that locks the billing
 tables down, so it carries policies from outside this repository — very likely

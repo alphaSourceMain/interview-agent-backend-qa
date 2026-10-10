@@ -168,6 +168,25 @@ test('a child client is billed under its parent plan settings', async () => {
   assert.deepEqual(db.reads, ['parent_1'], 'plan settings must be read for the billing owner');
 });
 
+test('a null billing_model follows the plan tier: pro -> rollover, basic -> fixed, enterprise -> usage', async () => {
+  // billing_model is nullable with no default, and null means "follow the tier".
+  // apply_public_purchase_billing (migration 20261001131612) inserts plan settings
+  // without the column at all, so the key-absent row is checked as well as an
+  // explicit null. Neither may come back as 'fixed' for a Pro client.
+  for (const [planTier, expected] of [['pro', 'rollover'], ['basic', 'fixed'], ['enterprise', 'usage']]) {
+    const base = {
+      plan_tier: planTier, included_interviews_per_role: 20,
+      per_role_fee: 399, usage_interview_fee_cents: null, rollover_days: 90
+    };
+    for (const planSettings of [{ ...base, billing_model: null }, { ...base }]) {
+      const db = makeDb({ clients: { client_1: soloClient }, planSettings });
+      const resolved = await resolveBillingModel({ db, clientId: 'client_1' });
+      assert.equal(resolved.billing_model, expected,
+        `${planTier} with ${'billing_model' in planSettings ? 'a null' : 'no'} billing_model must resolve to ${expected}`);
+    }
+  }
+});
+
 test('a missing plan settings row resolves to nulls rather than a guessed model', async () => {
   const db = makeDb({ clients: { client_1: soloClient }, planSettings: null });
 

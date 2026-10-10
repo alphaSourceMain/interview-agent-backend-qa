@@ -13,7 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
 
-const MIGRATION = path.join(__dirname, '..', 'supabase', 'migrations', '20260921130000_interview_credits.sql');
+const MIGRATION = path.join(__dirname, '..', 'supabase', 'migrations', '20261009130000_interview_credits.sql');
 const sql = fs.readFileSync(MIGRATION, 'utf8');
 
 test('the table is created idempotently', () => {

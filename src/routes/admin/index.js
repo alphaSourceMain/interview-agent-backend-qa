@@ -1,6 +1,6 @@
 'use strict';
 
-// The admin router. The three injected sub-routers mount first, as they did in
+// The admin router. The four injected sub-routers mount first, as they did in
 // app.js, then the extracted route groups, then billing and accommodation
 // requests, whose mounts stay wrapped so a load failure degrades those endpoints
 // rather than the whole service. The route groups carry disjoint path prefixes,
@@ -8,6 +8,7 @@
 
 const express = require('express');
 const { createAdminInterviewReliabilityRouter } = require('./interviewReliability');
+const { createAdminSyntheticInterviewsRouter } = require('./syntheticInterviews');
 const { createAdminSmsMonitoringRouter } = require('./smsMonitoring');
 const { createInterviewRecoveryRouter } = require('./interviewRecovery');
 const { requireAuth } = require('../../middleware/auth');
@@ -23,6 +24,7 @@ const router = express.Router();
 // writes an immutable reset event through the Phase B RPC.
 router.use('/interview-recovery', requireAuth, requireAdmin, createInterviewRecoveryRouter())
 router.use('/interview-reliability', requireAuth, requireAdmin, createAdminInterviewReliabilityRouter())
+router.use('/synthetic-interviews', requireAuth, requireAdmin, createAdminSyntheticInterviewsRouter())
 router.use('/sms-monitoring', requireAuth, requireAdmin, createAdminSmsMonitoringRouter())
 
 router.use(require('./metrics'));

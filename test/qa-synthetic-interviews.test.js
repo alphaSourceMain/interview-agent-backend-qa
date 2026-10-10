@@ -1,0 +1,303 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { randomUUID } = require('node:crypto');
+const { readFileSync } = require('node:fs');
+const express = require('express');
+const { SCENARIOS, QUESTIONS, ANSWERS, CLOSING_QUESTION, QA_SERVICE_ID, QA_PERSONA_ID,
+  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, normalizeSpeech, scriptedAnswerReceived } = require('../src/services/qaSyntheticInterviews');
+const { networkAction } = require('../src/services/qaSyntheticInterviewRunner');
+const { createAdminSyntheticInterviewsRouter } = require('../src/routes/admin/syntheticInterviews');
+const { installSyntheticBrowser } = require('../src/services/qaSyntheticBrowser');
+const { runInNewContext } = require('node:vm');
+
+const ENV = { ENABLE_QA_SYNTHETIC_INTERVIEWS: 'true', SUPABASE_URL: 'https://yjjxzxoghlpguquknyso.supabase.co',
+  RENDER_SERVICE_ID: QA_SERVICE_ID, RENDER_GIT_BRANCH: 'qa-backend', TAVUS_PERSONA_ID: QA_PERSONA_ID,
+  RENDER_EXTERNAL_URL: 'https://ia-backend-qa.onrender.com', TAVUS_API_KEY: 'test', OPENAI_API_KEY: 'test' };
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test('isolated observer recognizes qualified speaking variants without treating candidate or unknown stops as replica progress', () => {
+  const handlers = {};
+  const microphoneTrack = { kind: 'audio', clone() { return this; } };
+  const window = {}; window.top = window;
+  const sandbox = { window, location: { origin: 'https://alphasourceai-com.onrender.com', pathname: '/interview/live' },
+    sessionStorage: { setItem() {} }, navigator: { mediaDevices: { getUserMedia: async () => ({ getVideoTracks: () => [] }) } },
+    AudioContext: class { createMediaStreamDestination() { return { stream: { getAudioTracks: () => [microphoneTrack] } }; } } };
+  runInNewContext(`(${installSyntheticBrowser.toString()})({})`, sandbox);
+  window.DailyIframe = { createCallObject: (options) => {
+    assert.equal(options.audioSource, microphoneTrack);
+    assert.equal(options.videoSource, false);
+    assert.equal(options.startVideoOff, true);
+    assert.equal(options.receiveSettings.base.video.layer, 0);
+    return { on: (name, handler) => { handlers[name] = handler; } };
+  } };
+  window.DailyIframe.createCallObject();
+  const emit = (type, role, speech) => handlers['app-message']({ data: { eventType: type, properties: { role, speech } } });
+  const runtime = window.__qaSynthetic;
+  emit('conversation.stopped_speaking');
+  assert.equal(runtime.lastStop, 0);
+  emit('conversation.replica-started-speaking');
+  assert.equal(runtime.speaking, true);
+  emit('conversation.user-started-speaking');
+  emit('conversation.stopped_speaking');
+  assert.equal(runtime.speaking, true);
+  emit('conversation.user-stopped-speaking');
+  emit('conversation.stopped_speaking');
+  assert.equal(runtime.speaking, false);
+  assert.ok(runtime.lastStop > 0);
+  emit('conversation.started_speaking', 'replica');
+  emit('conversation.replica.stopped_speaking');
+  assert.equal(runtime.speaking, false);
+  assert.equal(runtime.events.length, 0);
+  for (let index = 0; index < 250; index += 1) emit('conversation.perception', 'user');
+  emit('conversation.utterance', 'user', ANSWERS[0]);
+  assert.equal(runtime.events.length, 1);
+  assert.equal(runtime.events[0].speech, ANSWERS[0]);
+  assert.equal(scriptedAnswerReceived(runtime.events, ANSWERS[0], 0), true);
+  for (let index = 0; index < 250; index += 1) emit('conversation.utterance', 'replica', 'Bounded test');
+  assert.equal(runtime.events.length, 200);
+  emit('conversation.replica-started-speaking');
+  assert.equal(runtime.speaking, true);
+  emit('conversation.replica.stopped_speaking');
+  assert.equal(runtime.speaking, false);
+});
+
+test('isolated media override never captures camera media and preserves cloned microphone audio', async () => {
+  let captures = 0;
+  const clonedTrack = { kind: 'audio' };
+  const microphoneTrack = { clone: () => clonedTrack };
+  const window = {}; window.top = window;
+  const sandbox = { window, location: { origin: 'https://alphasourceai-com.onrender.com', pathname: '/interview/live' },
+    sessionStorage: { setItem() {} }, navigator: { mediaDevices: { getUserMedia: async () => { captures += 1; } } },
+    MediaStream: class { constructor(tracks) { this.tracks = tracks; } },
+    AudioContext: class { createMediaStreamDestination() { return { stream: { getAudioTracks: () => [microphoneTrack] } }; } } };
+  runInNewContext(`(${installSyntheticBrowser.toString()})({})`, sandbox);
+  const media = await sandbox.navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+  assert.deepEqual(Array.from(media.tracks), [clonedTrack]);
+  assert.equal((await sandbox.navigator.mediaDevices.getUserMedia({ video: true })).tracks.length, 0);
+  assert.equal(captures, 0);
+});
+
+test('runner is off by default and rejects production, previews, missing identity and provider overrides', () => {
+  assert.doesNotThrow(() => assertQaEnvironment(ENV));
+  for (const overrides of [{ ENABLE_QA_SYNTHETIC_INTERVIEWS: undefined },
+    { ENABLE_QA_SYNTHETIC_INTERVIEWS: 'false' }, { SUPABASE_URL: 'https://rytlclkkcvvnkoncfaid.supabase.co' },
+    { SUPABASE_URL: 'https://yjjxzxoghlpguquknyso.supabase.co.evil.test' },
+    { RENDER_SERVICE_ID: 'production' }, { RENDER_GIT_BRANCH: 'prod-backend-legacy' },
+    { RENDER_EXTERNAL_URL: 'https://api.alphasourceai.com' }, { TAVUS_PERSONA_ID: 'p75bb8779b7d' },
+    { TAVUS_API_BASE: 'https://evil.test' }, { OPENAI_API_KEY: '' }]) {
+    assert.throws(() => assertQaEnvironment({ ...ENV, ...overrides }));
+  }
+});
+
+test('synthetic playback converts bounded little-endian PCM without a browser codec', async () => {
+  let samples, stopped = 0, context, source;
+  const track = { readyState: 'live', enabled: true, muted: false };
+  const connections = [], microphone = { stream: { getAudioTracks: () => [track] } }, output = {};
+  const window = {}; window.top = window;
+  const sandbox = { window, location: { origin: 'https://alphasourceai-com.onrender.com', pathname: '/interview/live' },
+    sessionStorage: { setItem() {} }, navigator: { mediaDevices: { getUserMedia: async () => {} } },
+    atob: (value) => Buffer.from(value, 'base64').toString('binary'), setTimeout, clearTimeout,
+    AudioContext: class {
+      destination = output;
+      currentTime = 1;
+      state = 'running';
+      constructor() { context = this; }
+      async resume() {}
+      createMediaStreamDestination() { return microphone; }
+      createBuffer(channels, count, rate) {
+        assert.equal(channels, 1); assert.equal(rate, 24000);
+        samples = new Float32Array(count);
+        return { duration: count / rate, getChannelData: () => samples };
+      }
+      createBufferSource() { source = { connect(target) { connections.push(target); },
+        start() {}, stop() { stopped += 1; }, disconnect() {} }; return source; }
+    } };
+  runInNewContext(`(${installSyntheticBrowser.toString()})({})`, sandbox);
+  const playback = await window.__qaSynthetic.play(Buffer.from([0, 128, 0, 0, 255, 127]).toString('base64'));
+  assert.equal(playback.duration_seconds, 3 / 24000);
+  assert.ok(playback.started_at > 0);
+  assert.deepEqual(connections, [microphone, output]);
+  assert.deepEqual(Array.from(samples), [-1, 0, 32767 / 32768]);
+  const runtime = window.__qaSynthetic;
+  context.currentTime = 3;
+  runtime.call = { participants: () => ({ local: { local: true, audio: false } }) };
+  const diagnostic = runtime.readPlayback();
+  assert.equal(diagnostic.context_elapsed_ms, 2000);
+  assert.equal(diagnostic.active, true);
+  assert.equal(diagnostic.naturally_ended, false);
+  assert.equal(diagnostic.source_track_state, 'live');
+  assert.equal(diagnostic.source_track_enabled, true);
+  assert.equal(diagnostic.source_track_muted, false);
+  assert.equal(diagnostic.local_audio_enabled, false);
+  assert.equal(diagnostic.observer_at_capacity, false);
+  runtime.events.length = 200;
+  assert.equal(runtime.readPlayback().observer_at_capacity, true);
+  await assert.rejects(window.__qaSynthetic.play('AAA='), /synthetic_audio_overlap/);
+  window.__qaSynthetic.stopPlayback();
+  window.__qaSynthetic.stopPlayback();
+  assert.equal(stopped, 1);
+  assert.equal(runtime.readPlayback().active, false);
+  assert.equal(runtime.readPlayback().naturally_ended, false);
+  await runtime.play(Buffer.from([0, 128]).toString('base64'));
+  source.onended();
+  assert.equal(runtime.readPlayback().naturally_ended, true);
+  assert.equal(runtime.readPlayback().active, false);
+  for (const bytes of [Buffer.alloc(0), Buffer.alloc(1), Buffer.alloc(24000 * 2 * 30 + 2)]) {
+    await assert.rejects(window.__qaSynthetic.play(bytes.toString('base64')), /synthetic_audio_invalid/);
+  }
+});
+
+test('answer acknowledgement requires fresh received candidate content, not playback or speaking events', () => {
+  const expected = ANSWERS[0];
+  const event = { type: 'conversation.utterance', role: 'user', speech: expected, at: 100 };
+  assert.equal(scriptedAnswerReceived([event], expected, 99), true);
+  const capturedSpeech = 'I group leads by next action and due date in our. Customer relationship system. Morning I review overdue tasks and prioritize customers waiting on a decision. I record the outcome of every call and schedule the next. Step. This reduced miss. Follow-ups and helped our team respond within 1 business. Day.';
+  assert.equal(scriptedAnswerReceived([{ ...event, speech: capturedSpeech }], expected, 99), true);
+  assert.equal(scriptedAnswerReceived([{ ...event, speech: capturedSpeech.replace('1 business', '2 business') }], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([{ ...event, speech: ANSWERS[1].replace('two weeks', '2 weeks') }], ANSWERS[1], 99), true);
+  assert.equal(scriptedAnswerReceived([event], expected, 101), false);
+  assert.equal(scriptedAnswerReceived([{ ...event, role: 'replica' }], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([{ ...event, type: 'conversation.started_speaking' }], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([{ ...event, speech: expected.split(' ').slice(0, 8).join(' ') }], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([{ ...event, speech: 'Can you repeat the question?' }], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([], expected, 99), false);
+  assert.equal(scriptedAnswerReceived([event], '', 99), false);
+  for (const { reply } of Object.values(SCENARIOS)) {
+    assert.equal(scriptedAnswerReceived([{ ...event, speech: reply }], reply, 99), true);
+  }
+});
+
+test('vendor hyphen variants preserve question matching without accepting a different question', () => {
+  const question = QUESTIONS[0];
+  assert.equal(normalizeSpeech(question.replace('-', '\u2011')), normalizeSpeech(question));
+  assert.equal(normalizeSpeech(question.replace('-', '\u2010')), normalizeSpeech(question));
+  assert.notEqual(normalizeSpeech('How do you organize your accounting work?'), normalizeSpeech(question));
+});
+
+test('network policy never forwards application API reads or mutations, production or arbitrary URLs', () => {
+  const base = 'https://ia-backend-qa.onrender.com';
+  assert.equal(networkAction(`${base}/tavus/end-conversation`, 'POST'), 'end');
+  assert.equal(networkAction(`${base}/tavus/client-telemetry`, 'POST'), 'telemetry');
+  assert.equal(networkAction(`${base}/public/interview-status?interview_id=synthetic`, 'GET'), 'status');
+  for (const [url, method] of [[`${base}/candidateSubmit`, 'POST'], [`${base}/admin/candidates`, 'GET'],
+    [`${base}/api/public-analytics/events`, 'POST'], ['https://api.alphasourceai.com/tavus/end-conversation', 'POST'],
+    ['https://www.alphasourceai.com/assets/index.js', 'GET'], ['https://evil.test', 'GET'],
+    ['https://alphasourceai-com.onrender.com/api/candidates', 'GET'], ['https://tavusapi.com/v2/personas/pa40626945f5', 'PATCH']]) {
+    assert.equal(networkAction(url, method), 'deny', url);
+  }
+  assert.equal(networkAction('https://alphasourceai-com.onrender.com/interview/live', 'GET'), 'allow');
+  assert.equal(networkAction('https://tavus.daily.co/room', 'GET'), 'allow');
+  assert.equal(networkAction('https://evil-daily.co/room', 'GET'), 'deny');
+});
+
+function goodEvidence(scenario) {
+  return { events: [...QUESTIONS.map((speech) => ({ type: 'conversation.utterance', role: 'replica', speech })),
+    { type: 'conversation.utterance', role: 'replica', speech: CLOSING_QUESTION },
+    { type: 'conversation.utterance', role: 'replica', speech: SCENARIOS[scenario].expected },
+    ...ANSWERS.map((speech) => ({ type: 'conversation.utterance', role: 'candidate', speech }))],
+    answered_questions: [0, 1, 2], candidate_utterances: 5, closing_reply_sent: true,
+    end_requests: 1, end_reason: 'closing_utterance', provider_end_confirmed: true,
+    completion_page: true, browser_errors: 0, audio_bytes: 1000, audio_transcript: SCENARIOS[scenario].expected };
+}
+
+test('each closing scenario demands all structured answers, exact terminal turn, received speech and audio', () => {
+  assert.equal(QUESTIONS.length, 3);
+  assert.equal(ANSWERS.length, 3);
+  for (const scenario of Object.keys(SCENARIOS)) {
+    const evidence = goodEvidence(scenario);
+    assert.equal(evaluateRun(scenario, evidence).status, 'passed');
+    for (const delta of [{ answered_questions: [0, 2, 1] }, { candidate_utterances: 0 },
+      { closing_reply_sent: false }, { end_requests: 0 }, { end_requests: 2 }, { end_reason: 'manual' },
+      { provider_end_confirmed: false }, { completion_page: false }, { audio_bytes: 0 },
+      { audio_transcript: 'Thank you for your time.' }, { browser_errors: 1 }]) {
+      assert.equal(evaluateRun(scenario, { ...evidence, ...delta }).status, 'failed');
+    }
+    const missingExpected = evidence.events.filter((item) => item.speech !== SCENARIOS[scenario].expected);
+    assert.equal(evaluateRun(scenario, { ...evidence, events: missingExpected }).status, 'failed');
+    assert.equal(evaluateRun(scenario, { ...evidence, events: [...evidence.events,
+      { type: 'conversation.utterance', role: 'replica', speech: "Let's continue." }] }).status, 'failed');
+    assert.equal(evaluateRun(scenario, { ...evidence, events: [...evidence.events,
+      { type: 'conversation.utterance', role: 'replica', speech: CLOSING_QUESTION }] }).status, 'failed');
+  }
+});
+
+test('one active run, retry idempotency and untrusted settings cannot cause extra vendor usage', async () => {
+  let resolve, called = 0;
+  const service = createQaSyntheticInterviewService({ env: ENV, execute: () => {
+    called += 1;
+    return new Promise((done) => { resolve = done; });
+  } });
+  const input = { scenario: 'no_questions', request_key: randomUUID() };
+  const first = service.start(input);
+  assert.equal(service.start(input).id, first.id);
+  assert.throws(() => service.start({ ...input, request_key: randomUUID() }), { code: 'synthetic_test_already_running' });
+  assert.throws(() => service.start({ ...input, url: 'https://prod.test' }), { code: 'synthetic_test_invalid_request' });
+  await settle();
+  assert.equal(called, 1);
+  resolve({ status: 'passed', cleanup_confirmed: true,
+    playback_diagnostics: Array.from({ length: 10 }, (_, clip) => ({ clip })) });
+  await settle();
+  assert.equal(service.get(first.id).status, 'passed');
+  assert.equal(service.get(first.id).playback_diagnostics.length, 8);
+  assert.equal(service.start(input).id, first.id);
+  assert.equal(called, 1);
+  assert.equal(JSON.stringify(service.get(first.id)).includes('controller'), false);
+});
+
+test('cancellation, execution failure, unsafe cleanup and rate limits cannot appear passed', async () => {
+  let time = 1000000;
+  const service = createQaSyntheticInterviewService({ env: ENV, now: () => time,
+    execute: async () => ({ status: 'passed', cleanup_confirmed: false }) });
+  const run = service.start({ scenario: 'closing_process', request_key: randomUUID() });
+  await settle();
+  assert.equal(service.get(run.id).status, 'failed');
+  assert.equal(service.list().can_start, false);
+  assert.throws(() => service.start({ scenario: 'no_questions', request_key: randomUUID() }), { code: 'synthetic_cleanup_unconfirmed_wait_for_vendor_duration' });
+  const cancelled = createQaSyntheticInterviewService({ env: ENV, execute: async () => ({ status: 'passed', cleanup_confirmed: true }) });
+  const item = cancelled.start({ scenario: 'no_questions', request_key: randomUUID() });
+  cancelled.cancel(item.id);
+  await settle();
+  assert.equal(cancelled.get(item.id).status, 'cancelled');
+  const limited = createQaSyntheticInterviewService({ env: ENV, now: () => time,
+    execute: async () => ({ status: 'failed', cleanup_confirmed: true }) });
+  for (let index = 0; index < 4; index += 1) {
+    limited.start({ scenario: 'no_questions', request_key: randomUUID() });
+    await settle(); time += 16000;
+  }
+  assert.throws(() => limited.start({ scenario: 'no_questions', request_key: randomUUID() }), { code: 'synthetic_test_hourly_limit' });
+});
+
+test('admin route denies non-superadmins before listing, starting, stopping or retrieving audio', async () => {
+  let calls = 0;
+  const service = { list: () => { calls += 1; return {}; }, start: () => { calls += 1; return {}; },
+    get: () => { calls += 1; return {}; }, cancel: () => { calls += 1; return {}; }, audio: () => { calls += 1; return Buffer.from('audio'); } };
+  const app = express();
+  app.use((req, _res, next) => { req.isGlobalAdmin = req.headers['x-test-admin'] === 'true'; next(); });
+  app.use('/admin/synthetic-interviews', createAdminSyntheticInterviewsRouter({ service }));
+  const server = await new Promise((resolve) => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
+  const base = `http://127.0.0.1:${server.address().port}/admin/synthetic-interviews`;
+  try {
+    for (const [path, method] of [['', 'GET'], ['/runs', 'POST'], ['/runs/id/cancel', 'POST'], ['/runs/id/audio', 'GET']]) {
+      assert.equal((await fetch(base + path, { method })).status, 403);
+    }
+    assert.equal(calls, 0);
+    const response = await fetch(base, { headers: { 'x-test-admin': 'true' } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+});
+
+test('integration is additive and runner has no database, credit, OTP, document or email mutation path', () => {
+  // The admin router lives in src/routes/admin/index.js after the refactor (Step 7).
+  const app = readFileSync(require.resolve('../src/routes/admin/index'), 'utf8');
+  assert.match(app, /router\.use\('\/synthetic-interviews', requireAuth, requireAdmin, createAdminSyntheticInterviewsRouter\(\)\)/);
+  const runner = readFileSync(require.resolve('../src/services/qaSyntheticInterviewRunner'), 'utf8');
+  assert.doesNotMatch(runner, /supabase|\.rpc\(|\.patchPersona\(|createTavusInterviewHandler\(|callback_url\s*:|ensureTavusDocument/);
+  assert.match(runner, /max_call_duration: 300/);
+  assert.match(runner, /setRequestInterception\(true\)/);
+  assert.match(runner, /setBypassServiceWorker\(true\)/);
+  assert.match(runner, /map\(\(\{ role, speech, at \}\) => \(\{ role, speech, at \}\)\)/);
+  assert.match(runner, /audio_receipt_failure/);
+});

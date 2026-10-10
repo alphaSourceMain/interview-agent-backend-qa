@@ -10,7 +10,7 @@ const { getPlanCapacity, normalizeMembershipLevel, requirePlanCapacity, resolveP
 const { getInterviewTypeConfig, normalizeInterviewType, requireInterviewType } = require('./interviewTypes')
 
 const { supabaseAdmin: supabase } = require('../clients/supabase')
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null
 
 const REQUIRED_QUESTION_FIELDS = Object.freeze([
   'text',
@@ -257,6 +257,14 @@ Rejected output: ${JSON.stringify(priorRubric)}`
 }
 
 async function requestRubric({ prompt, openaiClient = openai, logger = console }) {
+  // An intentionally disconnected dev environment must boot without vendor keys.
+  // Missing configuration is not a generation failure eligible for fallback.
+  if (!openaiClient) {
+    const error = new Error('rubric_generation_unavailable')
+    error.code = 'RUBRIC_GENERATION_UNAVAILABLE'
+    error.status = 503
+    throw error
+  }
   try {
     const resp = await openaiClient.chat.completions.create({
       model: process.env.OPENAI_RUBRIC_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini',

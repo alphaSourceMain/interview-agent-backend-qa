@@ -297,7 +297,7 @@ async function activateCase(plan, cadence, extra = {}) {
     authAdmin: extra.authAdmin || makeAuthAdmin(extra.users || []),
     agreementId: AGREEMENT_ID,
     checkoutSessionId: 'cs_test_public',
-    paidAt: '2026-06-23T12:00:00.000Z',
+    paidAt: extra.paidAt || '2026-06-23T12:00:00.000Z',
     subscription: makeSubscription(cadence),
     requireParentClient: async () => ({ ok: true }),
     ensureRecovery: async () => {
@@ -395,6 +395,107 @@ test('public purchase webhook activation provisions Essential and Pro monthly/an
   }
 })
 
+test('fenced purchase uses only transactional tail RPCs and does not resend welcome', async () => {
+  const db = makeDb('basic', 'monthly')
+  db.purchaseIntents[0].protocol = 'fenced_v2'
+  const rpcCalls = []
+  let welcomeStatus = null
+  let welcomeSends = 0
+  db.rpc = async (name, args) => {
+    rpcCalls.push({ name, args })
+    if (name === 'complete_public_purchase_activation') {
+      db.membershipAgreements[0].checkout_status = 'paid'
+      db.membershipAgreements[0].checkout_paid_at = '2026-06-23T12:00:00.000Z'
+      return { data: { status: 'completed', client_id: CLIENT_ID, paid_at: '2026-06-23T12:00:00.000Z' }, error: null }
+    }
+    if (name === 'apply_public_purchase_billing') {
+      assert.equal(args.p_intent_id, INTENT_ID)
+      assert.equal(args.p_claim_key, 'synthetic-fence')
+      assert.equal(args.p_contract_start_at, new Date(1782172800 * 1000).toISOString())
+      return { data: { status: 'applied' }, error: null }
+    }
+    if (name === 'ensure_public_purchase_buyer_member') {
+      return { data: { status: 'created', role: 'manager' }, error: null }
+    }
+    if (name === 'reserve_public_purchase_welcome') {
+      return { data: { status: welcomeStatus || 'reserved' }, error: null }
+    }
+    if (name === 'begin_public_purchase_welcome') {
+      welcomeStatus = 'sending'
+      return { data: { status: 'sending', send_token: '50000000-0000-4000-8000-000000000001',
+        buyer_email: BUYER_EMAIL, client_id: CLIENT_ID, agreement_id: AGREEMENT_ID }, error: null }
+    }
+    if (name === 'finish_public_purchase_welcome') {
+      welcomeStatus = args.p_result
+      return { data: { status: args.p_result }, error: null }
+    }
+    throw new Error(`Unexpected RPC: ${name}`)
+  }
+  const inputs = {
+    db, authAdmin: makeAuthAdmin([{ id: '40000000-0000-4000-8000-000000000001', email: BUYER_EMAIL }]),
+    agreementId: AGREEMENT_ID, activationClaimKey: 'synthetic-fence',
+    checkoutSessionId: 'cs_test_public', paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: { ...makeSubscription('monthly'), start_date: undefined, created: 1782172800 },
+    requireParentClient: async () => ({ ok: true }),
+    assertActivationFence: async () => {},
+    sendWelcomeEmail: async () => { welcomeSends += 1; return { statusCode: 202 } },
+    logger: { info() {}, warn() {}, error() {} }
+  }
+  const first = await activatePublicPurchaseAgreementCheckout(inputs)
+  const second = await activatePublicPurchaseAgreementCheckout(inputs)
+  assert.equal(first.ok, true)
+  assert.equal(first.welcome_email_status, 'sent')
+  assert.equal(second.welcome_email_status, 'already_sent')
+  assert.equal(welcomeSends, 1)
+  assert.deepEqual(db.updates, [])
+  assert.deepEqual(db.upserts, [])
+  assert.deepEqual(db.inserts, [])
+  assert.ok(rpcCalls.some((call) => call.name === 'apply_public_purchase_billing'))
+  assert.ok(rpcCalls.some((call) => call.name === 'ensure_public_purchase_buyer_member'))
+})
+
+test('fenced purchase without a claim refuses before all writes', async () => {
+  const db = makeDb('basic', 'monthly')
+  db.purchaseIntents[0].protocol = 'fenced_v2'
+  await assert.rejects(
+    activatePublicPurchaseAgreementCheckout({ db, agreementId: AGREEMENT_ID }),
+    { code: 'activation_claim_required' }
+  )
+  assert.equal(db.updates.length + db.upserts.length + db.inserts.length, 0)
+})
+
+test('historical completed purchase cannot enter unfenced legacy writes', async () => {
+  const db = makeDb('basic', 'monthly')
+  db.purchaseIntents[0].protocol = 'legacy_complete'
+  db.purchaseIntents[0].status = 'completed'
+  const result = await activatePublicPurchaseAgreementCheckout({ db, agreementId: AGREEMENT_ID })
+  assert.equal(result.status, 'historical_complete')
+  assert.equal(db.updates.length + db.upserts.length + db.inserts.length, 0)
+})
+
+test('fenced billing refuses a mismatched parent or missing stable subscription', async () => {
+  for (const scenario of ['different_parent', 'missing_subscription']) {
+    const db = makeDb('basic', 'monthly')
+    db.purchaseIntents[0].protocol = 'fenced_v2'
+    const calls = []
+    db.rpc = async (name) => {
+      calls.push(name)
+      if (name !== 'complete_public_purchase_activation') throw new Error('Billing RPC must not be reached')
+      return { data: { status: 'completed', client_id: CLIENT_ID, paid_at: '2026-06-23T12:00:00.000Z' }, error: null }
+    }
+    await assert.rejects(activatePublicPurchaseAgreementCheckout({
+      db, agreementId: AGREEMENT_ID, activationClaimKey: 'synthetic-fence',
+      paidAt: '2026-06-23T12:00:00.000Z',
+      subscription: scenario === 'missing_subscription' ? null : makeSubscription('monthly'),
+      requireParentClient: async () => ({ ok: true,
+        clientId: scenario === 'different_parent' ? '99999999-9999-4999-8999-999999999999' : CLIENT_ID }),
+      assertActivationFence: async () => {}
+    }), { code: scenario === 'different_parent' ? 'billing_parent_mismatch' : 'activation_subscription_snapshot_missing' })
+    assert.deepEqual(calls, ['complete_public_purchase_activation'])
+    assert.equal(db.updates.length + db.upserts.length + db.inserts.length, 0)
+  }
+})
+
 test('public purchase webhook activation does not reactivate a canceled sales intent', async () => {
   const db = makeDb('basic', 'monthly', { source: 'sales_assisted' })
   db.purchaseIntents[0].status = 'canceled'
@@ -428,6 +529,18 @@ test('sales-assisted activation starts the membership on successful payment', as
   assert.equal(db.membershipAgreements[0].initial_term_start, '2026-06-23')
   assert.equal(db.membershipAgreements[0].initial_renewal_date, '2027-06-23')
   assert.equal(db.purchaseIntents[0].activated_at, '2026-06-23T12:00:00.000Z')
+})
+
+test('a later paid event cannot move the original sales close into another payroll period', async () => {
+  const db = makeDb('basic', 'monthly', { source: 'sales_assisted', termStartBasis: 'successful_payment' })
+  const first = await activateCase('basic', 'monthly', { db })
+  assert.equal(first.result.ok, true)
+  const repeated = await activateCase('basic', 'monthly', { db, paidAt: '2026-07-23T12:00:00.000Z' })
+  assert.equal(repeated.result.ok, true)
+  assert.equal(db.membershipAgreements[0].checkout_paid_at, '2026-06-23T12:00:00.000Z')
+  assert.equal(db.purchaseIntents[0].activated_at, '2026-06-23T12:00:00.000Z')
+  assert.equal(db.membershipAgreements[0].initial_term_start, '2026-06-23')
+  assert.equal(db.membershipAgreements[0].initial_renewal_date, '2027-06-23')
 })
 
 test('new sales-assisted activation preserves concrete agreement dates', async () => {
@@ -595,6 +708,46 @@ test('duplicate public purchase webhook activation does not resend welcome email
   assert.equal(db.emailDeliveryEvents.filter((row) => row.email_category === 'public_purchase_welcome').length, 1)
 })
 
+test('duplicate new-buyer activation generates and sends the initial setup link only once', async () => {
+  const db = makeDb('basic', 'monthly')
+  const users = []
+  const authAdmin = makeAuthAdmin(users)
+  let recoveryCalls = 0
+  let setupEmailCalls = 0
+  const options = {
+    db,
+    authAdmin,
+    agreementId: AGREEMENT_ID,
+    checkoutSessionId: 'cs_test_public',
+    paidAt: '2026-06-23T12:00:00.000Z',
+    subscription: makeSubscription('monthly'),
+    requireParentClient: async () => ({ ok: true }),
+    ensureRecovery: async () => {
+      recoveryCalls += 1
+      users.push({ id: 'user-new-buyer', email: BUYER_EMAIL })
+      return {
+        userId: 'user-new-buyer',
+        method: 'createUser',
+        actionLink: 'https://setup.example/recovery-token'
+      }
+    },
+    sendRecoveryEmail: async () => {
+      setupEmailCalls += 1
+      return { statusCode: 202 }
+    },
+    sendWelcomeEmail: async () => ({ statusCode: 202 }),
+    logger: { error() {}, warn() {}, info() {} }
+  }
+
+  const first = await activatePublicPurchaseAgreementCheckout(options)
+  const second = await activatePublicPurchaseAgreementCheckout(options)
+  assert.equal(first.setup_email_status, 'sent')
+  assert.equal(second.setup_email_status, 'not_sent_existing_user')
+  assert.equal(recoveryCalls, 1)
+  assert.equal(setupEmailCalls, 1)
+  assert.equal(authAdmin.calls.filter((call) => call?.type === 'recovery').length, 0)
+})
+
 test('hosted-like public purchase activation sends welcome when webhook pre-activated client', async () => {
   const db = makeDb('basic', 'monthly')
   db.clients[0].billing_status = 'active'
@@ -728,7 +881,7 @@ test('public purchase activation does not log setup action links', async () => {
   assert.doesNotMatch(JSON.stringify(logEntries), /recovery-token|setup\.example/)
 })
 
-test('checkout return state provides direct setup URL even when setup email failed', async () => {
+test('checkout return state never exposes or generates a recovery link when setup email failed', async () => {
   const db = makeDb('basic', 'monthly')
   const logEntries = []
 
@@ -760,12 +913,13 @@ test('checkout return state provides direct setup URL even when setup email fail
   assert.doesNotMatch(JSON.stringify(activation), /recovery-token|setup\.example/)
   assert.doesNotMatch(JSON.stringify(logEntries), /recovery-token|setup\.example/)
 
-  const status = await resolvePublicCheckoutReturnState({
+  const authAdmin = makeAuthAdmin(
+    [{ id: 'user-new-buyer', email: BUYER_EMAIL }],
+    { actionLink: 'https://qa.alphasourceai.com/pwreset?token_hash=direct-after-email-failure&type=recovery' }
+  )
+  const statuses = await Promise.all([1, 2, 3].map(() => resolvePublicCheckoutReturnState({
     db,
-    authAdmin: makeAuthAdmin(
-      [{ id: 'user-new-buyer', email: BUYER_EMAIL }],
-      { actionLink: 'https://qa.alphasourceai.com/pwreset?token_hash=direct-after-email-failure&type=recovery' }
-    ),
+    authAdmin,
     sessionId: 'cs_test_public',
     fallbackClientId: CLIENT_ID,
     agreementId: AGREEMENT_ID,
@@ -773,11 +927,15 @@ test('checkout return state provides direct setup URL even when setup email fail
       warn(...args) { logEntries.push(args) },
       error(...args) { logEntries.push(args) }
     }
-  })
+  })))
 
-  assert.equal(status.status, 'password_required')
-  assert.equal(status.password_setup_required, true)
-  assert.match(status.set_password_url, /direct-after-email-failure/)
+  for (const status of statuses) {
+    assert.equal(status.status, 'password_required')
+    assert.equal(status.password_setup_required, true)
+    assert.equal(status.set_password_url, undefined)
+    assert.equal(status.direct_setup_available, undefined)
+  }
+  assert.equal(authAdmin.calls.filter((call) => call?.type === 'recovery').length, 0)
   assert.doesNotMatch(JSON.stringify(logEntries), /direct-after-email-failure|recovery-token|setup\.example/)
 })
 
@@ -806,8 +964,8 @@ test('checkout return state reads webhook state and does not activate pending ro
   })
   assert.equal(passwordRequiredStatus.status, 'password_required')
   assert.equal(passwordRequiredStatus.password_setup_required, true)
-  assert.equal(passwordRequiredStatus.direct_setup_available, true)
-  assert.match(passwordRequiredStatus.set_password_url, /\/pwreset\?token_hash=direct-setup-token/)
+  assert.equal(passwordRequiredStatus.direct_setup_available, undefined)
+  assert.equal(passwordRequiredStatus.set_password_url, undefined)
   assert.doesNotMatch(JSON.stringify(passwordRequiredStatus), /buyer_email|company_legal_name|raw_payload|sk_test|sk_live/i)
 
   const emailFallbackStatus = await resolvePublicCheckoutReturnState({
@@ -821,9 +979,9 @@ test('checkout return state reads webhook state and does not activate pending ro
     agreementId: AGREEMENT_ID,
     logger: { warn() {}, error() {} }
   })
-  assert.equal(emailFallbackStatus.status, 'setup_email_sent')
+  assert.equal(emailFallbackStatus.status, 'password_required')
   assert.equal(emailFallbackStatus.password_setup_required, true)
-  assert.equal(emailFallbackStatus.setup_email_sent, true)
+  assert.equal(emailFallbackStatus.setup_email_sent, undefined)
   assert.equal(emailFallbackStatus.set_password_url, undefined)
 
   const readyDb = makeDb('pro', 'annual', {

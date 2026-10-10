@@ -481,9 +481,10 @@ test('checkout status endpoint returns completed webhook setup state without raw
   assert.equal(response.body.status, 'password_required')
   assert.equal(response.body.client_id, clientId)
   assert.equal(response.body.password_setup_required, true)
-  assert.equal(response.body.direct_setup_available, true)
-  assert.equal(response.body.setup_email_sent, false)
-  assert.match(response.body.set_password_url, /\/pwreset\?token_hash=direct-setup-token/)
+  assert.equal(response.body.direct_setup_available, undefined)
+  assert.equal(response.body.setup_email_sent, undefined)
+  assert.equal(response.body.set_password_url, undefined)
+  assert.doesNotMatch(JSON.stringify(response.body), /direct-setup-token|token_hash|\/pwreset/)
   assert.doesNotMatch(JSON.stringify(response.body), /buyer_email|company_legal_name|raw_payload|stripe_checkout_session_id|signer_token|sk_test|sk_live/i)
 })
 

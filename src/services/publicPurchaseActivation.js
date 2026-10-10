@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const { supabaseAdmin } = require('../clients/supabase');
 const { requireParentClient } = require('./clientBillingScope');
 const {
@@ -45,6 +46,14 @@ function cleanText(value) {
 
 function lowerEmail(value) {
   return cleanText(value).toLowerCase();
+}
+
+function stablePurchaseClientId(intentId) {
+  const bytes = crypto.createHash('sha256').update(`alphascreen:public-purchase-client:${cleanText(intentId)}`).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function getTemplateSnapshot(agreement) {
@@ -239,6 +248,7 @@ async function sendWelcomeEmailOnce({
   buyerEmail,
   buyerName,
   sendWelcomeEmail,
+  assertFence = async () => {},
   logger,
   nowIso
 }) {
@@ -263,6 +273,7 @@ async function sendWelcomeEmailOnce({
   }
 
   try {
+    await assertFence();
     const firstName = cleanText(intent?.buyer_first_name) || cleanText(buyerName).split(/\s+/).filter(Boolean)[0] || '';
     logger.info?.('[public-purchase-activation] welcome_email_attempting', {
       email: redactEmail(buyerEmail),
@@ -305,6 +316,7 @@ async function sendWelcomeEmailOnce({
     }
     return status;
   } catch (error) {
+    if (error?.code === 'activation_fence_lost') throw error;
     try {
       await updateWelcomeEmailLedger({
         db,
@@ -361,7 +373,7 @@ async function loadPublicPurchaseIntent(db, agreement) {
   if (snapshotIntentId) {
     const { data, error } = await db
       .from('public_purchase_intents')
-      .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,canceled_at,activation_claimed_at,activation_claim_key,expires_at,created_at,updated_at')
+      .select('id,status,protocol,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,activated_at,canceled_at,activation_claimed_at,activation_claim_key,expires_at,created_at,updated_at')
       .eq('id', snapshotIntentId)
       .maybeSingle();
     if (error) throw new Error(error.message || 'Public purchase intent lookup failed');
@@ -371,7 +383,7 @@ async function loadPublicPurchaseIntent(db, agreement) {
   if (!agreementId) return null;
   const { data, error } = await db
     .from('public_purchase_intents')
-    .select('id,status,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,canceled_at,activation_claimed_at,activation_claim_key,expires_at,created_at,updated_at')
+    .select('id,status,protocol,selected_plan_key,selected_billing_cadence,package_snapshot,first_role_prepay_selected,first_role_prepay_amount_cents,first_role_normal_role_fee_cents,first_role_prepay_discount_percent,first_role_prepay_credit_type,company_legal_name,company_dba,buyer_first_name,buyer_last_name,buyer_email,buyer_phone,buyer_title,source_path,agreement_id,stripe_checkout_session_id,client_id,channel,term_start_basis,activated_at,canceled_at,activation_claimed_at,activation_claim_key,expires_at,created_at,updated_at')
     .eq('agreement_id', agreementId)
     .maybeSingle();
   if (error) throw new Error(error.message || 'Public purchase intent lookup failed');
@@ -549,36 +561,6 @@ async function findAuthUserById(authAdmin, userId, logger = console) {
   }
 }
 
-async function generatePasswordSetupUrl({ authAdmin, email, clientId, requestId, logger = console } = {}) {
-  const normalizedEmail = lowerEmail(email);
-  if (!authAdmin?.generateLink || !normalizedEmail) return '';
-
-  const redirectTo = buildClientPwResetUrl({
-    origin: 'client',
-    checkout: 'success',
-    client_id: cleanText(clientId)
-  });
-
-  try {
-    const link = await authAdmin.generateLink({
-      type: 'recovery',
-      email: normalizedEmail,
-      options: { redirectTo }
-    });
-    if (link?.error) throw link.error;
-    return cleanText(link?.data?.action_link || link?.data?.properties?.action_link);
-  } catch (error) {
-    logger.warn?.('[public-purchase-activation] setup_link_generation_failed', {
-      request_id: requestId || null,
-      email: redactEmail(normalizedEmail),
-      client_id: cleanText(clientId) || null,
-      error: error?.message || error,
-      code: error?.code || null
-    });
-    return '';
-  }
-}
-
 async function loadExistingMembership(db, clientId, email, userId) {
   const { data, error } = await db
     .from('client_members')
@@ -649,7 +631,9 @@ async function ensureBuyerAccountSetup({
   requestId,
   logger,
   ensureRecovery,
-  sendRecoveryEmail
+  sendRecoveryEmail,
+  assertFence = async () => {},
+  activationClaimKey = null
 }) {
   const buyerEmail = lowerEmail(intent?.buyer_email || agreement?.admin_email);
   if (!buyerEmail) {
@@ -670,6 +654,7 @@ async function ensureBuyerAccountSetup({
   let userId = cleanText(existingAuthUser?.id);
 
   if (!userId) {
+    await assertFence();
     const ensured = await ensureRecovery({
       email: buyerEmail,
       redirectTo,
@@ -681,6 +666,7 @@ async function ensureBuyerAccountSetup({
 
     const actionLink = cleanText(ensured?.actionLink);
     if (actionLink) {
+      await assertFence();
       try {
         const emailResult = await sendRecoveryEmail(buyerEmail, actionLink, buyerName);
         setupEmailStatus = emailResult?.statusCode === 202
@@ -712,13 +698,24 @@ async function ensureBuyerAccountSetup({
     throw err;
   }
 
-  const membership = await upsertBuyerMembership({
-    db,
-    clientId,
-    email: buyerEmail,
-    name: buyerName,
-    userId
-  });
+  await assertFence();
+  let membership;
+  if (intent?.id && activationClaimKey) {
+    const { data, error } = await db.rpc('ensure_public_purchase_buyer_member', {
+      p_intent_id: intent.id,
+      p_claim_key: activationClaimKey,
+      p_user_id: userId,
+      p_name: buyerName
+    });
+    if (error || !['created', 'existing', 'updated'].includes(data?.status)) {
+      const failure = new Error(error?.message || `Buyer membership refused: ${data?.status || 'unknown'}`);
+      failure.code = data?.status || error?.code || 'member_rpc_failed';
+      throw failure;
+    }
+    membership = data;
+  } else {
+    membership = await upsertBuyerMembership({ db, clientId, email: buyerEmail, name: buyerName, userId });
+  }
 
   return {
     auth_status: authStatus,
@@ -727,6 +724,80 @@ async function ensureBuyerAccountSetup({
     member_role: membership.role,
     setup_email_status: setupEmailStatus
   };
+}
+
+async function sendFencedWelcomeEmail({ db, intent, agreement, clientId, buyerEmail, buyerName,
+  claimKey, sendWelcomeEmail, assertFence, logger }) {
+  await assertFence();
+  const { data: reservation, error: reserveError } = await db.rpc('reserve_public_purchase_welcome', {
+    p_intent_id: intent.id, p_claim_key: claimKey
+  });
+  if (reserveError) throw new Error(reserveError.message || 'Welcome reservation failed');
+  if (reservation?.status !== 'reserved') {
+    if (['sent', 'skipped', 'manual_suppressed', 'sending'].includes(reservation?.status)) {
+      return reservation.status === 'sent' ? 'already_sent' : reservation.status;
+    }
+    const error = new Error(`Welcome reservation refused: ${reservation?.status || 'unknown'}`);
+    error.code = reservation?.status || 'welcome_reservation_refused';
+    throw error;
+  }
+  await assertFence();
+  const { data: begun, error: beginError } = await db.rpc('begin_public_purchase_welcome', {
+    p_intent_id: intent.id, p_claim_key: claimKey
+  });
+  if (beginError || begun?.status !== 'sending' || !begun?.send_token) {
+    const error = new Error(beginError?.message || `Welcome begin refused: ${begun?.status || 'unknown'}`);
+    error.code = begun?.status || 'welcome_begin_refused';
+    throw error;
+  }
+  if (lowerEmail(begun.buyer_email) !== buyerEmail ||
+    cleanText(begun.client_id) !== clientId ||
+    cleanText(begun.agreement_id) !== cleanText(agreement.id)) {
+    const error = new Error('Locked welcome recipient or purchase context changed');
+    error.code = 'welcome_context_mismatch';
+    throw error;
+  }
+  // Once `sending` commits, timeout, crash, or an unknown provider response
+  // remains ambiguous. It is never converted to an automatic retry.
+  const finish = async (result, response) => {
+    const { data, error } = await db.rpc('finish_public_purchase_welcome', {
+      p_intent_id: intent.id, p_send_token: begun.send_token,
+      p_result: result, p_response: response
+    });
+    if (error || data?.status !== result) {
+      const failure = new Error(error?.message || `Welcome finish refused: ${data?.status || 'unknown'}`);
+      failure.code = data?.status || 'welcome_finish_failed';
+      throw failure;
+    }
+  };
+  // An explicit false from the lease check prevents the provider call; the
+  // ledger stays ambiguous until an operator confirms no send occurred.
+  await assertFence();
+  try {
+    const firstName = cleanText(intent.buyer_first_name) || cleanText(buyerName).split(/\s+/)[0] || '';
+    const result = await sendWelcomeEmail(buyerEmail, {
+      firstName, recipientName: buyerName, clientId,
+      agreementId: agreement.id, purchaseIntentId: intent.id
+    });
+    if (result?.statusCode === 202) {
+      await finish('sent', 'status:202');
+      return 'sent';
+    }
+    if (result?.skipped === true) {
+      await finish('skipped', 'email_skipped');
+      return 'skipped';
+    }
+    // An unclassified response is not a definitive provider rejection.
+    logger.warn?.('[public-purchase-activation] welcome_email_ambiguous', {
+      purchase_intent_id: intent.id, status_code: result?.statusCode || null
+    });
+    return 'sending';
+  } catch (error) {
+    logger.error?.('[public-purchase-activation] welcome_email_ambiguous', {
+      purchase_intent_id: intent.id, error: error?.message || String(error)
+    });
+    return 'sending';
+  }
 }
 
 async function activatePublicPurchaseAgreementCheckout(options = {}) {
@@ -752,6 +823,9 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
   if (!agreement) return { ok: false, status: 'agreement_not_found' };
 
   const intent = await loadPublicPurchaseIntent(db, agreement);
+  if (intent?.id && cleanText(intent.protocol) === 'legacy_complete') {
+    return { ok: false, status: 'historical_complete', purchase_intent_id: intent.id };
+  }
   if (cleanText(agreement.superseded_by_agreement_id) || (intent?.agreement_id && cleanText(intent.agreement_id) !== agreementId)) {
     logger.warn?.('[public-purchase-activation] superseded_agreement_payment_requires_review', {
       agreement_id: agreementId,
@@ -777,21 +851,70 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     fallbackBillingInterval: options.fallbackBillingInterval
   });
 
-  const clientId = await ensureLinkedClient({
-    db,
-    agreement,
-    intent,
-    planKey,
-    billingInterval,
-    fallbackClientId: options.fallbackClientId
-  });
+  const assertFence = options.assertActivationFence || (async () => {});
+  const claimKey = cleanText(options.activationClaimKey);
+  if (intent?.id && cleanText(intent.protocol) === 'fenced_v2' && !claimKey) {
+    const error = new Error('Fenced public purchase requires an activation claim');
+    error.code = 'activation_claim_required';
+    throw error;
+  }
+  let clientId;
+  if (intent?.id && claimKey) {
+    await assertFence();
+    const linkedClientId = cleanText(agreement.client_id || intent.client_id || options.fallbackClientId);
+    const proposedClientId = linkedClientId || stablePurchaseClientId(intent.id);
+    const paidDate = new Date(paidAt);
+    if (!Number.isFinite(paidDate.getTime())) throw new Error('Invalid public purchase payment timestamp');
+    const renewalDate = new Date(Date.UTC(
+      paidDate.getUTCFullYear() + 1,
+      paidDate.getUTCMonth(),
+      paidDate.getUTCDate()
+    )).toISOString().slice(0, 10);
+    const { data: prepared, error: prepareError } = await db.rpc('complete_public_purchase_activation', {
+      p_agreement_id: agreementId,
+      p_claim_key: claimKey,
+      p_paid_at: paidAt,
+      p_checkout_session_id: checkoutSessionId || null,
+      p_client_id: proposedClientId,
+      p_create_client: !linkedClientId,
+      p_plan_key: planKey,
+      p_billing_interval: billingInterval,
+      p_term_start: paidDate.toISOString().slice(0, 10),
+      p_renewal_date: renewalDate
+    });
+    if (prepareError) throw new Error(prepareError.message || 'Public purchase completion failed');
+    if (prepared?.status !== 'completed' || !prepared.client_id) {
+      const err = new Error(`Public purchase completion refused: ${prepared?.status || 'unknown'}`);
+      err.code = prepared?.status || 'public_purchase_completion_refused';
+      throw err;
+    }
+    clientId = cleanText(prepared.client_id);
+    agreement.client_id = clientId;
+    intent.client_id = clientId;
+    intent.status = 'completed';
+    intent.activated_at = cleanText(prepared.paid_at) || paidAt;
+    agreement.checkout_status = 'paid';
+    agreement.checkout_paid_at = cleanText(prepared.paid_at) || paidAt;
+  } else {
+    clientId = await ensureLinkedClient({
+      db,
+      agreement,
+      intent,
+      planKey,
+      billingInterval,
+      fallbackClientId: options.fallbackClientId
+    });
+  }
   const { data: existingClientState, error: existingClientStateErr } = await db
     .from('clients')
-    .select('id,billing_status,subscription_status')
+    .select('id,billing_status,subscription_status,contract_start_at,contract_end_at,current_term_end')
     .eq('id', clientId)
     .maybeSingle();
   if (existingClientStateErr) throw new Error(existingClientStateErr.message || 'Client activation state lookup failed');
   const agreementAlreadyPaid = cleanText(agreement.checkout_status).toLowerCase() === 'paid';
+  // Replayed checkout events and later invoices must never move the original
+  // sale's paid/activated date into another payroll period.
+  const activationPaidAt = cleanText(agreement.checkout_paid_at || intent?.activated_at) || paidAt;
   const clientAlreadyActive = isLiveClientActivationState(existingClientState);
   const parentGuard = await requireParent(db, clientId, {
     route: 'public_purchase_webhook_activation',
@@ -806,12 +929,114 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
   }
   const billingClientId = cleanText(parentGuard.clientId || clientId) || clientId;
 
+  if (intent?.id && claimKey) {
+    if (cleanText(intent.protocol) !== 'fenced_v2') {
+      const error = new Error('Historical purchase requires manual tail reconciliation');
+      error.code = 'billing_protocol_manual_review';
+      throw error;
+    }
+    if (billingClientId !== clientId) {
+      const error = new Error('Public purchase must bill its own parent client');
+      error.code = 'billing_parent_mismatch';
+      throw error;
+    }
+    const subscriptionStartAt = toIsoFromUnixSeconds(options.subscription?.start_date) ||
+      toIsoFromUnixSeconds(options.subscription?.created);
+    if (!pickId(options.subscription?.id) || !subscriptionStartAt ||
+      !LIVE_SUBSCRIPTION_STATUSES.has(cleanText(options.subscription?.status).toLowerCase())) {
+      const error = new Error('A live Stripe subscription snapshot is required for fenced activation');
+      error.code = 'activation_subscription_snapshot_missing';
+      throw error;
+    }
+    const clientPayload = buildClientActivationPayload({
+      agreement, subscription: options.subscription, planKey, billingInterval,
+      fallbackCustomerId: options.fallbackCustomerId,
+      fallbackSubscriptionId: options.fallbackSubscriptionId
+    });
+    // A retry without Stripe's original start timestamp must not invent a new
+    // digest from the current wall clock.
+    clientPayload.contract_start_at = cleanText(existingClientState?.contract_start_at) ||
+      subscriptionStartAt;
+    clientPayload.contract_end_at = cleanText(existingClientState?.contract_end_at) ||
+      addMonthsToIso(clientPayload.contract_start_at, 12);
+    clientPayload.current_term_end = cleanText(existingClientState?.current_term_end) ||
+      clientPayload.current_term_end || clientPayload.contract_end_at;
+    const planPayload = buildAlphaScreenPlanSettingsPayload({ clientId, planKey, billingInterval });
+    if (!planPayload) throw new Error('Public purchase plan settings are invalid');
+    const credit = getFirstRolePrepaySnapshot(packageSnapshot);
+    const creditSelected = credit?.selected === true;
+    await assertFence();
+    const { data: billing, error: billingError } = await db.rpc('apply_public_purchase_billing', {
+      p_intent_id: intent.id,
+      p_claim_key: claimKey,
+      p_client_id: clientId,
+      p_billing_client_id: billingClientId,
+      p_stripe_customer_id: clientPayload.stripe_customer_id,
+      p_stripe_subscription_id: clientPayload.stripe_subscription_id,
+      p_subscription_status: clientPayload.subscription_status,
+      p_billing_status: clientPayload.billing_status,
+      p_billing_interval: clientPayload.billing_interval,
+      p_plan_tier: clientPayload.plan_tier,
+      p_current_term_end: clientPayload.current_term_end,
+      p_cancel_at_term_end: clientPayload.cancel_at_term_end,
+      p_auto_renew: clientPayload.auto_renew,
+      p_cancel_effective_at: clientPayload.cancel_effective_at,
+      p_contract_start_at: clientPayload.contract_start_at,
+      p_contract_end_at: clientPayload.contract_end_at,
+      p_platform_fee: planPayload.platform_fee,
+      p_per_role_fee: planPayload.per_role_fee,
+      p_included_interviews_per_role: planPayload.included_interviews_per_role,
+      p_additional_interview_fee: planPayload.additional_interview_fee,
+      p_max_interview_minutes: planPayload.max_interview_minutes,
+      p_credit_selected: creditSelected,
+      p_credit_type: creditSelected ? credit.credit_type : null,
+      p_credit_normal_role_fee_cents: creditSelected ? credit.normal_role_fee_cents : null,
+      p_credit_discounted_amount_cents: creditSelected ? credit.discounted_credit_amount_cents : null,
+      p_credit_discount_percent: creditSelected ? credit.discount_percent : null,
+      p_credit_non_refundable: creditSelected ? credit.non_refundable === true : null,
+      p_credit_expires: creditSelected ? credit.expires === true : null
+    });
+    if (billingError || !['applied', 'already_applied'].includes(billing?.status)) {
+      const error = new Error(billingError?.message || `Billing refused: ${billing?.status || 'unknown'}`);
+      error.code = billing?.status || billingError?.code || 'billing_rpc_failed';
+      throw error;
+    }
+    await assertFence();
+    const setup = await ensureBuyerAccountSetup({
+      db, authAdmin, clientId, agreement, intent, requestId: options.requestId || null,
+      logger, ensureRecovery, sendRecoveryEmail, assertFence,
+      activationClaimKey: claimKey
+    });
+    const buyerEmail = lowerEmail(intent.buyer_email);
+    const buyerName = buildBuyerName(intent, agreement) || buyerEmail;
+    const welcomeEmailStatus = await sendFencedWelcomeEmail({
+      db, intent, agreement, clientId, buyerEmail, buyerName, claimKey,
+      sendWelcomeEmail, assertFence, logger
+    });
+    let salesWonDeliveryStatus = 'not_applicable';
+    if (cleanText(intent.channel).toLowerCase() === 'sales_assisted') {
+      await assertFence();
+      const delivery = await enqueueSalesWonDelivery(intent.id, { db });
+      salesWonDeliveryStatus = delivery.status;
+    }
+    return {
+      ok: true, agreement_id: agreementId, purchase_intent_id: intent.id,
+      client_id: clientId, plan_key: planKey, billing_interval: billingInterval,
+      plan_settings: planPayload, member_status: setup.member_status,
+      member_role: setup.member_role, auth_status: setup.auth_status,
+      setup_email_status: setup.setup_email_status,
+      welcome_email_status: welcomeEmailStatus,
+      first_role_credit_status: creditSelected ? (billing.status === 'applied' ? 'created' : 'already_created') : 'not_selected',
+      sales_won_delivery_status: salesWonDeliveryStatus
+    };
+  }
+
   const agreementPaidPayload = {
     checkout_status: 'paid',
-    checkout_paid_at: paidAt
   };
-  if (cleanText(intent?.term_start_basis).toLowerCase() === 'successful_payment') {
-    const paidDate = new Date(paidAt);
+  if (!agreement.checkout_paid_at) agreementPaidPayload.checkout_paid_at = activationPaidAt;
+  if (!agreement.checkout_paid_at && cleanText(intent?.term_start_basis).toLowerCase() === 'successful_payment') {
+    const paidDate = new Date(activationPaidAt);
     if (!Number.isNaN(paidDate.getTime())) {
       const initialTermStart = paidDate.toISOString().slice(0, 10);
       const renewal = new Date(Date.UTC(
@@ -823,21 +1048,23 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
       agreementPaidPayload.initial_renewal_date = renewal.toISOString().slice(0, 10);
     }
   }
-  if (checkoutSessionId) agreementPaidPayload.checkout_session_id = checkoutSessionId;
-  const { error: agreementUpdateErr } = await db
-    .from('membership_agreements')
-    .update(agreementPaidPayload)
-    .eq('id', agreementId);
-  if (agreementUpdateErr) throw new Error(agreementUpdateErr.message || 'Agreement checkout status update failed');
+  if (checkoutSessionId && !agreement.checkout_session_id) agreementPaidPayload.checkout_session_id = checkoutSessionId;
+  if (!claimKey) {
+    const { error: agreementUpdateErr } = await db
+      .from('membership_agreements')
+      .update(agreementPaidPayload)
+      .eq('id', agreementId);
+    if (agreementUpdateErr) throw new Error(agreementUpdateErr.message || 'Agreement checkout status update failed');
+  }
 
-  if (intent?.id) {
+  if (intent?.id && !claimKey) {
     const intentPayload = {
       status: 'completed',
       client_id: clientId,
-      activated_at: paidAt,
-      updated_at: paidAt
+      updated_at: activationPaidAt
     };
-    if (checkoutSessionId) intentPayload.stripe_checkout_session_id = checkoutSessionId;
+    if (!intent.activated_at) intentPayload.activated_at = activationPaidAt;
+    if (checkoutSessionId && !intent.stripe_checkout_session_id) intentPayload.stripe_checkout_session_id = checkoutSessionId;
     let intentCompletionQuery = db
       .from('public_purchase_intents')
       .update(intentPayload)
@@ -873,6 +1100,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     fallbackCustomerId: options.fallbackCustomerId,
     fallbackSubscriptionId: options.fallbackSubscriptionId
   });
+  await assertFence();
   const { error: clientUpdateErr } = await db
     .from('clients')
     .update(clientActivationPayload)
@@ -888,11 +1116,13 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
   const planSettingsUpsert = planSettingsPayload
     ? { ...planSettingsPayload, billing_model: defaultBillingModelForPlanTier(planSettingsPayload.plan_tier) }
     : planSettingsPayload;
+  await assertFence();
   const { error: settingsErr } = await db
     .from('client_plan_settings')
     .upsert(planSettingsUpsert, { onConflict: 'client_id' });
   if (settingsErr) throw new Error(settingsErr.message || 'Client plan settings upsert failed');
 
+  await assertFence();
   const firstRoleCreditStatus = await createFirstRolePrepayCredit({
     db,
     agreement,
@@ -902,10 +1132,11 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     packageSnapshot,
     planKey,
     checkoutSessionId,
-    nowIso: paidAt,
+    nowIso: activationPaidAt,
     logger
   });
 
+  await assertFence();
   const setup = await ensureBuyerAccountSetup({
     db,
     authAdmin,
@@ -915,7 +1146,8 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
     requestId: options.requestId || null,
     logger,
     ensureRecovery,
-    sendRecoveryEmail
+    sendRecoveryEmail,
+    assertFence
   });
   let welcomeEmailStatus = 'not_sent';
   const buyerEmail = lowerEmail(intent?.buyer_email || agreement?.admin_email);
@@ -933,6 +1165,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
   });
   const shouldSendWelcome = publicPurchaseWelcomeEligible;
   if (shouldSendWelcome) {
+    await assertFence();
     try {
       welcomeEmailStatus = await sendWelcomeEmailOnce({
         db,
@@ -942,10 +1175,12 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
         buyerEmail,
         buyerName,
         sendWelcomeEmail,
+        assertFence,
         logger,
-        nowIso: paidAt
+        nowIso: activationPaidAt
       });
     } catch (error) {
+      if (error?.code === 'activation_fence_lost') throw error;
       welcomeEmailStatus = 'ledger_unavailable';
       logger.error?.('[public-purchase-activation] welcome_email_ledger_failed', {
         email: redactEmail(buyerEmail),
@@ -959,6 +1194,7 @@ async function activatePublicPurchaseAgreementCheckout(options = {}) {
 
   let salesWonDeliveryStatus = 'not_applicable';
   if (cleanText(intent?.channel).toLowerCase() === 'sales_assisted' && intent?.id) {
+    await assertFence();
     try {
       const delivery = await enqueueSalesWonDelivery(intent.id, { db });
       salesWonDeliveryStatus = delivery.status;
@@ -994,7 +1230,6 @@ async function resolvePublicCheckoutReturnState(options = {}) {
   const db = options.db || supabaseAdmin;
   const authAdmin = options.authAdmin || supabaseAdmin.auth?.admin;
   const logger = options.logger || console;
-  const requestId = options.requestId || null;
   const sessionId = cleanText(options.sessionId);
   const fallbackClientId = cleanText(options.fallbackClientId);
   const fallbackAgreementId = cleanText(options.agreementId);
@@ -1069,29 +1304,10 @@ async function resolvePublicCheckoutReturnState(options = {}) {
 
   const authUser = await findAuthUserById(authAdmin, member.user_id, logger);
   if (!cleanText(authUser?.last_sign_in_at)) {
-    const setupEmail = lowerEmail(buyerEmail || member.email || authUser?.email || agreement?.admin_email);
-    const setPasswordUrl = await generatePasswordSetupUrl({
-      authAdmin,
-      email: setupEmail,
-      clientId,
-      requestId,
-      logger
-    });
-    if (setPasswordUrl) {
-      return {
-        status: 'password_required',
-        client_id: clientId,
-        password_setup_required: true,
-        direct_setup_available: true,
-        set_password_url: setPasswordUrl
-      };
-    }
-
     return {
-      status: 'setup_email_sent',
+      status: 'password_required',
       client_id: clientId,
-      password_setup_required: true,
-      setup_email_sent: true
+      password_setup_required: true
     };
   }
 
@@ -1104,5 +1320,4 @@ module.exports = {
   buildClientActivationPayload,
   findAuthUserByEmail,
   findAuthUserById,
-  generatePasswordSetupUrl
 };

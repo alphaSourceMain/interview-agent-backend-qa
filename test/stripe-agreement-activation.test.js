@@ -25,10 +25,26 @@ function injectModule(filename, exports) {
   require.cache[filename] = { id: filename, filename, loaded: true, exports };
 }
 
-// Records every write so the test can assert on side effects.
+// Records every write so the test can assert on side effects. rpc answers the
+// activation claim, heartbeat and release functions the way the database does for
+// an unclaimed intent, and reports a missing intent when there is none.
 function makeDb(rows) {
   const db = {
     writes: [],
+    rpcs: [],
+    async rpc(name, args) {
+      db.rpcs.push({ name, args });
+      const intent = rows.public_purchase_intents;
+      if (name === 'claim_public_purchase_activation') {
+        return intent
+          ? { data: { status: 'claimed', intent_id: intent.id }, error: null }
+          : { data: { status: 'purchase_intent_missing' }, error: null };
+      }
+      if (name === 'heartbeat_public_purchase_activation' || name === 'release_public_purchase_activation') {
+        return { data: true, error: null };
+      }
+      throw new Error(`Unexpected RPC: ${name}`);
+    },
     from(table) {
       const q = {
         _t: table,

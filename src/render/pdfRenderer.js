@@ -8,8 +8,7 @@
  *  4) Final static fallback: /usr/bin/chromium
  */
 
-const chromium = require('@sparticuz/chromium');
-const puppeteer = require('puppeteer-core');
+const { chromium, puppeteer, browserLaunchOptions } = require('./browserRuntime');
 const fs = require('fs');
 const { promisify } = require('util');
 const { execFile } = require('child_process');
@@ -17,6 +16,12 @@ const execFileAsync = promisify(execFile);
 
 async function resolveExecPath() {
   const envPath = (process.env.PUPPETEER_EXECUTABLE_PATH || '').trim();
+  if (process.env.APP_ENV === 'development') {
+    // Linux dev must use the pinned package, never an inherited system browser.
+    if (process.platform === 'linux') return chromium.executablePath();
+    if (envPath && fs.existsSync(envPath)) return envPath; // isolated macOS smoke test
+    throw new Error('dev_pdf_matching_browser_required');
+  }
   if (envPath) {
     if (fs.existsSync(envPath)) return envPath;
     console.warn('[pdfRenderer] env PUPPETEER_EXECUTABLE_PATH not found on disk:', envPath);
@@ -48,19 +53,24 @@ async function htmlToPdf(html, options = {}) {
   let browser;
   const executablePath = await resolveExecPath(); // <- ensure string, not Promise
 
-  const launchCommon = {
-    executablePath,
-    defaultViewport: chromium.defaultViewport,
-    args: process.platform === 'darwin' ? chromium.args.filter(arg => !['--single-process', '--no-zygote', '--in-process-gpu'].includes(arg) && !arg.startsWith('--headless')) : chromium.args,
-    headless: process.platform === 'darwin' ? true : chromium.headless,
-    protocolTimeout: 90_000
-  };
+  const launchCommon = await browserLaunchOptions(executablePath);
 
   try {
     console.log('[pdfRenderer] launching Chromium at', launchCommon.executablePath);
     browser = await puppeteer.launch(launchCommon);
 
     const page = await browser.newPage();
+    if (process.env.APP_ENV === 'development') {
+      // Dev renders inline data only; never fetch source/prod assets or local files.
+      await page.setJavaScriptEnabled(false); // also prevents WebSocket/fetch/script egress
+      await page.setBypassServiceWorker(true);
+      await page.setRequestInterception(true);
+      page.on('request', request => {
+        const url = request.url();
+        if (url === 'about:blank' || url.startsWith('data:')) void request.continue().catch(() => {});
+        else void request.abort('blockedbyclient').catch(() => {});
+      });
+    }
     await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 2 });
 
     // Load content and wait for network to settle

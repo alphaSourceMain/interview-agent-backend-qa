@@ -38,11 +38,10 @@ function networkAction(url, method) {
 }
 
 async function launchBrowser() {
-  const puppeteer = require('puppeteer-core');
-  const chromium = require('@sparticuz/chromium');
-  return puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || await chromium.executablePath(),
-    args: [...chromium.args, '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
-      '--autoplay-policy=no-user-gesture-required'], headless: true, protocolTimeout: 45000 });
+  const { puppeteer, browserLaunchOptions } = require('../render/browserRuntime');
+  const options = await browserLaunchOptions(process.env.PUPPETEER_EXECUTABLE_PATH,
+    ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required']);
+  return puppeteer.launch({ ...options, protocolTimeout: 45000 });
 }
 
 async function runSyntheticInterview({ id, scenario, signal, update }, dependencies = {}) {

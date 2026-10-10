@@ -129,16 +129,12 @@ app.use('/webhooks/ghl', createGhlSalesWebhookRouter({ db: supabaseAdmin, env: p
 
 // ---------- CORS ----------
 const DEFAULT_ORIGINS = corsDefaultOrigins
-const envOrigins = (process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean)
-
-const ALLOWLIST = Array.from(new Set([
-  ...DEFAULT_ORIGINS,
-  FRONTEND_URL.replace(/\/+$/, ''),
-  ...envOrigins
-].filter(Boolean)))
+const ALLOWLIST = require('./src/config/corsOrigins').resolveCorsOrigins({
+  env: process.env, frontendUrl: FRONTEND_URL, defaultOrigins: DEFAULT_ORIGINS
+})
+if (process.env.APP_ENV === 'development' && ALLOWLIST.length !== 1) {
+  throw new Error('dev_cors_origin_configuration_invalid')
+}
 
 app.use(cors({
   origin: (origin, cb) => {

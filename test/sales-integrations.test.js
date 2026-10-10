@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
 
-const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js');
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'clients', 'supabase.js');
 require.cache[supabaseClientPath] = {
   id: supabaseClientPath,
   filename: supabaseClientPath,
@@ -19,11 +19,11 @@ const {
   buildSlackSalesWonMessage,
   postSlackMessage,
   retryDelaySeconds
-} = require('../src/lib/salesIntegrations');
+} = require('../src/services/salesIntegrations');
 const {
   createInternalSalesIntegrationsRouter,
   secretMatches
-} = require('../routes/internalSalesIntegrations');
+} = require('../src/routes/internal/salesIntegrations');
 
 const DELIVERY_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -211,7 +211,7 @@ test('Slack worker rejects an invalid stored member ID before making a network r
 });
 
 test('sales-won reconciliation separates team posts from mapped representative DMs', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'salesIntegrations.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'salesIntegrations.js'), 'utf8');
   assert.match(source, /\.is\('sales_won_enqueued_at', null\)/);
   assert.match(source, /\.is\('sales_rep_slack_enqueued_at', null\)[\s\S]*\.in\('created_by_user_id', mappedUserIds\)/);
   assert.doesNotMatch(source, /\.or\('sales_won_enqueued_at\.is\.null,sales_rep_slack_enqueued_at\.is\.null'\)/);

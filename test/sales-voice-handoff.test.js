@@ -19,7 +19,7 @@ const {
   salesVoiceProviderEnabled,
   validateSalesVoiceMessage,
   voiceContext,
-} = require('../src/lib/salesVoiceHandoff');
+} = require('../src/services/salesVoiceHandoff');
 
 const TOKEN = 'm'.repeat(48);
 const route = {

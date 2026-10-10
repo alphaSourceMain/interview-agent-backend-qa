@@ -5,7 +5,7 @@ const { test } = require('node:test');
 
 const {
   getRoleInterviewAvailability,
-} = require('../src/lib/roleInterviewAvailability');
+} = require('../src/services/roleInterviewAvailability');
 
 const CLIENT_ID = '11111111-1111-4111-8111-111111111111';
 const ROLE_ID = '22222222-2222-4222-8222-222222222222';
@@ -27,9 +27,20 @@ class FakeQuery {
     return this;
   }
 
+  // The allocation reads by billing family, so it filters with in() as well as
+  // eq().
+  in(column, values) {
+    this.filters.push([column, values, 'in']);
+    return this;
+  }
+
   filteredRows() {
     return (this.db.tables[this.table] || []).filter((row) => (
-      this.filters.every(([column, value]) => String(row?.[column] ?? '') === String(value ?? ''))
+      this.filters.every(([column, value, op]) => (
+        op === 'in'
+          ? (value || []).some((entry) => String(entry ?? '') === String(row?.[column] ?? ''))
+          : String(row?.[column] ?? '') === String(value ?? '')
+      ))
     ));
   }
 
@@ -51,6 +62,11 @@ function createDatabase(interviews) {
     tables: {
       clients: [{ id: CLIENT_ID, parent_client_id: null }],
       client_plan_settings: [{ client_id: CLIENT_ID, included_interviews_per_role: 5 }],
+      // The allocation is role-aware: a role's allowance is its included count
+      // plus whatever was bought for it, so the role has to exist.
+      roles: [{ id: ROLE_ID, client_id: CLIENT_ID, title: 'Hygienist', status: 'active' }],
+      interview_credits: [],
+      client_interview_pools: [],
       role_interview_purchases: [{
         client_id: CLIENT_ID,
         role_id: ROLE_ID,
@@ -106,11 +122,18 @@ test('no-substantive interviews do not consume role capacity', async () => {
     },
   ]);
 
+  // The last four keys arrived with the billing models. This client has no
+  // stored model, so the plan tier decides it; with no tier it is the default.
   assert.deepEqual(availability, {
     included_interviews_per_role: 5,
     purchased_interviews: 2,
     used_interviews: 0,
     remaining_interviews: 7,
+    own_remaining_interviews: 7,
+    credit_interviews: 0,
+    pool_remaining_interviews: 0,
+    credit_drawn_offset: 0,
+    billing_model: 'fixed',
   });
 
   const interviewSelect = db.selects.find(({ table }) => table === 'interviews');

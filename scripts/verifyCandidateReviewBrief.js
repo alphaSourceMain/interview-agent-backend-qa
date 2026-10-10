@@ -4,10 +4,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { buildFixture } = require('../demo/northstar');
-const { buildCandidateReportPayload } = require('../utils/candidateReportData');
-const { buildCandidateReportHtml, getCandidateReportPdfOptions } = require('../utils/renderCandidateReport');
-const { buildMembershipAgreementHtml } = require('../utils/renderMembershipAgreement');
-const { htmlToPdf } = require('../utils/pdfRenderer');
+const { buildCandidateReportPayload } = require('../src/render/candidateReportData');
+const { buildCandidateReportHtml, getCandidateReportPdfOptions } = require('../src/render/candidateReport');
+const { buildMembershipAgreementHtml } = require('../src/render/membershipAgreement');
+const { htmlToPdf } = require('../src/render/pdfRenderer');
 
 async function main() {
   const output = path.resolve(process.argv[2] || 'tmp/pdfs/review-brief');

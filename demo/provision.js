@@ -1,5 +1,5 @@
 'use strict';
-const { DEMO_CLIENT_ID, isQa } = require('../src/lib/salesDemo');
+const { DEMO_CLIENT_ID, isQa } = require('../src/services/salesDemo');
 const USERS = [{email:'michael@alphasourceai.com',name:'Michael Afesi'}, {email:'russell@alphasourceai.com',name:'Russell Muchenge'}];
 function checked(result) { if (result.error) throw new Error('demo_provision_lookup_failed'); return result.data; }
 async function verifyGrants(db, user) {

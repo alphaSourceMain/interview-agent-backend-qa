@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { applyGhlRouting, clearGhlRouting, restoreGhlRouting, syncGhl, verifySlack, verifyXai } = require('../src/lib/salesTeamProviderSync');
+const { applyGhlRouting, clearGhlRouting, restoreGhlRouting, syncGhl, verifySlack, verifyXai } = require('../src/services/salesTeamProviderSync');
 
 const env = {
   SALES_TEAM_PROVIDER_SYNC_ENABLED: 'true',

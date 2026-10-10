@@ -4,11 +4,12 @@ const assert = require('node:assert/strict')
 const express = require('express')
 const http = require('node:http')
 const path = require('node:path')
+const projectRoot = path.resolve(__dirname, '..')
 const { test } = require('node:test')
 
-const routePath = path.join(__dirname, '..', 'routes', 'alphaScreenPackages.js')
-const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
-const rateLimitPath = path.join(__dirname, '..', 'src', 'lib', 'rateLimit.js')
+const routePath = path.join(__dirname, '..', 'src', 'routes', 'public', 'alphascreen', 'index.js')
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'clients', 'supabase.js')
+const rateLimitPath = path.join(__dirname, '..', 'src', 'services', 'rateLimit.js')
 const STALE_ANNUAL_PRICE_PATTERN = new RegExp([
   String(3229 + 0.2).replace('.', '\\.'),
   String(322900 + 20),
@@ -168,6 +169,13 @@ function makeDb(options = {}) {
 }
 
 function buildApp(db, env = {}) {
+  // The router is assembled from several files that each cache the modules stubbed
+  // below, so every first-party module reloads on each build.
+  for (const cached of Object.keys(require.cache)) {
+    if (cached.startsWith(projectRoot) && !cached.includes('node_modules')) {
+      delete require.cache[cached]
+    }
+  }
   delete require.cache[routePath]
   delete require.cache[supabaseClientPath]
   delete require.cache[rateLimitPath]
@@ -271,7 +279,7 @@ test('valid Essential monthly intent creates pending intent with central package
   assert.equal(response.body.selected_package.annual_platform_fee_note, 'Discounted annual platform fee')
   assert.equal(response.body.selected_package.included_interviews, 20)
   assert.equal(response.body.selected_package.interview_duration_minutes, 10)
-  assert.equal(response.body.selected_package.additional_interview_price, 30)
+  assert.equal(response.body.selected_package.additional_interview_price, 25)
   assert.equal(response.body.selected_package.per_role_fee, 399)
   assert.equal(response.body.selected_package.first_role_prepay.selected, false)
   assert.equal(response.body.selected_package.first_role_prepay.discounted_credit_amount_cents, 35900)
@@ -321,7 +329,7 @@ test('valid Pro annual intent creates pending intent when annual cadence is supp
   assert.equal(response.body.selected_package.annual_platform_fee_note, 'Discounted annual platform fee')
   assert.equal(response.body.selected_package.included_interviews, 30)
   assert.equal(response.body.selected_package.max_interview_minutes, 12)
-  assert.equal(response.body.selected_package.additional_interview_fee, 35)
+  assert.equal(response.body.selected_package.additional_interview_fee, 30)
   assert.equal(response.body.selected_package.first_role_prepay.selected, false)
   assert.equal(response.body.selected_package.first_role_prepay.discounted_credit_amount_cents, 62900)
   assert.equal(db.inserts[0].row.package_snapshot.per_role_fee, 699)
@@ -514,9 +522,9 @@ test('duplicate pending intent returns existing safe response without inserting'
         included_interviews_per_role: 20,
         interview_duration_minutes: 10,
         max_interview_minutes: 10,
-        additional_interview_price: 30,
-        additional_interview_fee: 30,
-        overage_price: 30,
+        additional_interview_price: 25,
+        additional_interview_fee: 25,
+        overage_price: 25,
         per_role_fee: 399
       }
     }

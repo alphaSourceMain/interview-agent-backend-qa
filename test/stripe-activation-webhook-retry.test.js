@@ -49,13 +49,13 @@ const fakeDb = {
     return query
   }
 }
-const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'clients', 'supabase.js')
 require.cache[supabaseClientPath] = {
   id: supabaseClientPath, filename: supabaseClientPath, loaded: true,
   exports: { supabaseAdmin: fakeDb }
 }
 
-const router = require('../routes/webhookStripe')
+const router = require('../src/routes/webhooks/stripe')
 const handler = router.stack.find((layer) => layer.route?.path === '/').route.stack[0].handle
 
 async function invoke(event) {

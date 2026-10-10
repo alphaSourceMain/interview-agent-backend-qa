@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 const { test } = require('node:test')
 
-const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'clients', 'supabase.js')
 require.cache[supabaseClientPath] = {
   id: supabaseClientPath,
   filename: supabaseClientPath,

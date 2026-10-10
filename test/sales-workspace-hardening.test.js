@@ -5,7 +5,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { test } = require('node:test')
 
-const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'clients', 'supabase.js')
 require.cache[supabaseClientPath] = {
   id: supabaseClientPath,
   filename: supabaseClientPath,
@@ -13,15 +13,15 @@ require.cache[supabaseClientPath] = {
   exports: { supabaseAdmin: {} }
 }
 
-const { promotionEligibilityError, replacementCheckoutDisposition } = require('../routes/sales')
+const { promotionEligibilityError, replacementCheckoutDisposition } = require('../src/routes/sales')
 const {
   shouldApplyGenericSubscriptionUpdate,
   claimAgreementPurchaseActivation,
   releaseAgreementPurchaseActivationClaim,
   isInitialAgreementCheckoutInvoice,
   markAgreementCheckoutPaid
-} = require('../routes/webhookStripe')
-const { buildExecutedMembershipAgreementHtml } = require('../routes/membershipAgreementsPublic')
+} = require('../src/routes/webhooks/stripe')
+const { buildExecutedMembershipAgreementHtml } = require('../src/routes/public/membershipAgreements/signing')
 
 test('sales promotion validation rejects restrictions that cannot be honored before checkout', () => {
   const pricing = { platform_fee_cents: 29900, first_role_prepay_cents: 0 }
@@ -50,7 +50,7 @@ test('expired agreement replacement refuses completed or paid Stripe sessions', 
   assert.equal(replacementCheckoutDisposition({ status: 'open', payment_status: 'unpaid' }), 'open')
   assert.equal(replacementCheckoutDisposition({ status: 'expired', payment_status: 'unpaid' }), 'expired')
   assert.equal(replacementCheckoutDisposition(null), 'missing')
-  const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'sales.js'), 'utf8')
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'sales', 'index.js'), 'utf8')
   assert.match(source, /checkout\.sessions\.retrieve\(checkoutSessionId\)/)
   assert.match(source, /agreement_already_paid/)
   assert.match(source, /replace_sales_assisted_agreement/)
@@ -333,7 +333,7 @@ test('activation recovery migration fences every service-role function', () => {
 })
 
 test('paid agreement webhook source leaves incomplete events retryable', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhookStripe.js'), 'utf8')
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'webhooks', 'stripe.js'), 'utf8')
   assert.match(source, /priorEvent\.processed_ok === true/)
   assert.match(source, /if \(!retryableAgreementEvent\) return res\.status\(200\)/)
   assert.match(source, /if \(retryableAgreementEvent\) \{\s*return res\.status\(503\)/)
@@ -364,8 +364,10 @@ test('signed agreement render uses the stored deadline in Denver regardless of h
 })
 
 test('agreement checkout webhooks do not fall through to generic client activation', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhookStripe.js'), 'utf8')
-  assert.match(source, /if \(!isPaidAgreementCheckout\) \{[\s\S]*buildClientSubscriptionUpdatesFromStripe/i)
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'webhooks', 'stripe.js'), 'utf8')
+  // The guard also requires paymentSettled, so an unpaid completed session grants
+  // nothing on the generic path either. The agreement invariant is unchanged.
+  assert.match(source, /if \(!isPaidAgreementCheckout && paymentSettled\) \{[\s\S]*buildClientSubscriptionUpdatesFromStripe/i)
   assert.match(source, /const isAgreementCheckoutInvoice = isInitialAgreementCheckoutInvoice\([\s\S]*metadataSource,[\s\S]*eventObject\?\.billing_reason/i)
   assert.match(source, /customerId && !isManagedSubscriptionInvoice && !isAgreementCheckoutInvoice/i)
 })

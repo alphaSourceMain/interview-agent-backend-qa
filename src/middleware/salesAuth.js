@@ -1,6 +1,6 @@
 'use strict'
 
-const { supabaseAdmin } = require('../lib/supabaseClient')
+const { supabaseAdmin } = require('../clients/supabase')
 
 function createRequireSalesRep(options = {}) {
   const db = options.db || supabaseAdmin

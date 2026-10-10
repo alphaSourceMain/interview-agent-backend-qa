@@ -4,15 +4,16 @@ const assert = require('node:assert/strict')
 const express = require('express')
 const http = require('node:http')
 const path = require('node:path')
+const projectRoot = path.resolve(__dirname, '..')
 const { test } = require('node:test')
 
-const routePath = path.join(__dirname, '..', 'routes', 'alphaScreenPackages.js')
-const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
-const rateLimitPath = path.join(__dirname, '..', 'src', 'lib', 'rateLimit.js')
-const pdfRendererPath = path.join(__dirname, '..', 'utils', 'pdfRenderer.js')
-const urlConfigPath = path.join(__dirname, '..', 'config', 'urlConfig.js')
-const publicPurchaseActivationPath = path.join(__dirname, '..', 'src', 'lib', 'publicPurchaseActivation.js')
-const { buildAlphaScreenPackageSnapshot } = require('../src/lib/alphaScreenPackages')
+const routePath = path.join(__dirname, '..', 'src', 'routes', 'public', 'alphascreen', 'index.js')
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'clients', 'supabase.js')
+const rateLimitPath = path.join(__dirname, '..', 'src', 'services', 'rateLimit.js')
+const pdfRendererPath = path.join(__dirname, '..', 'src', 'render', 'pdfRenderer.js')
+const urlConfigPath = path.join(__dirname, '..', 'src', 'config', 'urlConfig.js')
+const publicPurchaseActivationPath = path.join(__dirname, '..', 'src', 'services', 'publicPurchaseActivation.js')
+const { buildAlphaScreenPackageSnapshot } = require('../src/services/alphaScreenPackages')
 
 const BASIC_INTENT_ID = '11111111-1111-4111-8111-111111111111'
 const PRO_INTENT_ID = '22222222-2222-4222-8222-222222222222'
@@ -172,6 +173,13 @@ function makeDb(options = {}) {
 }
 
 function buildApp(db) {
+  // The router is assembled from several files that each cache the modules stubbed
+  // below, so every first-party module reloads on each build.
+  for (const cached of Object.keys(require.cache)) {
+    if (cached.startsWith(projectRoot) && !cached.includes('node_modules')) {
+      delete require.cache[cached]
+    }
+  }
   delete require.cache[routePath]
   delete require.cache[supabaseClientPath]
   delete require.cache[rateLimitPath]

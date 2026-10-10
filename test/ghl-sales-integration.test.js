@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
 
-const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js');
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'clients', 'supabase.js');
 require.cache[supabaseClientPath] = {
   id: supabaseClientPath,
   filename: supabaseClientPath,
@@ -22,9 +22,9 @@ const {
   timingSafeSecret,
   verifyReadyGhlBinding,
   verifyGhlEd25519Signature,
-} = require('../src/lib/ghlSalesIntegration');
-const { authenticateWebhook, webhookIdentifiers } = require('../routes/ghlSalesWebhook');
-const { agreementIsSignedAndPaid } = require('../src/lib/salesIntegrations');
+} = require('../src/services/ghlSalesIntegration');
+const { authenticateWebhook, webhookIdentifiers } = require('../src/routes/webhooks/ghlSales');
+const { agreementIsSignedAndPaid } = require('../src/services/salesIntegrations');
 
 const env = {
   GHL_PRIVATE_INTEGRATION_TOKEN: 'pit-' + 'x'.repeat(40),

@@ -1,12 +1,12 @@
 'use strict';
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {DEMO_CLIENT_ID,QA_URL,uuid}=require('../src/lib/salesDemo');
+const {DEMO_CLIENT_ID,QA_URL,uuid}=require('../src/services/salesDemo');
 
 test('verified global-admin token cannot use the generic writer or RPC on a demo role',async()=>{
-  const clientPath=require.resolve('../src/lib/supabaseClient');
+  const clientPath=require.resolve('../src/clients/supabase');
   const authPath=require.resolve('../src/middleware/auth');
-  const routePath=require.resolve('../routes/roles');
+  const routePath=require.resolve('../src/routes/client/roles');
   const previous=[clientPath,authPath,routePath].map(p=>require.cache[p]);
   let writes=0,rpcs=0,verified=0;
   const db={auth:{getUser:async token=>{assert.equal(token,'admin-test-token');verified++;return {data:{user:{id:'admin',email:'admin@example.invalid',app_metadata:{}}},error:null}}},

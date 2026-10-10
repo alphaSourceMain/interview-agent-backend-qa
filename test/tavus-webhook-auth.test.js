@@ -20,8 +20,8 @@ const {
   omitProviderCallbackUrls,
   redactTavusWebhookAuth,
   verifyTavusWebhookRequest,
-} = require('../src/lib/tavusWebhookAuth');
-const router = require('../routes/webhook');
+} = require('../src/services/tavusWebhookAuth');
+const router = require('../src/routes/webhooks/tavus');
 
 async function postWebhook({ query = '', body = {}, rawBody = null } = {}) {
   const app = express();
@@ -356,7 +356,7 @@ test('verification hashes to fixed length and uses timing-safe comparison', () =
     { ok: false, status: 401, category: 'invalid_secret' },
   );
   const source = fs.readFileSync(
-    path.join(__dirname, '..', 'src', 'lib', 'tavusWebhookAuth.js'),
+    path.join(__dirname, '..', 'src', 'services', 'tavusWebhookAuth.js'),
     'utf8',
   );
   assert.match(source, /createHash\('sha256'\)/);
@@ -402,32 +402,31 @@ test('callback authentication is removed from logs, Sentry-shaped data, and prov
 
 test('all conversation-create paths use the canonical authenticated callback builder', () => {
   const read = (relativePath) => fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8');
-  const route = read('routes/createTavusInterview.js');
-  const legacyRoute = read('createTavusInterview.js');
-  const legacyInternal = read('lib/createTavusInterviewInternal.js');
-  const activeWebhook = read('routes/webhook.js');
-  const legacyWebhook = read('handlers/tavusWebhook.js');
+  const route = read('src/routes/public/createTavusInterview.js');
+  const activeWebhook = read('src/routes/webhooks/tavus.js');
+  const tavusEventPipeline = read('src/services/tavusEvents/index.js');
   const app = read('app.js');
 
-  for (const source of [route, legacyRoute, legacyInternal]) {
-    assert.match(source, /buildAuthenticatedTavusWebhookUrl/);
-  }
-  assert.doesNotMatch(legacyRoute, /callback_url:\s*`\$\{callbackBase\}/);
-  assert.doesNotMatch(legacyInternal, /callback_url:\s*`\$\{callbackBase\}/);
+  assert.match(route, /buildAuthenticatedTavusWebhookUrl/);
+  assert.doesNotMatch(route, /callback_url:\s*`\$\{callbackBase\}/);
   assert.match(
     activeWebhook,
     /router\.post\(\s*['"]\/tavus['"],\s*authenticateTavusWebhookRequest,\s*parseTavusWebhookJson,\s*handleTavusWebhookJsonError/,
   );
+  // The event pipeline now lives in the service, so the ordering invariant spans two
+  // files: the middleware chain pins authentication and bounded parsing ahead of the
+  // event handler, and the handler is where payload validation runs.
+  const authAt = activeWebhook.indexOf('authenticateTavusWebhookRequest,');
+  const parseAt = activeWebhook.indexOf('parseTavusWebhookJson,', authAt);
+  const handlerAt = activeWebhook.indexOf('tavusEvents.handleTavusWebhookEvent', parseAt);
   assert.ok(
-    activeWebhook.indexOf('authenticateTavusWebhookRequest,\n  parseTavusWebhookJson')
-      < activeWebhook.indexOf('validateTavusWebhookPayload(body)'),
-    'sender authentication and bounded JSON parsing must precede payload validation',
+    authAt !== -1 && parseAt > authAt && handlerAt > parseAt,
+    'sender authentication and bounded JSON parsing must precede the event handler',
   );
+  assert.match(tavusEventPipeline, /validateTavusWebhookPayload/);
+  assert.doesNotMatch(activeWebhook, /validateTavusWebhookPayload/);
   assert.match(activeWebhook, /express\.json\(\{ limit: '10mb' \}\)/);
   assert.match(activeWebhook, /error: 'invalid_webhook_payload'/);
-  assert.match(legacyWebhook, /verifyTavusWebhookRequest/);
-  assert.match(legacyWebhook, /validateTavusWebhookPayload/);
-  assert.doesNotMatch(legacyWebhook, /if\s*\(!secret\)\s*return true/);
 
   assert.ok(
     route.indexOf('const webhookUrl = buildAuthenticatedTavusWebhookUrl')

@@ -6,7 +6,7 @@ const http = require('node:http')
 const path = require('node:path')
 const { test } = require('node:test')
 
-const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'clients', 'supabase.js')
 require.cache[supabaseClientPath] = {
   id: supabaseClientPath,
   filename: supabaseClientPath,
@@ -14,7 +14,7 @@ require.cache[supabaseClientPath] = {
   exports: { supabaseAdmin: {} }
 }
 
-const { createSalesRouter } = require('../routes/sales')
+const { createSalesRouter } = require('../src/routes/sales')
 
 function matches(row, filters) {
   return filters.every(({ column, value }) => String(row?.[column] ?? '') === String(value ?? ''))

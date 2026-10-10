@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { buildSalesPayrollReport, localDate } = require('../src/lib/salesPayrollReport');
+const { buildSalesPayrollReport, localDate } = require('../src/services/salesPayrollReport');
 
 const repId = '11111111-1111-4111-8111-111111111111';
 const intentId = '22222222-2222-4222-8222-222222222222';

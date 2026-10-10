@@ -14,7 +14,7 @@ const {
   rotateSalesVoiceToken,
   saveSalesLineSetup,
   validateTransferDestinations,
-} = require('../src/lib/adminSalesTeamService');
+} = require('../src/services/adminSalesTeamService');
 
 const member = {
   id: '22000000-0000-4000-8000-000000000001',
@@ -185,8 +185,9 @@ function configureStagedLineThree(db) {
 }
 
 test('sales team route is mounted behind authentication and global-admin authorization', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
-  assert.match(source, /adminRouter\.use\('\/sales-team', requireAuth, requireAdmin, createAdminSalesTeamRouter\(\{ db: supabaseAdmin \}\)\)/);
+  // The admin router lives in src/routes/admin/index.js after the refactor (Step 7).
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'admin', 'index.js'), 'utf8');
+  assert.match(source, /router\.use\('\/sales-team', requireAuth, requireAdmin, createAdminSalesTeamRouter\(\{ db: supabaseAdmin \}\)\)/);
 });
 
 test('completion migration adds fixed GHL user routing and service-role-only atomic replacement', () => {

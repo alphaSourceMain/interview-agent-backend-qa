@@ -1,0 +1,581 @@
+'use strict'
+
+const Stripe = require('stripe')
+const { supabaseAdmin } = require('../clients/supabase')
+const { requireParentClient } = require('./clientBillingScope')
+const {
+  getAlphaScreenStripePriceId,
+  getAlphaScreenFirstRolePrepayStripePriceId
+} = require('./alphaScreenPackages')
+const { resolvePublicBackendBase, buildClientDashboardReturnUrl } = require('../config/urlConfig')
+const { priceEnterprisePool } = require('./enterprisePoolPricing')
+
+function makeError(status, code, detail) {
+  const err = new Error(detail || code || 'checkout_failed')
+  err.status = Number(status) || 500
+  err.code = String(code || 'checkout_failed')
+  return err
+}
+
+function normalizePlanTier(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  const canonical = normalized === 'essential' ? 'basic' : normalized
+  return ['basic', 'pro', 'enterprise'].includes(canonical) ? canonical : ''
+}
+
+function normalizeBillingInterval(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return ['monthly', 'annual'].includes(normalized) ? normalized : ''
+}
+
+function normalizeMetadataObject(value) {
+  const output = {}
+  const source = value && typeof value === 'object' ? value : {}
+  for (const [key, raw] of Object.entries(source)) {
+    const keyText = String(key || '').trim()
+    if (!keyText) continue
+    if (raw == null) continue
+    const text = String(raw).trim()
+    if (!text) continue
+    output[keyText] = text
+  }
+  return output
+}
+
+function asMoneyOrNull(value, { allowZero = true } = {}) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  const rounded = Math.round(n * 100) / 100
+  if (allowZero ? rounded < 0 : rounded <= 0) return null
+  return rounded
+}
+
+function asWholeNumberOrNull(value, { allowZero = true } = {}) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return null
+  if (allowZero ? n < 0 : n <= 0) return null
+  return n
+}
+
+// Distinguishes "the caller left this out" from "the caller sent something bad",
+// so an optional field can still be validated when it is supplied.
+function isSuppliedValue(value) {
+  return value !== undefined && value !== null && String(value).trim() !== ''
+}
+
+/**
+ * The next 1st of the month at 00:00 UTC, as a Unix timestamp.
+ *
+ * A checkout on the 1st anchors to the *following* month: the current month has
+ * already begun, so anchoring to today would mean no proration and a cycle that
+ * starts in the past.
+ */
+function nextFirstOfMonthEpoch(nowMs) {
+  const now = Number.isFinite(nowMs) ? new Date(nowMs) : new Date();
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return Math.floor(next.getTime() / 1000);
+}
+
+function wantsEmbeddedCheckout(value) {
+  if (value === true) return true
+  const raw = String(value || '').trim().toLowerCase()
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'embedded'
+}
+
+function normalizeIdempotencyKey(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  return raw.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 255)
+}
+
+function normalizeFirstRolePrepayCheckout(value) {
+  const source = value && typeof value === 'object' ? value : null
+  if (!source || source.selected !== true) return null
+  const amountCents = Number(source.amount_cents ?? source.discounted_credit_amount_cents)
+  const normalRoleFeeCents = Number(source.normal_role_fee_cents)
+  const discountPercent = Number(source.discount_percent)
+  const creditType = String(source.credit_type || 'first_role_prepay').trim()
+  if (
+    creditType !== 'first_role_prepay' ||
+    !Number.isInteger(amountCents) ||
+    amountCents <= 0 ||
+    !Number.isInteger(normalRoleFeeCents) ||
+    normalRoleFeeCents <= 0 ||
+    !Number.isInteger(discountPercent) ||
+    discountPercent <= 0
+  ) {
+    throw makeError(400, 'invalid_first_role_prepay', 'Invalid first-role prepay checkout values.')
+  }
+  return {
+    selected: true,
+    credit_type: creditType,
+    amount_cents: amountCents,
+    normal_role_fee_cents: normalRoleFeeCents,
+    discount_percent: discountPercent
+  }
+}
+
+async function resolveStripeCustomerId({
+  stripe,
+  client,
+  billingCustomerList
+}) {
+  const candidateStripeCustomerIds = []
+  const customerRows = Array.isArray(billingCustomerList) ? billingCustomerList : []
+  for (const row of customerRows) {
+    const id = String(row?.stripe_customer_id || '').trim()
+    if (!id) continue
+    if (!candidateStripeCustomerIds.includes(id)) candidateStripeCustomerIds.push(id)
+  }
+  const fallbackCustomerId = String(client?.stripe_customer_id || '').trim()
+  if (fallbackCustomerId && !candidateStripeCustomerIds.includes(fallbackCustomerId)) {
+    candidateStripeCustomerIds.push(fallbackCustomerId)
+  }
+
+  let resolvedStripeCustomerId = null
+  for (const candidateId of candidateStripeCustomerIds) {
+    try {
+      await stripe.customers.retrieve(candidateId)
+      resolvedStripeCustomerId = candidateId
+      break
+    } catch (e) {
+      const message = String(e?.message || '').toLowerCase()
+      const code = String(e?.code || '').toLowerCase()
+      if (code === 'resource_missing' || message.includes('no such customer')) continue
+      throw e
+    }
+  }
+
+  const clientEmail = String(client?.email || '').trim()
+  if (!resolvedStripeCustomerId) {
+    const createdCustomer = await stripe.customers.create({
+      name: client?.name || undefined,
+      email: clientEmail || undefined,
+      metadata: { client_id: client.id }
+    })
+    resolvedStripeCustomerId = createdCustomer?.id || null
+  } else {
+    try {
+      await stripe.customers.update(resolvedStripeCustomerId, {
+        name: client?.name || undefined,
+        email: clientEmail || undefined,
+        metadata: { client_id: client.id }
+      })
+    } catch (_) {}
+  }
+
+  return resolvedStripeCustomerId || null
+}
+
+async function createSubscriptionCheckoutSession({
+  clientId,
+  planTier,
+  billingInterval,
+  returnTab = '',
+  cancelUrl = '',
+  embedded = false,
+  metadataSource = 'admin_subscription_checkout',
+  metadata = {},
+  firstRolePrepay = null,
+  promotionCodeId = '',
+  enterpriseFees = null,
+  requestContext = null,
+  idempotencyKey = '',
+  checkoutExpiresAt = null,
+  now = null
+}) {
+  const normalizedClientId = String(clientId || '').trim()
+  const normalizedPlanTier = normalizePlanTier(planTier)
+  const normalizedBillingInterval = normalizeBillingInterval(billingInterval)
+  const normalizedMetadataSource = String(metadataSource || '').trim().toLowerCase()
+  const normalizedReturnTab = String(returnTab || '').trim().toLowerCase()
+  const embeddedCheckoutRequested = wantsEmbeddedCheckout(embedded)
+  const normalizedIdempotencyKey = normalizeIdempotencyKey(idempotencyKey)
+  const normalizedPromotionCodeId = String(promotionCodeId || '').trim().slice(0, 255)
+  const firstRolePrepayCheckout = normalizeFirstRolePrepayCheckout(firstRolePrepay)
+  const nowMs = now ? new Date(now).getTime() : Date.now()
+  let checkoutExpiresAtEpoch = null
+  if (checkoutExpiresAt) {
+    const requestedExpiryMs = new Date(checkoutExpiresAt).getTime()
+    if (!Number.isFinite(nowMs) || !Number.isFinite(requestedExpiryMs)) {
+      throw makeError(400, 'invalid_checkout_expiration', 'Checkout expiration is invalid.')
+    }
+    const remainingMs = requestedExpiryMs - nowMs
+    if (remainingMs < 30 * 60 * 1000) {
+      throw makeError(410, 'agreement_checkout_window_closed', 'This agreement is too close to expiration. Request a newly dated agreement.')
+    }
+    checkoutExpiresAtEpoch = Math.floor(Math.min(requestedExpiryMs, nowMs + (24 * 60 * 60 * 1000) - 1000) / 1000)
+  }
+
+  if (!normalizedClientId) throw makeError(400, 'client_id_required', 'Client id is required.')
+  if (!normalizedPlanTier) throw makeError(400, 'invalid_plan_tier', 'Invalid plan tier.')
+  if (!normalizedBillingInterval) throw makeError(400, 'invalid_billing_interval', 'Invalid billing interval.')
+  if (!normalizedMetadataSource) throw makeError(400, 'invalid_metadata_source', 'Checkout source is required.')
+
+  const parentGuard = await requireParentClient(supabaseAdmin, normalizedClientId, {
+    source: normalizedMetadataSource
+  })
+  if (!parentGuard.ok) {
+    const body = parentGuard.body || {}
+    throw makeError(
+      parentGuard.status || 500,
+      body.code || body.error || 'client_lookup_failed',
+      body.detail || 'Client lookup failed.'
+    )
+  }
+
+  const { data: client, error: clientError } = await supabaseAdmin
+    .from('clients')
+    .select('id,name,email,client_admin_name,stripe_customer_id')
+    .eq('id', normalizedClientId)
+    .maybeSingle()
+  if (clientError) throw makeError(500, 'client_lookup_failed', clientError.message || 'Client lookup failed.')
+  if (!client) throw makeError(404, 'client_not_found', 'Client not found.')
+
+  const clientEmail = String(client.email || '').trim()
+  if (!clientEmail) throw makeError(400, 'missing_client_email', 'Client email is required.')
+
+  const { data: billingCustomerRows, error: billingCustomerError } = await supabaseAdmin
+    .from('billing_customers')
+    .select('id,stripe_customer_id')
+    .eq('client_id', client.id)
+    .order('created_at', { ascending: false })
+  if (billingCustomerError) throw makeError(500, 'customer_lookup_failed', billingCustomerError.message || 'Billing customer lookup failed.')
+  const billingCustomerList = Array.isArray(billingCustomerRows) ? billingCustomerRows : []
+  const billingCustomer = billingCustomerList[0] || null
+
+  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
+
+  let resolvedStripeCustomerId = null
+  try {
+    resolvedStripeCustomerId = await resolveStripeCustomerId({
+      stripe,
+      client,
+      billingCustomerList
+    })
+  } catch (e) {
+    throw makeError(500, 'stripe_customer_failed', e?.message || 'Stripe customer resolution failed.')
+  }
+  if (!resolvedStripeCustomerId) throw makeError(400, 'missing_billing_customer', 'Missing billing customer.')
+
+  if (String(client?.stripe_customer_id || '').trim() !== resolvedStripeCustomerId) {
+    try {
+      await supabaseAdmin
+        .from('clients')
+        .update({ stripe_customer_id: resolvedStripeCustomerId })
+        .eq('id', client.id)
+    } catch (_) {}
+  }
+  if (billingCustomer?.id && String(billingCustomer?.stripe_customer_id || '').trim() !== resolvedStripeCustomerId) {
+    try {
+      await supabaseAdmin
+        .from('billing_customers')
+        .update({ stripe_customer_id: resolvedStripeCustomerId })
+        .eq('id', billingCustomer.id)
+    } catch (_) {}
+  }
+
+  let replacesStripeSubscriptionId = null
+  let replacementMetadata = null
+  if (['admin_subscription_checkout', 'agreement_checkout'].includes(normalizedMetadataSource)) {
+    const existingSubscriptions = await stripe.subscriptions.list({
+      customer: resolvedStripeCustomerId,
+      status: 'all',
+      limit: 100
+    })
+    const blockingSubscription = (existingSubscriptions?.data || []).find((subscription) => {
+      return ['active', 'trialing', 'past_due', 'incomplete'].includes(String(subscription?.status || '').trim().toLowerCase())
+    })
+    if (blockingSubscription) {
+      if (normalizedMetadataSource === 'admin_subscription_checkout') {
+        throw makeError(409, 'client_subscription_already_exists', 'Client already has an active or pending Stripe subscription.')
+      }
+      replacesStripeSubscriptionId = String(blockingSubscription?.id || '').trim() || null
+      if (replacesStripeSubscriptionId) {
+        replacementMetadata = {
+          replaces_stripe_subscription_id: replacesStripeSubscriptionId,
+          replacement_policy: 'immediate_cancel'
+        }
+      }
+    }
+  }
+
+  const lineItems = []
+  let enterpriseCheckoutMetadata = null
+  let poolQuantity = null
+  let poolMetadata = null
+  let poolPoolId = null
+  if (normalizedPlanTier === 'enterprise') {
+    const platformFee = asMoneyOrNull(enterpriseFees?.platform_fee, { allowZero: false })
+    const perRoleFee = asMoneyOrNull(enterpriseFees?.per_role_fee, { allowZero: true })
+    const includedInterviewsPerRole = asWholeNumberOrNull(enterpriseFees?.included_interviews_per_role, { allowZero: true })
+    const additionalInterviewFee = asMoneyOrNull(enterpriseFees?.additional_interview_fee, { allowZero: true })
+    if (
+      platformFee === null ||
+      perRoleFee === null ||
+      includedInterviewsPerRole === null ||
+      additionalInterviewFee === null
+    ) {
+      throw makeError(400, 'invalid_enterprise_fees', 'Invalid enterprise pricing fields.')
+    }
+    // Optional, for Enterprise clients on the usage model. Omitting it is valid;
+    // supplying something unparseable is not, so presence is checked separately.
+    const usageFeeSupplied = isSuppliedValue(enterpriseFees?.usage_interview_fee_cents)
+    const usageInterviewFeeCents = usageFeeSupplied
+      ? asWholeNumberOrNull(enterpriseFees.usage_interview_fee_cents, { allowZero: true })
+      : null
+    if (usageFeeSupplied && usageInterviewFeeCents === null) {
+      throw makeError(400, 'invalid_enterprise_fees', 'Invalid enterprise pricing fields.')
+    }
+    // Also optional. A pool cannot be priced without a per-interview price,
+    // since the pool is sold at that same number.
+    const poolSupplied = isSuppliedValue(enterpriseFees?.pool_quantity)
+    poolQuantity = poolSupplied
+      ? asWholeNumberOrNull(enterpriseFees.pool_quantity, { allowZero: false })
+      : null
+    if (poolSupplied && poolQuantity === null) {
+      throw makeError(400, 'invalid_enterprise_fees', 'Invalid enterprise pricing fields.')
+    }
+    if (poolQuantity !== null && usageInterviewFeeCents === null) {
+      throw makeError(400, 'pool_requires_usage_price', 'An interview pool needs a per-interview usage price.')
+    }
+    const platformCents = Math.round(platformFee * 100)
+    if (!Number.isFinite(platformCents) || platformCents <= 0) {
+      throw makeError(400, 'invalid_enterprise_fees', 'Invalid enterprise pricing fields.')
+    }
+    enterpriseCheckoutMetadata = {
+      platform_fee: String(Math.round(platformFee * 100) / 100),
+      per_role_fee: String(Math.round(perRoleFee * 100) / 100),
+      included_interviews_per_role: String(includedInterviewsPerRole),
+      additional_interview_fee: String(Math.round(additionalInterviewFee * 100) / 100),
+      ...(usageInterviewFeeCents === null
+        ? {}
+        : { usage_interview_fee_cents: String(usageInterviewFeeCents) })
+    }
+    const enterprisePrice = await stripe.prices.create({
+      currency: 'usd',
+      unit_amount: platformCents,
+      recurring: { interval: normalizedBillingInterval === 'annual' ? 'year' : 'month' },
+      product_data: { name: 'Enterprise membership' },
+      metadata: {
+        source: normalizedMetadataSource,
+        client_id: client.id,
+        plan_tier: 'enterprise',
+        billing_interval: normalizedBillingInterval,
+        ...enterpriseCheckoutMetadata,
+        ...normalizeMetadataObject(metadata),
+        ...normalizeMetadataObject(replacementMetadata || {})
+      }
+    })
+    lineItems.push({ price: enterprisePrice.id, quantity: 1 })
+
+    // The interview pool is a one-off charge alongside the recurring membership,
+    // the same shape first-role prepay uses below. It is charged as a single
+    // unit amount with quantity 1 because the volume discount is rounded on the
+    // whole order — see enterprisePoolPricing.
+    if (poolQuantity !== null) {
+      const quote = await priceEnterprisePool({
+        db: supabaseAdmin,
+        quantity: poolQuantity,
+        unitPriceCents: usageInterviewFeeCents
+      })
+      const poolPrice = await stripe.prices.create({
+        currency: 'usd',
+        unit_amount: quote.total_cents,
+        product_data: { name: `Interview pool (${quote.quantity} interviews)` },
+        metadata: {
+          source: normalizedMetadataSource,
+          client_id: client.id,
+          purchase_type: 'interview_pool',
+          quantity: String(quote.quantity),
+          discount_pct: String(quote.discount_pct),
+          discounted_unit_price_cents: String(quote.discounted_unit_price_cents)
+        }
+      })
+      lineItems.push({ price: poolPrice.id, quantity: 1 })
+
+      // Reserved before the session exists, so the webhook always has a row to
+      // mark paid even if the response never reaches the caller.
+      const { data: pendingPool, error: poolInsertError } = await supabaseAdmin
+        .from('client_interview_pools')
+        .insert({
+          client_id: client.id,
+          quantity_purchased: quote.quantity,
+          unit_price_cents: quote.unit_price_cents,
+          discount_pct: quote.discount_pct,
+          total_cents: quote.total_cents,
+          status: 'pending'
+        })
+        .select('id')
+        .maybeSingle()
+      if (poolInsertError || !pendingPool?.id) {
+        throw makeError(503, 'interview_pool_reserve_failed', 'The interview pool could not be reserved.')
+      }
+      poolPoolId = pendingPool.id
+
+      poolMetadata = {
+        purchase_type: 'interview_pool',
+        client_interview_pool_id: String(pendingPool.id),
+        pool_quantity: String(quote.quantity),
+        pool_unit_price_cents: String(quote.unit_price_cents),
+        pool_discount_pct: String(quote.discount_pct),
+        pool_discounted_unit_price_cents: String(quote.discounted_unit_price_cents),
+        pool_total_cents: String(quote.total_cents)
+      }
+    }
+  } else {
+    const priceId = getAlphaScreenStripePriceId(normalizedPlanTier, normalizedBillingInterval)
+    if (!priceId) throw makeError(500, 'stripe_price_not_configured', 'Stripe price is not configured.')
+    lineItems.push({ price: priceId, quantity: 1 })
+  }
+  let firstRolePrepayMetadata = null
+  if (firstRolePrepayCheckout) {
+    const firstRolePrepayPriceId = getAlphaScreenFirstRolePrepayStripePriceId(normalizedPlanTier)
+    if (!firstRolePrepayPriceId) {
+      throw makeError(500, 'first_role_prepay_price_not_configured', 'First-role prepay Stripe price is not configured.')
+    }
+    lineItems.push({ price: firstRolePrepayPriceId, quantity: 1 })
+    firstRolePrepayMetadata = {
+      first_role_prepay_selected: 'true',
+      first_role_prepay_credit_type: firstRolePrepayCheckout.credit_type,
+      first_role_prepay_amount_cents: String(firstRolePrepayCheckout.amount_cents),
+      first_role_prepay_normal_role_fee_cents: String(firstRolePrepayCheckout.normal_role_fee_cents),
+      first_role_prepay_discount_percent: String(firstRolePrepayCheckout.discount_percent)
+    }
+  }
+
+  const forwardedProto = String(requestContext?.forwardedProto || requestContext?.protocol || 'https').split(',')[0].trim()
+  const forwardedHost = String(requestContext?.forwardedHost || requestContext?.host || '').split(',')[0].trim()
+  const computedBackendBase = forwardedHost ? `${forwardedProto || 'https'}://${forwardedHost}` : ''
+  const publicBackendBase = resolvePublicBackendBase(computedBackendBase || '')
+
+  const successParams = normalizedReturnTab
+    ? { checkout: 'success', client_id: client.id, tab: normalizedReturnTab }
+    : { checkout: 'success', client_id: client.id }
+  const cancelParams = normalizedReturnTab
+    ? { checkout: 'cancel', client_id: client.id, tab: normalizedReturnTab }
+    : { checkout: 'cancel', client_id: client.id }
+  const normalizedCancelUrl = String(cancelUrl || '').trim()
+
+  const checkoutSuccessUrl = publicBackendBase
+    ? `${publicBackendBase}/checkout/subscription-success?session_id={CHECKOUT_SESSION_ID}&client_id=${encodeURIComponent(client.id)}${normalizedReturnTab ? `&tab=${encodeURIComponent(normalizedReturnTab)}` : ''}`
+    : buildClientDashboardReturnUrl(successParams)
+
+  const checkoutMetadata = {
+    source: normalizedMetadataSource,
+    client_id: client.id,
+    plan_tier: normalizedPlanTier,
+    billing_interval: normalizedBillingInterval,
+    ...normalizeMetadataObject(enterpriseCheckoutMetadata || {}),
+    ...normalizeMetadataObject(firstRolePrepayMetadata || {}),
+    ...normalizeMetadataObject(poolMetadata || {}),
+    ...normalizeMetadataObject(metadata),
+    ...normalizeMetadataObject(replacementMetadata || {})
+  }
+
+  const checkoutBasePayload = {
+    mode: 'subscription',
+    customer: resolvedStripeCustomerId,
+    line_items: lineItems,
+    ...(normalizedPromotionCodeId
+      ? { discounts: [{ promotion_code: normalizedPromotionCodeId }] }
+      : { allow_promotion_codes: true }),
+    metadata: checkoutMetadata,
+    subscription_data: {
+      metadata: checkoutMetadata,
+      // Enterprise bills on the 1st, so a client gets one charge a month with
+      // the prior month's usage on it. The first invoice is prorated to that
+      // date. Both intervals anchor; Essentials and Pro are left alone.
+      //
+      // billing_cycle_anchor, not billing_cycle_anchor_config: the latter only
+      // reached Checkout in API version 2026-06-24, and this client pins
+      // 2023-10-16 (src/clients/stripe.js).
+      ...(normalizedPlanTier === 'enterprise'
+        ? {
+            billing_cycle_anchor: nextFirstOfMonthEpoch(nowMs),
+            proration_behavior: 'create_prorations'
+          }
+        : {})
+    },
+    ...(checkoutExpiresAtEpoch ? { expires_at: checkoutExpiresAtEpoch } : {})
+  }
+
+  let checkoutClientSecret = null
+  let primaryCheckoutSession = null
+  let hostedFallbackSession = null
+  const createOptions = (suffix = '') => {
+    if (!normalizedIdempotencyKey) return undefined
+    const key = suffix ? `${normalizedIdempotencyKey}:${suffix}` : normalizedIdempotencyKey
+    return { idempotencyKey: key.slice(0, 255) }
+  }
+
+  if (embeddedCheckoutRequested) {
+    try {
+      primaryCheckoutSession = await stripe.checkout.sessions.create({
+        ...checkoutBasePayload,
+        ui_mode: 'embedded',
+        return_url: checkoutSuccessUrl
+      }, createOptions('embedded'))
+      const resolvedClientSecret = String(primaryCheckoutSession?.client_secret || '').trim()
+      if (resolvedClientSecret) {
+        checkoutClientSecret = resolvedClientSecret
+      } else {
+        primaryCheckoutSession = null
+      }
+    } catch (embeddedErr) {
+      console.error('create_subscription_embedded_checkout_session_failed:', embeddedErr?.message || embeddedErr)
+    }
+  }
+
+  if (!primaryCheckoutSession) {
+    primaryCheckoutSession = await stripe.checkout.sessions.create({
+      ...checkoutBasePayload,
+      success_url: checkoutSuccessUrl,
+      cancel_url: normalizedCancelUrl || buildClientDashboardReturnUrl(cancelParams)
+    }, createOptions())
+  } else {
+    try {
+      hostedFallbackSession = await stripe.checkout.sessions.create({
+        ...checkoutBasePayload,
+        success_url: checkoutSuccessUrl,
+        cancel_url: normalizedCancelUrl || buildClientDashboardReturnUrl(cancelParams)
+      }, createOptions('hosted'))
+    } catch (hostedFallbackErr) {
+      console.error('create_subscription_hosted_fallback_checkout_session_failed:', hostedFallbackErr?.message || hostedFallbackErr)
+    }
+  }
+
+  // Recorded for support: the webhook finds the pool by its id in metadata, not
+  // by the session, so a failure here costs traceability rather than the pool.
+  if (poolPoolId) {
+    const poolSessionId = String(primaryCheckoutSession?.id || hostedFallbackSession?.id || '').trim()
+    if (poolSessionId) {
+      const { error: poolSessionError } = await supabaseAdmin
+        .from('client_interview_pools')
+        .update({ stripe_checkout_session_id: poolSessionId })
+        .eq('id', poolPoolId)
+      if (poolSessionError) {
+        console.error('interview_pool_session_link_failed', {
+          client_interview_pool_id: poolPoolId,
+          error: poolSessionError.message || poolSessionError
+        })
+      }
+    }
+  }
+
+  return {
+    session: primaryCheckoutSession,
+    fallbackSession: hostedFallbackSession,
+    checkoutClientSecret,
+    client,
+    clientEmail,
+    checkoutMetadata,
+    interviewPoolId: poolPoolId,
+    replacesStripeSubscriptionId,
+    replacementPolicy: replacesStripeSubscriptionId ? 'immediate_cancel' : null
+  }
+}
+
+module.exports = {
+  createSubscriptionCheckoutSession
+}

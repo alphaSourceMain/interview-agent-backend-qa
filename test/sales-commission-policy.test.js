@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { calculateReceiptCommission, departureCutoffExclusive, weekRangeForTimestamp } = require('../src/lib/salesCommissionPolicy');
+const { calculateReceiptCommission, departureCutoffExclusive, weekRangeForTimestamp } = require('../src/services/salesCommissionPolicy');
 
 const monthly = {
   currency: 'usd', payment_kind: 'monthly', payment_succeeded: true, qualification_verified: true,

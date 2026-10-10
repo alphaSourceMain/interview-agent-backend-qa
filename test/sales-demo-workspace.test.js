@@ -3,7 +3,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {buildWorkspace}=require('../demo/workspace');
 const {buildFixture}=require('../demo/northstar');
-const {DEMO_CLIENT_ID,QA_URL,safeDemoRequest,assertDemoPrincipal}=require('../src/lib/salesDemo');
+const {DEMO_CLIENT_ID,QA_URL,safeDemoRequest,assertDemoPrincipal}=require('../src/services/salesDemo');
 
 test('authored manager workspace reconciles amounts, candidates and capacity with no provider identifiers',()=>{
   const d=buildWorkspace(),fixture=buildFixture();
@@ -23,7 +23,7 @@ test('manager preview does not widen side-effect or foreign-scope allowlists',()
   for(const path of ['/demo/workspace','/clients/entities','/client-members/add','/clients/billing/portal-session','/clients/billing/additional-interviews/checkout-session','/automation/config','/auth/profile/sync'])assert.equal(safeDemoRequest({method:'POST',originalUrl:path}),false,path);
 });
 test('actual snapshot route is guarded, rejects foreign/array selectors, and never touches a provider',async()=>{
-  const authPath=require.resolve('../src/middleware/auth'),dbPath=require.resolve('../src/lib/supabaseClient'),routePath=require.resolve('../routes/salesDemo');
+  const authPath=require.resolve('../src/middleware/auth'),dbPath=require.resolve('../src/clients/supabase'),routePath=require.resolve('../src/routes/client/salesDemo');
   const previous=[authPath,dbPath,routePath].map(p=>require.cache[p]);const old=process.env.SUPABASE_URL;
   let authChecks=0,scopeChecks=0;
   require.cache[authPath]={id:authPath,filename:authPath,loaded:true,exports:{requireAuth(req,res,next){authChecks++;next()},withClientScope(req,res,next){scopeChecks++;next()}}};

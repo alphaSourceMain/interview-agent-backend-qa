@@ -1,7 +1,7 @@
 'use strict'
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { salesRepProfile } = require('../src/lib/salesRepProfile')
+const { salesRepProfile } = require('../src/services/salesRepProfile')
 
 function dbFixture({ failedTable, inactive = false, unassigned = false } = {}) {
   const tables = {

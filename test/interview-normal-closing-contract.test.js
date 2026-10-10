@@ -13,8 +13,8 @@ process.env.SUPABASE_ANON_KEY ||= 'normal-closing-anon-key';
 const {
   NORMAL_COMPLETION_FAREWELL_TEXT,
   buildConversationalContext,
-} = require('../handlers/createTavusInterview');
-const { isTerminalInterviewToolName } = require('../src/lib/tavusTerminalTool');
+} = require('../src/services/tavusInterview');
+const { isTerminalInterviewToolName } = require('../src/services/tavusTerminalTool');
 
 const ROOT = path.join(__dirname, '..');
 const { systemPrompt: personaPrompt, buildPersonaPatch } = require('../scripts/patchTavusQaP1Persona');
@@ -23,9 +23,9 @@ const {
   CLOSING_PROCESS_ANSWER,
   CLOSING_UNAVAILABLE_ANSWER,
   CLOSING_INTERNAL_ANSWER,
-} = require('../src/lib/interviewClosingContract');
-const { normalizeEndReason } = require('../routes/tavus');
-const webhookSource = fs.readFileSync(path.join(ROOT, 'routes', 'webhook.js'), 'utf8');
+} = require('../src/services/interviewClosingContract');
+const { normalizeEndReason } = require('../src/routes/public/tavus');
+const webhookSource = fs.readFileSync(path.join(ROOT, 'src', 'services', 'tavusEvents', 'index.js'), 'utf8');
 
 function occurrences(value, search) {
   return String(value).split(search).length - 1;
@@ -136,7 +136,7 @@ test('importing the persona prompt never loads dotenv or starts a vendor call', 
     const load = Module._load;
     Module._load = function(name, ...args) {
       assert.notEqual(name, 'dotenv');
-      if (name === '../src/lib/tavusHttpClient') return {
+      if (name === '../src/clients/tavus') return {
         createTavusHttpClient() { throw new Error('Unexpected vendor client'); }
       };
       return load.call(this, name, ...args);

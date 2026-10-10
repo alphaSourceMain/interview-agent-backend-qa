@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
 
-const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js');
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'clients', 'supabase.js');
 require.cache[supabaseClientPath] = {
   id: supabaseClientPath,
   filename: supabaseClientPath,
@@ -17,19 +17,19 @@ require.cache[supabaseClientPath] = {
 const {
   markGhlOpportunityWon,
   upsertGhlBinding,
-} = require('../src/lib/ghlSalesIntegration');
+} = require('../src/services/ghlSalesIntegration');
 const {
   createGhlSalesWebhookRouter,
   finishReceipt,
   reserveReceipt,
   webhookIdentifiers,
-} = require('../routes/ghlSalesWebhook');
+} = require('../src/routes/webhooks/ghlSales');
 const {
   enqueueSalesWonDelivery,
   processGhlSalesWonDelivery,
   reconcileSalesWonDeliveries,
-} = require('../src/lib/salesIntegrations');
-const { resetFailedGhlDelivery } = require('../routes/adminSalesTeam');
+} = require('../src/services/salesIntegrations');
+const { resetFailedGhlDelivery } = require('../src/routes/admin/salesTeam');
 
 const INTENT_ID = '11111111-1111-4111-8111-111111111111';
 const DELIVERY_ID = '22222222-2222-4222-8222-222222222222';

@@ -1,8 +1,8 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildCandidateReportPayload: build, score } = require('../utils/candidateReportData');
-const { buildCandidateReportHtml: html, candidateReportPdfOptions, getCandidateReportPdfOptions } = require('../utils/renderCandidateReport');
+const { buildCandidateReportPayload: build, score } = require('../src/render/candidateReportData');
+const { buildCandidateReportHtml: html, candidateReportPdfOptions, getCandidateReportPdfOptions } = require('../src/render/candidateReport');
 const fixture = () => ({
   candidate: { name:'Example Person', analysis_summary: { resume_score:86, experience_match_percent:88, skills_match_percent:90, education_match_percent:75, summary:'Current resume summary' } },
   role: { title:'Account Executive' }, client:{ name:'Fictional Company' }, exposeAdvanced:true,

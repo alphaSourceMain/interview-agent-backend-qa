@@ -1,7 +1,7 @@
 'use strict'
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { salesHubMetrics } = require('../src/lib/salesHubMetrics')
+const { salesHubMetrics } = require('../src/services/salesHubMetrics')
 
 function fakeDb(result = { count: 4, error: null }) {
   const calls = []

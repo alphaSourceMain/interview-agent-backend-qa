@@ -1,9 +1,8 @@
 // scripts/backfillInterviews.js
 require('dotenv').config();
-const fetch = require('node-fetch');
 
 const { createClient } = require('@supabase/supabase-js');
-const { isSubstantiveTranscript, scoreInterview, INSUFFICIENT_SUMMARY } = require('../src/lib/interviewScoring');
+const { isSubstantiveTranscript, scoreInterview, INSUFFICIENT_SUMMARY } = require('../src/services/interviewScoring');
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -390,7 +389,7 @@ async function main() {
   let query = supabase
     .from('interviews')
     .select('id, role_id, created_at, transcript, transcript_url, analysis, transcript_scores, interview_summary, perception_scores')
-    .neq('client_id', require('../src/lib/salesDemo').DEMO_CLIENT_ID)
+    .neq('client_id', require('../src/services/salesDemo').DEMO_CLIENT_ID)
     .order('created_at', { ascending: true })
     .order('id', { ascending: true })
     .limit(BACKFILL_LIMIT);

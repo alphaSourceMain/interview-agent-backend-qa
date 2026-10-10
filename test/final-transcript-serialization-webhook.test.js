@@ -97,11 +97,12 @@ const RAW_DIAGNOSTIC = [
   PRIVACY_SENTINELS.transcriptHash,
 ].join('|');
 
-const routePath = path.join(__dirname, '..', 'routes', 'webhook.js');
-const scoringPath = path.join(__dirname, '..', 'src', 'lib', 'interviewScoring.js');
-const roleAvailabilityPath = path.join(__dirname, '..', 'src', 'lib', 'roleInterviewAvailability.js');
+const routePath = path.join(__dirname, '..', 'src', 'routes', 'webhooks', 'tavus.js');
+const eventsPath = path.join(__dirname, '..', 'src', 'services', 'tavusEvents', 'index.js');
+const scoringPath = path.join(__dirname, '..', 'src', 'services', 'interviewScoring.js');
+const roleAvailabilityPath = path.join(__dirname, '..', 'src', 'services', 'roleInterviewAvailability.js');
 const backfillPath = path.join(__dirname, '..', 'scripts', 'backfillInterviews.js');
-const analysisV2Path = path.join(__dirname, '..', 'src', 'lib', 'interviewAnalysisV2.js');
+const analysisV2Path = path.join(__dirname, '..', 'src', 'services', 'interviewAnalysisV2.js');
 
 function injectModule(filename, exports) {
   require.cache[filename] = { id: filename, filename, loaded: true, exports };
@@ -219,6 +220,7 @@ class FakeQuery {
   }
   select() { return this; }
   eq(column, value) { this.filters.push([column, value]); return this; }
+  is(column, value) { this.filters.push([column, value]); return this; }
   update(value) {
     this.operation = 'update';
     this.value = value;
@@ -255,6 +257,12 @@ class FakeQuery {
     }
     const matches = this.filters.every(([key, value]) => String(row?.[key] ?? '') === String(value ?? ''));
     if (this.operation === 'update') {
+      if (Object.hasOwn(this.value || {}, 'completed_at')) {
+        this.db.tracker.completionStampCalls += 1;
+        if (this.db.options.completionStampError) return { data: null, error: makeRawProbeDatabaseError() };
+        if (matches) Object.assign(row, structuredClone(this.value));
+        return { data: matches ? { id: row.id } : null, error: null };
+      }
       this.db.tracker.directUpdates += 1;
       if (Object.hasOwn(this.value || {}, 'interview_analysis_v2')) {
         this.db.tracker.analysisV2Updates += 1;
@@ -303,6 +311,7 @@ class FakeQuery {
 
 function makeDb(options = {}) {
   const tracker = {
+    completionStampCalls: 0,
     claimCalls: 0,
     finalizeCalls: 0,
     releaseCalls: 0,
@@ -763,7 +772,7 @@ function buildApp(db, buildOptions = {}) {
     }
   }
   Module._load = function patchedLoad(request, parent, isMain) {
-    if (request === '../src/lib/supabaseClient' && /routes\/webhook\.js$/.test(parent?.filename || '')) {
+    if (request === '../../clients/supabase' && parent?.filename === eventsPath) {
       return { supabaseAdmin: db, supabase: db };
     }
     if (request === '@sentry/node' && buildOptions.realSentry !== true) {
@@ -801,6 +810,7 @@ function buildApp(db, buildOptions = {}) {
     return originalLoad.call(this, request, parent, isMain);
   };
   delete require.cache[routePath];
+  delete require.cache[eventsPath];
   try {
     const router = require(routePath);
     const app = express();
@@ -831,7 +841,7 @@ function buildApp(db, buildOptions = {}) {
       router,
       restore() {
         Module._load = originalLoad;
-        for (const filename of [routePath, scoringPath, roleAvailabilityPath, backfillPath, analysisV2Path]) {
+        for (const filename of [routePath, eventsPath, scoringPath, roleAvailabilityPath, backfillPath, analysisV2Path]) {
           delete require.cache[filename];
         }
       },
@@ -2108,6 +2118,19 @@ test('best-effort unanswered-question persistence failure remains acknowledged a
   });
   assert.doesNotMatch(allOutput, /raw-supabase-diagnostic|database\.invalid|private-storage-reference/i);
   assert.doesNotMatch(allOutput, /76000000-|synthetic-final-transcript-conversation/i);
+});
+
+test('completion stamp failure is best effort and logs no raw diagnostics or identity', async () => {
+  const captured = await captureConsole(async () => {
+    await withScenario({ completionStampError: true }, async (app, db) => {
+      const response = await postTranscription(app);
+      assert.equal(response.status, 200);
+      assert.equal(db.tracker.completionStampCalls, 1);
+    });
+  });
+  assert.ok(captured.some((entry) => entry[0] === '[webhook] interview completion stamp failed'));
+  const serialized = JSON.stringify(captured);
+  assert.doesNotMatch(serialized, /76000000-|synthetic-final-transcript-conversation|privacy-probe-|database\.invalid|private-storage-reference/i);
 });
 
 test('final transcript logs contain bounded state only', async () => {

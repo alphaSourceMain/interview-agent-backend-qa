@@ -50,10 +50,10 @@ async function withRouter(routeName, db, callback) {
   const originalLoad = Module._load;
   Module._load = function patchedLoad(request, parent, isMain) {
     const parentFile = parent?.filename || '';
-    if (request === '../src/lib/supabaseClient' && parentFile.includes(`/routes/${routeName}.js`)) {
+    if (request === '../../clients/supabase' && parentFile.includes(`/routes/client/${routeName}.js`)) {
       return { supabaseAdmin: db, supabase: db };
     }
-    if (request === '../src/middleware/auth' && parentFile.includes(`/routes/${routeName}.js`)) {
+    if (request === '../../middleware/auth' && parentFile.includes(`/routes/client/${routeName}.js`)) {
       return {
         requireAuth: (_req, _res, next) => next(),
         withClientScope: (_req, _res, next) => next(),
@@ -61,10 +61,10 @@ async function withRouter(routeName, db, callback) {
     }
     return originalLoad.call(this, request, parent, isMain);
   };
-  const modulePath = require.resolve(`../routes/${routeName}`);
+  const modulePath = require.resolve(`../src/routes/client/${routeName}`);
   delete require.cache[modulePath];
   try {
-    const router = require(`../routes/${routeName}`);
+    const router = require(`../src/routes/client/${routeName}`);
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {

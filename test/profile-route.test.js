@@ -6,7 +6,7 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const { once } = require('node:events');
-const { createProfileRouter, normalizeFullName } = require('../routes/profile');
+const { createProfileRouter, normalizeFullName } = require('../src/routes/client/profile');
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -130,9 +130,9 @@ test('profile sync rejects invalid names before touching the database', async ()
 });
 
 test('application mounts profile sync behind existing authentication and client scope', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'client', 'auth.js'), 'utf8');
   assert.match(
     source,
-    /app\.use\('\/auth\/profile', requireAuth, withClientScope, createProfileRouter\(\{ db: supabaseAdmin \}\)\)/,
+    /router\.use\('\/auth\/profile', requireAuth, withClientScope, createProfileRouter\(\{ db: supabaseAdmin \}\)\)/,
   );
 });

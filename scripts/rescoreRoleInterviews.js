@@ -69,7 +69,7 @@ async function main() {
   const { data: roles, error: roleError } = await supabase
     .from('roles')
     .select('id,title,client_id')
-    .neq('client_id', require('../src/lib/salesDemo').DEMO_CLIENT_ID)
+    .neq('client_id', require('../src/services/salesDemo').DEMO_CLIENT_ID)
     .eq('title', ROLE_TITLE);
   if (roleError) throw roleError;
   if (!Array.isArray(roles) || roles.length !== 1) {

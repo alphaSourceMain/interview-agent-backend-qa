@@ -13,8 +13,8 @@ const {
   normalizeSalesDraft,
   safeDeal,
   validateSalesDraft
-} = require('../src/lib/salesWorkspace')
-const { buildMembershipAgreementHtml } = require('../utils/renderMembershipAgreement')
+} = require('../src/services/salesWorkspace')
+const { buildMembershipAgreementHtml } = require('../src/render/membershipAgreement')
 
 function validDraft(overrides = {}) {
   return normalizeSalesDraft({

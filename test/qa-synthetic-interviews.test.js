@@ -6,10 +6,10 @@ const { randomUUID } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const express = require('express');
 const { SCENARIOS, QUESTIONS, ANSWERS, CLOSING_QUESTION, QA_SERVICE_ID, QA_PERSONA_ID,
-  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, normalizeSpeech, scriptedAnswerReceived } = require('../src/lib/qaSyntheticInterviews');
-const { networkAction } = require('../src/lib/qaSyntheticInterviewRunner');
-const { createAdminSyntheticInterviewsRouter } = require('../routes/adminSyntheticInterviews');
-const { installSyntheticBrowser } = require('../src/lib/qaSyntheticBrowser');
+  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, normalizeSpeech, scriptedAnswerReceived } = require('../src/services/qaSyntheticInterviews');
+const { networkAction } = require('../src/services/qaSyntheticInterviewRunner');
+const { createAdminSyntheticInterviewsRouter } = require('../src/routes/admin/syntheticInterviews');
+const { installSyntheticBrowser } = require('../src/services/qaSyntheticBrowser');
 const { runInNewContext } = require('node:vm');
 
 const ENV = { ENABLE_QA_SYNTHETIC_INTERVIEWS: 'true', SUPABASE_URL: 'https://yjjxzxoghlpguquknyso.supabase.co',
@@ -290,9 +290,10 @@ test('admin route denies non-superadmins before listing, starting, stopping or r
 });
 
 test('integration is additive and runner has no database, credit, OTP, document or email mutation path', () => {
-  const app = readFileSync(require.resolve('../app'), 'utf8');
-  assert.match(app, /adminRouter\.use\('\/synthetic-interviews', requireAuth, requireAdmin, createAdminSyntheticInterviewsRouter\(\)\)/);
-  const runner = readFileSync(require.resolve('../src/lib/qaSyntheticInterviewRunner'), 'utf8');
+  // The admin router lives in src/routes/admin/index.js after the refactor (Step 7).
+  const app = readFileSync(require.resolve('../src/routes/admin/index'), 'utf8');
+  assert.match(app, /router\.use\('\/synthetic-interviews', requireAuth, requireAdmin, createAdminSyntheticInterviewsRouter\(\)\)/);
+  const runner = readFileSync(require.resolve('../src/services/qaSyntheticInterviewRunner'), 'utf8');
   assert.doesNotMatch(runner, /supabase|\.rpc\(|\.patchPersona\(|createTavusInterviewHandler\(|callback_url\s*:|ensureTavusDocument/);
   assert.match(runner, /max_call_duration: 300/);
   assert.match(runner, /setRequestInterception\(true\)/);

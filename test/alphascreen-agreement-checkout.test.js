@@ -5,15 +5,16 @@ const crypto = require('node:crypto')
 const express = require('express')
 const http = require('node:http')
 const path = require('node:path')
+const projectRoot = path.resolve(__dirname, '..')
 const { test } = require('node:test')
 
-const routePath = path.join(__dirname, '..', 'routes', 'membershipAgreementsPublic.js')
-const supabaseClientPath = path.join(__dirname, '..', 'src', 'lib', 'supabaseClient.js')
-const clientBillingScopePath = path.join(__dirname, '..', 'src', 'lib', 'clientBillingScope.js')
-const subscriptionCheckoutPath = path.join(__dirname, '..', 'src', 'lib', 'subscriptionCheckout.js')
-const pdfRendererPath = path.join(__dirname, '..', 'utils', 'pdfRenderer.js')
-const mailerPath = path.join(__dirname, '..', 'utils', 'mailer.js')
-const urlConfigPath = path.join(__dirname, '..', 'config', 'urlConfig.js')
+const routePath = path.join(__dirname, '..', 'src', 'routes', 'public', 'membershipAgreements', 'index.js')
+const supabaseClientPath = path.join(__dirname, '..', 'src', 'clients', 'supabase.js')
+const clientBillingScopePath = path.join(__dirname, '..', 'src', 'services', 'clientBillingScope.js')
+const subscriptionCheckoutPath = path.join(__dirname, '..', 'src', 'services', 'subscriptionCheckout.js')
+const pdfRendererPath = path.join(__dirname, '..', 'src', 'render', 'pdfRenderer.js')
+const mailerPath = path.join(__dirname, '..', 'src', 'clients', 'sendgrid.js')
+const urlConfigPath = path.join(__dirname, '..', 'src', 'config', 'urlConfig.js')
 
 const TOKEN = 'phase-c3-test-token'
 const TOKEN_HASH = crypto.createHash('sha256').update(TOKEN).digest('hex')
@@ -280,6 +281,13 @@ function makeDb(options = {}) {
 }
 
 function buildApp(db) {
+  // The router is assembled from several files that each cache the modules stubbed
+  // below, so every first-party module reloads on each build.
+  for (const cached of Object.keys(require.cache)) {
+    if (cached.startsWith(projectRoot) && !cached.includes('node_modules')) {
+      delete require.cache[cached]
+    }
+  }
   for (const filename of [
     routePath,
     supabaseClientPath,

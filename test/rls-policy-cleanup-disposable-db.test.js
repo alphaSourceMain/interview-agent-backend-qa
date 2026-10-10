@@ -33,7 +33,7 @@ const INSERT_IDS = {
 };
 
 function psqlArgs(database = DATABASE) {
-  return ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-h', '/tmp', '-p', '5432', '-d', database, '-At'];
+  return ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-h', (process.env.PGHOST || '/tmp'), '-p', (process.env.PGPORT || '5432'), '-d', database, '-At'];
 }
 
 function sql(statement, options = {}) {
@@ -52,7 +52,7 @@ function applyFile(filename) {
 }
 
 function databaseCommand(command, database) {
-  return spawnSync(command, ['-h', '/tmp', '-p', '5432', database], { encoding: 'utf8' });
+  return spawnSync(command, ['-h', (process.env.PGHOST || '/tmp'), '-p', (process.env.PGPORT || '5432'), database], { encoding: 'utf8' });
 }
 
 function migrationPath() {

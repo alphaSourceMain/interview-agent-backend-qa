@@ -4,7 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const {buildFixture,people,roles}=require('../demo/northstar');
 const {migrationSql,signalsMigrationSql}=require('../demo/migration');
-const {DEMO_CLIENT_ID,QA_URL,isQa,safeDemoRequest,referencesDemo,assertDemoPrincipal,uuid}=require('../src/lib/salesDemo');
+const {DEMO_CLIENT_ID,QA_URL,isQa,safeDemoRequest,referencesDemo,assertDemoPrincipal,uuid}=require('../src/services/salesDemo');
 
 test('closed fictional fixture: one client, two roles, three candidates per role, six bound reports and transcripts',()=>{
   const f=buildFixture();
@@ -75,9 +75,13 @@ test('database restore contains closure/collision assertions, one transaction lo
   assert.ok(sql.includes("c.is_generated='NEVER'"));
 });
 test('batch workers explicitly exclude demo and scoring/messaging cannot process fixture objects',()=>{
-  for(const name of ['jobs/sendNightlyDigests.js','scripts/normalizeCandidates.js','scripts/backfillInterviews.js','scripts/rescoreRoleInterviews.js','src/lib/recordingCleanup.js']){
+  for(const name of ['scripts/normalizeCandidates.js','scripts/backfillInterviews.js','scripts/rescoreRoleInterviews.js','src/services/recordingCleanup.js']){
     assert.match(fs.readFileSync(require('node:path').join(__dirname,'..',name),'utf8'),/neq\('client_id', require\(.+salesDemo.+\)\.DEMO_CLIENT_ID\)/);
   }
-  assert.match(fs.readFileSync(require('node:path').join(__dirname,'../src/lib/candidateAutomationEvaluator.js'),'utf8'),/demo_automation_disabled/);
-  assert.match(fs.readFileSync(require('node:path').join(__dirname,'../src/lib/automationActions.js'),'utf8'),/Demo actions cannot send messages/);
+  // Ours, not the client's: jobs/sendNightlyDigests.js was removed here as dead code
+  // (refactor commit 1b4313d) and is deliberately not ported. If it ever comes back,
+  // it must come back with the demo exclusion, so its absence is asserted.
+  assert.equal(fs.existsSync(require('node:path').join(__dirname,'..','jobs','sendNightlyDigests.js')),false);
+  assert.match(fs.readFileSync(require('node:path').join(__dirname,'../src/services/candidateAutomationEvaluator.js'),'utf8'),/demo_automation_disabled/);
+  assert.match(fs.readFileSync(require('node:path').join(__dirname,'../src/services/automationActions.js'),'utf8'),/Demo actions cannot send messages/);
 });

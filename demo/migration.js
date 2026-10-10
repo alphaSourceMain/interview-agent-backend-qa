@@ -1,6 +1,6 @@
 'use strict';
 const { buildFixture } = require('./northstar');
-const { DEMO_CLIENT_ID } = require('../src/lib/salesDemo');
+const { DEMO_CLIENT_ID } = require('../src/services/salesDemo');
 function migrationSql() {
   // Keep the already-applied v1 migration immutable; v2 is a separate update.
   const baseline = JSON.stringify(buildFixture(new Date('2026-10-08T21:00:00Z'), { syntheticSignals: false })).replace(/'/g, "''");

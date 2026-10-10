@@ -1,5 +1,5 @@
 'use strict';
-const { DEMO_CLIENT_ID, uuid } = require('../src/lib/salesDemo');
+const { DEMO_CLIENT_ID, uuid } = require('../src/services/salesDemo');
 
 // Authored examples, not assessments of real people or results of model scoring.
 const roles = [

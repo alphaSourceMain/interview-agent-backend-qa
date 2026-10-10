@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const express = require('express');
-const { createAdminSmsMonitoringRouter } = require('../routes/adminSmsMonitoring');
+const { createAdminSmsMonitoringRouter } = require('../src/routes/admin/smsMonitoring');
 
 async function withServer({ isGlobalAdmin, service }, run) {
   const app = express();
@@ -83,9 +83,9 @@ test('route failures are bounded and do not expose raw diagnostics', async () =>
 });
 
 test('app mounts the monitoring router behind existing auth and admin authorization', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'admin', 'index.js'), 'utf8');
   assert.match(
     source,
-    /adminRouter\.use\('\/sms-monitoring', requireAuth, requireAdmin, createAdminSmsMonitoringRouter\(\)\)/,
+    /router\.use\('\/sms-monitoring', requireAuth, requireAdmin, createAdminSmsMonitoringRouter\(\)\)/,
   );
 });

@@ -1,8 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
-const { createSupportHandoff, createPhoneHandoffRouter, validateHandoff, SUPPORT_TOOL } = require('../src/lib/supportHandoff');
-const { classifyProviderEvent } = require('../src/lib/supportVoiceProtocol');
+const { createSupportHandoff, createPhoneHandoffRouter, validateHandoff, SUPPORT_TOOL } = require('../src/services/supportHandoff');
+const { classifyProviderEvent } = require('../src/services/supportVoiceProtocol');
 
 const input = { summary: 'Please help with the role setup workflow', contact_name: 'Alex Rivera', contact_email: 'client@example.com', confirmed: true };
 const env = { SUPPORT_HANDOFF_ENABLED: 'true', SENDGRID_API_KEY: 'not-a-real-key-xxxxxxxxxxxxxxxx', SUPPORT_PHONE_HANDOFF_TOKEN: 'not-a-real-phone-token-xxxxxxxxxxxxxxxx' };

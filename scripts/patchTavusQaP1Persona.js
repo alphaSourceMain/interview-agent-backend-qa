@@ -1,8 +1,8 @@
 // Manual QA-only script. Do not run against production persona.
 'use strict';
 
-const { createTavusHttpClient } = require('../src/lib/tavusHttpClient');
-const { INTERVIEW_CLOSING_PROMPT_LINES, INTERVIEW_CLOSING_REMINDER } = require('../src/lib/interviewClosingContract');
+const { createTavusHttpClient } = require('../src/clients/tavus');
+const { INTERVIEW_CLOSING_PROMPT_LINES, INTERVIEW_CLOSING_REMINDER } = require('../src/services/interviewClosingContract');
 
 const systemPrompt = `You are the alphaScreen structured interview persona.
 

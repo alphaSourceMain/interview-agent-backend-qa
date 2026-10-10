@@ -3,8 +3,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const express = require('express');
-const { createAdminSalesPayrollRouter } = require('../routes/adminSalesPayroll');
-const { HEADERS } = require('../src/lib/mercuryPayrollCsv');
+const { createAdminSalesPayrollRouter } = require('../src/routes/admin/salesPayroll');
+const { HEADERS } = require('../src/services/mercuryPayrollCsv');
 const JSZip = require('jszip');
 
 async function withServer(callback, db = {}) {
@@ -229,4 +229,14 @@ test('Mercury preview never writes and import stays closed without approved sour
     else process.env.SALES_MERCURY_PAYROLL_ACCOUNT_SHA256 = previous;
   }
   assert.equal(calls, 0);
+});
+
+// Ours, not the client's. The client's tests mount this router directly with a stub
+// user, so this keeps the authentication and admin check on the real mount covered.
+// The admin router lives in src/routes/admin/index.js after the refactor (Step 7).
+test('sales payroll route is mounted behind authentication and admin authorization', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'admin', 'index.js'), 'utf8');
+  assert.match(source, /router\.use\('\/sales-payroll', requireAuth, requireAdmin, createAdminSalesPayrollRouter\(\{ db: supabaseAdmin \}\)\)/);
 });

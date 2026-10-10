@@ -1,5 +1,5 @@
 'use strict';
-const { DEMO_CLIENT_ID, uuid } = require('../src/lib/salesDemo');
+const { DEMO_CLIENT_ID, uuid } = require('../src/services/salesDemo');
 
 // Authored presentation data only. No child tenant, invoice, card, user or
 // automation object is created at any provider or in the database.

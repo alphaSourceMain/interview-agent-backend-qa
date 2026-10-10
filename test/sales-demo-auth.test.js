@@ -1,7 +1,7 @@
 'use strict';
 const {test}=require('node:test');const assert=require('node:assert/strict');
-const {DEMO_CLIENT_ID,QA_URL}=require('../src/lib/salesDemo');
-const clientPath=require.resolve('../src/lib/supabaseClient');const authPath=require.resolve('../src/middleware/auth');
+const {DEMO_CLIENT_ID,QA_URL}=require('../src/services/salesDemo');
+const clientPath=require.resolve('../src/clients/supabase');const authPath=require.resolve('../src/middleware/auth');
 async function exercise({extra=false,sales=false,path='/dashboard/rows'}={}){
   const db={auth:{getUser:async()=>({data:{user:{id:'rep',email:'rep@example.invalid',app_metadata:{sales_demo_client_id:DEMO_CLIENT_ID}}},error:null})},from(table){const q={select(){return q},eq(){return q},limit(){return q},maybeSingle:async()=>({data:null,error:null}),then(resolve){const data=table==='client_members'?[{client_id:DEMO_CLIENT_ID,role:'manager'},...(extra?[{client_id:'forbidden',role:'member'}]:[])]:table==='sales_reps'&&sales?[{user_id:'rep'}]:[];return Promise.resolve({data,error:null}).then(resolve)}};return q}};
   require.cache[clientPath]={id:clientPath,filename:clientPath,loaded:true,exports:{supabaseAdmin:db,supabaseAnon:db}};delete require.cache[authPath];

@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { HEADERS, parseMercuryPayrollCsv } = require('../src/lib/mercuryPayrollCsv');
+const { HEADERS, parseMercuryPayrollCsv } = require('../src/services/mercuryPayrollCsv');
 
 function fixture(overrides = {}) {
   const values = {

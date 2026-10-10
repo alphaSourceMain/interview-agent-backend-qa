@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const JSZip = require('jszip');
-const { buildSalesPayrollWorkbook, safeSheetNames, excelDate } = require('../src/lib/salesPayrollWorkbook');
+const { buildSalesPayrollWorkbook, safeSheetNames, excelDate } = require('../src/services/salesPayrollWorkbook');
 
 test('Excel date conversion uses real date values and rejects impossible dates', () => {
   assert.equal(excelDate('2026-10-03'), 46298);

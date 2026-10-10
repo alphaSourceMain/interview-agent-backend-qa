@@ -16,7 +16,7 @@ const LINE_1 = '21000000-0000-4000-8000-000000000001';
 const LINE_2 = '21000000-0000-4000-8000-000000000002';
 
 function psqlArgs(database = TEMP_DATABASE) {
-  return ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-h', '/tmp', '-p', '5432', '-d', database || 'postgres', '-At'];
+  return ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-h', (process.env.PGHOST || '/tmp'), '-p', (process.env.PGPORT || '5432'), '-d', database || 'postgres', '-At'];
 }
 
 function sql(statement, options = {}) {
@@ -26,7 +26,7 @@ function sql(statement, options = {}) {
 }
 
 function databaseCommand(command, database) {
-  return spawnSync(command, ['-h', '/tmp', '-p', '5432', database], { encoding: 'utf8' });
+  return spawnSync(command, ['-h', (process.env.PGHOST || '/tmp'), '-p', (process.env.PGPORT || '5432'), database], { encoding: 'utf8' });
 }
 
 function applyFile(database, filename) {

@@ -1,7 +1,7 @@
 'use strict';
 const {test}=require('node:test'); const assert=require('node:assert/strict');
 const {provision}=require('../demo/provision');
-const {QA_URL,DEMO_CLIENT_ID}=require('../src/lib/salesDemo');
+const {QA_URL,DEMO_CLIENT_ID}=require('../src/services/salesDemo');
 function fake({existing=false,extra=false}={}) {
   const state={users:existing?[{email:'michael@alphasourceai.com'}]:[],members:[],emails:[],creates:0,links:0};
   const db={auth:{admin:{

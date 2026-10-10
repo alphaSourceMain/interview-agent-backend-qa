@@ -9,10 +9,11 @@ const ROOT = path.resolve(__dirname, '..');
 const read = (...parts) => fs.readFileSync(path.join(ROOT, ...parts), 'utf8');
 const migration = read('supabase', 'migrations', '20260721160715_interview_recovery_core.sql');
 const phaseBMigration = read('supabase', 'migrations', '20260717120000_candidate_incident_phase_b.sql');
-const recoveryRoute = read('routes', 'interviewRecovery.js');
-const startRoute = read('routes', 'createTavusInterview.js');
-const reportRoute = read('routes', 'reportsPdf.js');
+const recoveryRoute = read('src', 'routes', 'admin', 'interviewRecovery.js');
+const startRoute = read('src', 'routes', 'public', 'createTavusInterview.js');
+const reportRoute = read('src', 'routes', 'client', 'reportsPdf.js');
 const app = read('app.js');
+const adminCandidates = read('src', 'routes', 'admin', 'candidates.js');
 
 test('Recovery Core source 1. migration is additive and does not classify historical interview/report rows', () => {
   const definitionPrefix = migration.slice(0, migration.indexOf('create or replace function'));
@@ -60,9 +61,9 @@ test('Recovery Core source 3. security-definer functions are fixed-path and narr
 
 test('Recovery Core source 4. feature gating fails closed and health exposes only bounded booleans', () => {
   assert.match(recoveryRoute, /router\.use[\s\S]*if \(!featureEnabled\(\)\) return disabledResponse/);
-  assert.match(app, /interview_recovery_core:\s*isInterviewRecoveryCoreEnabled\(\)/);
+  assert.match(adminCandidates, /interview_recovery_core:\s*isInterviewRecoveryCoreEnabled\(\)/);
   assert.match(app, /interview_recovery_core:\s*\{[\s\S]*enabled: isInterviewRecoveryCoreEnabled\(\),[\s\S]*email_enabled: isInterviewRecoveryCoreEmailEnabled\(\)/);
-  assert.match(app, /interview_recovery_core_email: isInterviewRecoveryCoreEmailEnabled\(\)/);
+  assert.match(adminCandidates, /interview_recovery_core_email: isInterviewRecoveryCoreEmailEnabled\(\)/);
   assert.match(recoveryRoute, /resetMode === 'reset_and_send' && !emailFeatureEnabled\(\)/);
   assert.doesNotMatch(app, /interview_recovery_core:[^\n]*process\.env\.INTERVIEW_RECOVERY_CORE_ENABLED/);
 });

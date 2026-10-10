@@ -50,7 +50,7 @@ async function main() {
     const { data: rows, error } = await supabase
       .from('candidates')
       .select('id, role_id, name, email, phone, created_at', { count: 'exact' })
-      .neq('client_id', require('../src/lib/salesDemo').DEMO_CLIENT_ID)
+      .neq('client_id', require('../src/services/salesDemo').DEMO_CLIENT_ID)
       .order('created_at', { ascending: true })
       .range(from, from + batch - 1);
 

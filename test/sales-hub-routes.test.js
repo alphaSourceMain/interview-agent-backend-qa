@@ -3,9 +3,9 @@ const assert = require('node:assert/strict')
 const { test } = require('node:test')
 const express = require('express')
 const http = require('node:http')
-const clientPath = require.resolve('../src/lib/supabaseClient')
+const clientPath = require.resolve('../src/clients/supabase')
 require.cache[clientPath] = { id: clientPath, filename: clientPath, loaded: true, exports: { supabaseAdmin: {} } }
-const { createSalesRouter } = require('../routes/sales')
+const { createSalesRouter } = require('../src/routes/sales')
 const { createRequireSalesRep } = require('../src/middleware/salesAuth')
 
 function fakeDb(failCounts = false) {

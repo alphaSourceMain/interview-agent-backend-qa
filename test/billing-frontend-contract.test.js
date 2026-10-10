@@ -236,6 +236,61 @@ test('the role availability fields are documented exactly', async () => {
 
 // --- the admin endpoint ----------------------------------------------------
 
+test('the admin role availability fields are documented exactly', async () => {
+  delete require.cache[availabilityPath];
+  const { getRoleInterviewAvailability } = require(availabilityPath);
+
+  const availability = await getRoleInterviewAvailability({
+    db: makeDb(), roleId: 'role_1', clientId: MINE
+  });
+
+  // GET /admin/roles exposes a subset of the service's shape, as GET /roles
+  // does; the contract documents what the route returns, so that is what is
+  // compared. test/billing-admin-roles-allocation.test.js drives the real route
+  // and asserts the same eight fields are on every item.
+  const documented = documentedFields('GET /admin/roles availability');
+  const rolesSource = fs.readFileSync(path.join(ROOT, 'src', 'routes', 'admin', 'roles.js'), 'utf8');
+  for (const field of documented) {
+    assert.ok(field in availability, field + ' is documented but not returned');
+    assert.match(rolesSource, new RegExp(field + ': availability\\?\\.' + field),
+      field + ' is documented but GET /admin/roles does not expose it');
+  }
+});
+
+test('the admin roles list reports everything the client list does', () => {
+  // Parity is the point: an administrator answering "why can this role not
+  // start an interview" must not be looking at fewer figures than the client.
+  const client = documentedFields('GET /roles availability');
+  const admin = documentedFields('GET /admin/roles availability');
+
+  for (const field of client) {
+    assert.ok(admin.includes(field), field + ' is on the client list but not the admin one');
+  }
+});
+
+test('the admin roles fallback lists every field, so a failed lookup is not a partial row', () => {
+  const rolesSource = fs.readFileSync(path.join(ROOT, 'src', 'routes', 'admin', 'roles.js'), 'utf8');
+  const fallback = rolesSource.slice(
+    rolesSource.indexOf('const availabilityFallback'),
+    rolesSource.indexOf('const allocationByBillingClientId')
+  );
+
+  for (const field of documentedFields('GET /admin/roles availability')) {
+    assert.ok(fallback.includes(field + ': null'),
+      field + ' must be null in the fallback, not absent');
+  }
+});
+
+test('the admin roles list allocates once per billing owner', () => {
+  const rolesSource = fs.readFileSync(path.join(ROOT, 'src', 'routes', 'admin', 'roles.js'), 'utf8');
+
+  assert.match(rolesSource, /allocationByBillingClientId/,
+    'an admin list spans clients, so the allocation is cached per payer');
+  assert.match(rolesSource, /getRoleInterviewAvailability\(\{[\s\S]{0,160}?allocation\s*\}\)/,
+    'and handed to each role rather than recomputed');
+});
+
+
 test('the admin billing summary and its role rows are documented exactly', async () => {
   const res = await request(loadAdminApp(makeDb())).get(`/admin/clients/${MINE}/billing-summary`);
 

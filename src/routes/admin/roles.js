@@ -8,6 +8,8 @@ const { ensureTavusDocumentForRole } = require('../../services/tavusDocuments');
 const { loadEntityMap, resolveEntityFilter, withEntityFields } = require('../../services/entityScopeFilter');
 const { normalizeInterviewType, normalizeRoleInterviewTypeForRead } = require('../../services/interviewTypes');
 const { getRoleInterviewAvailability } = require('../../services/roleInterviewAvailability');
+const { allocateInterviews } = require('../../services/interviewAllocation');
+const { resolveBillingOwnerForScope } = require('../../services/clientBillingScope');
 const { getRoleJdReplacementEligibility } = require('../../services/roleJdReplacement');
 const { syncRoleCreditsForStatusChange } = require('../../services/interviewCredits');
 const { supabaseAdmin } = require('../../clients/supabase');
@@ -75,7 +77,29 @@ router.get('/roles', requireAuth, requireAdmin, async (req, res) => {
     included_interviews_per_role: null,
     purchased_interviews: null,
     used_interviews: null,
-    remaining_interviews: null
+    remaining_interviews: null,
+    own_remaining_interviews: null,
+    credit_interviews: null,
+    pool_remaining_interviews: null,
+    billing_model: null
+  }
+
+  // The allocation walks every used interview belonging to a payer, so a list
+  // spanning several clients must compute one per payer and reuse it — not one
+  // per role. The promise is cached rather than the result, so roles resolved
+  // concurrently below share a single pass instead of racing to start their own.
+  const allocationByBillingClientId = new Map()
+  const allocationFor = async (roleClientId) => {
+    const scope = await resolveBillingOwnerForScope(supabaseAdmin, roleClientId)
+    if (!scope.ok) return null
+    const billingClientId = scope.billingClientId || roleClientId
+    if (!allocationByBillingClientId.has(billingClientId)) {
+      allocationByBillingClientId.set(
+        billingClientId,
+        allocateInterviews({ db: supabaseAdmin, billingClientId })
+      )
+    }
+    return allocationByBillingClientId.get(billingClientId)
   }
   const items = await Promise.all(rows.map(async (rawRole) => {
     const role = normalizeRoleInterviewTypeForRead(rawRole)
@@ -90,17 +114,26 @@ router.get('/roles', requireAuth, requireAdmin, async (req, res) => {
           }
         }, entityMap, role?.client_id)
       }
+      const allocation = await allocationFor(role.client_id)
       const availability = await getRoleInterviewAvailability({
         db: supabaseAdmin,
         roleId: role.id,
-        clientId: role.client_id
+        clientId: role.client_id,
+        allocation
       })
       return withEntityFields({
         ...role,
         included_interviews_per_role: availability?.included_interviews_per_role ?? null,
         purchased_interviews: availability?.purchased_interviews ?? null,
         used_interviews: availability?.used_interviews ?? null,
+        // Null under the usage model means there is no limit, not that the role
+        // is out of interviews. billing_model is alongside it so a reader can
+        // tell the two apart.
         remaining_interviews: availability?.remaining_interviews ?? null,
+        own_remaining_interviews: availability?.own_remaining_interviews ?? null,
+        credit_interviews: availability?.credit_interviews ?? null,
+        pool_remaining_interviews: availability?.pool_remaining_interviews ?? null,
+        billing_model: availability?.billing_model ?? null,
         job_description_replacement: replacementEligibilityByRoleId[role.id] || {
           eligible: false,
           blockers: ['eligibility_unavailable']

@@ -1,24 +1,47 @@
 {
   "permissions": {
-    "defaultMode": "acceptEdits",
-    "blockReadsOutsideWorkingDirectories": true,
-    "additionalDirectories": [],
     "allow": [
       "Read(./**)",
       "Edit(./**)",
       "Write(./**)",
-      "Bash"
+      "Bash",
+      "Bash(sed -i \"282s/additional_interview_price, 30\\)/additional_interview_price, 25\\)/; 332s/additional_interview_fee, 35\\)/additional_interview_fee, 30\\)/; 525s/additional_interview_price: 30,/additional_interview_price: 25,/; 526s/additional_interview_fee: 30,/additional_interview_fee: 25,/; 527s/overage_price: 30,/overage_price: 25,/\" test/alphascreen-purchase-intents.test.js)",
+      "Bash(sed -i \"185s/additional_interview_fee: 35,/additional_interview_fee: 30,/\" test/billing-model-provisioning.test.js)",
+      "Bash(sed -i \"s#^const { syncInterviewCreditDraw } = require\\('../interviewCredits'\\);#const { syncInterviewCreditDraw } = require\\('../interviewCredits'\\);\\\\nconst { markInterviewCompleted } = require\\('../interviewCompletion'\\);#\" src/services/tavusEvents/index.js)",
+      "Bash(sed -i \"s#^const { syncInterviewCreditDraw } = require\\('../../services/interviewCredits'\\);#const { syncInterviewCreditDraw } = require\\('../../services/interviewCredits'\\);\\\\nconst { markInterviewCompleted } = require\\('../../services/interviewCompletion'\\);#\" src/routes/public/textInterview.js)"
     ],
     "deny": [
-      "Read(//c/Users/**)", "Edit(//c/Users/**)",
-      "Read(//c/reviews/client-review/**)", "Edit(//c/reviews/client-review/**)",
-      "Read(//**/.env)", "Read(//**/.env.*)", "Read(./.env)", "Read(./.env.*)",
-      "Read(~/.ssh/**)", "Read(~/.aws/**)",
-      "Bash(cd /c*)", "Bash(cd C:*)", "Bash(cd c:*)", "Bash(cd ..*)", "Bash(cd ~*)",
-      "Bash(pushd *)", "Bash(powershell *)", "Bash(pwsh *)", "Bash(cmd *)",
-      "Bash(git push *)", "Bash(git push)", "Bash(git remote *)", "Bash(git reset --hard*)",
-      "Bash(curl *)", "Bash(wget *)", "Bash(rm -rf *)",
-      "Write(./.claude/**)", "Edit(./.claude/**)"
-    ]
+      "Read(//c/Users/**)",
+      "Edit(//c/Users/**)",
+      "Read(//c/reviews/client-review/**)",
+      "Edit(//c/reviews/client-review/**)",
+      "Read(//**/.env)",
+      "Read(//**/.env.*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Bash(cd /c*)",
+      "Bash(cd C:*)",
+      "Bash(cd c:*)",
+      "Bash(cd ..*)",
+      "Bash(cd ~*)",
+      "Bash(pushd *)",
+      "Bash(powershell *)",
+      "Bash(pwsh *)",
+      "Bash(cmd *)",
+      "Bash(git push *)",
+      "Bash(git push)",
+      "Bash(git remote *)",
+      "Bash(git reset --hard*)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(rm -rf *)",
+      "Write(./.claude/**)",
+      "Edit(./.claude/**)"
+    ],
+    "defaultMode": "acceptEdits",
+    "blockReadsOutsideWorkingDirectories": true,
+    "additionalDirectories": []
   }
 }

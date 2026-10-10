@@ -253,6 +253,35 @@ Treat null as "unknown", not as zero.
 
 Require an authenticated administrator.
 
+### GET /admin/roles — the availability fields
+
+The same eight figures as the client roles list, plus the pool. An
+administrator's list can span many clients; the figures for each role are those
+of whoever pays for it.
+
+<!-- fields: GET /admin/roles availability -->
+
+| Field | Type | Null? | Meaning |
+| --- | --- | --- | --- |
+| `included_interviews_per_role` | integer | yes | The free allowance every role gets on that client's plan. |
+| `purchased_interviews` | integer | yes | Extra interviews bought for this role specifically. |
+| `used_interviews` | integer | yes | Interviews this role has used. |
+| `remaining_interviews` | integer | yes | What the role can still run. **Null on `usage`** — no limit, not zero. |
+| `own_remaining_interviews` | integer | yes | What is left of the role's own allowance, before credit. |
+| `credit_interviews` | integer | yes | Client credit spendable on this role. 0 outside `rollover`. |
+| `pool_remaining_interviews` | integer | yes | What is left of the payer's Enterprise pool. 0 outside `usage`. |
+| `billing_model` | string | yes | Which model these numbers should be read under. |
+
+**`billing_model` is how a null `remaining_interviews` is read.** Null with
+`billing_model: "usage"` means there is no cap — show the pool figure instead.
+Null with `billing_model: null` means the client's plan could not be read, and
+nothing about that role's capacity is known. Rendering either as "0 remaining"
+is wrong, and for different reasons.
+
+The rest of the role payload — title, status, rubric, `job_description_replacement`
+and the entity fields — is unchanged.
+
+
 ### GET /admin/clients/:id/billing-summary
 
 Everything about one client's billing in a single call.

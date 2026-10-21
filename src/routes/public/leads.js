@@ -2,6 +2,7 @@
 
 const express = require('express');
 const { supabaseAdmin } = require('../../clients/supabase');
+const notifications = require('../../services/publicLeadNotifications');
 
 const router = express.Router();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -9,6 +10,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const RATE_WINDOW_MS = 60 * 1000;
 const RATE_MAX = 60;
 const rateBuckets = new Map();
+const submittedBuckets = new Map();
 const VALID_STATUSES = new Set(['partial', 'abandoned', 'submitted']);
 
 function rateLimit(req, res, next) {
@@ -20,6 +22,7 @@ function rateLimit(req, res, next) {
     : current;
   bucket.count += 1;
   rateBuckets.set(ip, bucket);
+  if(rateBuckets.size>1000)for(const [key,value] of rateBuckets)if(value.resetAt<=now)rateBuckets.delete(key);
   if (bucket.count > RATE_MAX) {
     return res.status(429).json({
       error: 'rate_limited',
@@ -27,6 +30,16 @@ function rateLimit(req, res, next) {
       request_id: req.request_id || null,
     });
   }
+  return next();
+}
+
+function submittedRateLimit(req,res,next){
+  if(req.body?.status!=='submitted')return next();
+  const now=Date.now(),ip=String((req.headers['x-forwarded-for']||req.ip||'unknown')).split(',')[0].trim();
+  const old=submittedBuckets.get(ip),bucket=old&&old.resetAt>now?old:{count:0,resetAt:now+RATE_WINDOW_MS};
+  bucket.count++;submittedBuckets.set(ip,bucket);
+  if(submittedBuckets.size>1000)for(const [key,value] of submittedBuckets)if(value.resetAt<=now)submittedBuckets.delete(key);
+  if(bucket.count>10)return res.status(429).json({error:'rate_limited',code:'RATE_LIMIT_EXCEEDED',request_id:req.request_id||null});
   return next();
 }
 
@@ -90,7 +103,7 @@ function normalizeFieldsCompleted(value) {
   ));
 }
 
-router.post('/draft', rateLimit, async (req, res) => {
+router.post('/draft', rateLimit, submittedRateLimit, async (req, res) => {
   try {
     const body = req.body || {};
     const draftId = trimText(body.draft_id, 80);
@@ -125,21 +138,6 @@ router.post('/draft', rateLimit, async (req, res) => {
     const isSubmitted = status === 'submitted';
     const now = new Date().toISOString();
 
-    if (!isSubmitted) {
-      const existing = await supabaseAdmin
-        .from('public_lead_drafts')
-        .select('id,status')
-        .eq('id', draftId)
-        .maybeSingle();
-      if (!existing.error && existing.data?.status === 'submitted') {
-        return res.json({
-          ok: true,
-          item: existing.data,
-          request_id: req.request_id || null,
-        });
-      }
-    }
-
     const row = {
       id: draftId,
       status,
@@ -165,29 +163,35 @@ router.post('/draft', rateLimit, async (req, res) => {
       submitted_at: isSubmitted ? now : null,
     };
 
-    const { data, error } = await supabaseAdmin
-      .from('public_lead_drafts')
-      .upsert(row, { onConflict: 'id' })
-      .select('id,status')
-      .single();
+    const config=notifications.configuration();
+    const { data, error } = await supabaseAdmin.rpc('save_public_lead_capture',{
+      p_row:row,p_notification_environment:config?.environment||null,
+      p_notifications_activated_at:config?.activatedAt||null,
+    });
 
     if (error) {
-      console.error('[public-leads/draft] upsert error:', error.message);
+      console.error('[public-leads/draft] capture_failed', {code:error.code||'database_error'});
       return res.status(503).json({
         error: 'lead_capture_not_configured',
         code: 'LEAD_TABLE_ERROR',
-        detail: error.message,
         request_id: req.request_id || null,
       });
     }
 
+    if(!data?.item?.id||!data.item.status)throw Error('invalid_capture_result');
+    if(isSubmitted&&process.env.PUBLIC_LEAD_NOTIFICATIONS_ENABLED==='true'&&!config)
+      console.warn('[public-leads] notification_configuration_held');
+    if(data.notification)await notifications.deliver(data.notification,{
+      db:supabaseAdmin,send:notification=>require('../../clients/sendgrid').sendPublicLeadNotification(notification),
+    });
+
     return res.json({
       ok: true,
-      item: data,
+      item: data.item,
       request_id: req.request_id || null,
     });
   } catch (e) {
-    console.error('[public-leads/draft] unexpected:', e?.message || e);
+    console.error('[public-leads/draft] unexpected_capture_error');
     return res.status(500).json({
       error: 'server_error',
       code: 'SERVER_ERROR',

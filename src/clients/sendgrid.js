@@ -805,7 +805,15 @@ async function sendRetailRenewalNoticeEmail(to,facts) {
   return{statusCode:resp?.statusCode||0,providerReference:resp?.headers?.['x-message-id']||null};
 }
 
+async function sendPublicLeadNotification(notification) {
+  const message=require('../services/publicLeadNotifications').buildMessage(notification,{buildBrandedEmailShell,escapeHtml});
+  if(!API_KEY)return{skipped:true};
+  const [response]=await sg.send(message);
+  return{statusCode:response?.statusCode||0,providerReference:response?.headers?.['x-message-id']||null};
+}
+
 module.exports = {
+  sendPublicLeadNotification,
   escapeHtml,
   buildBrandedEmailShell,
   sendInvite,

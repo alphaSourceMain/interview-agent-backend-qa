@@ -51,7 +51,8 @@ function hold() {
 function sandboxRequested(env = process.env) { return env.DEV_PRICING_SANDBOX_ENABLED === 'true'; }
 function sandboxFingerprint(env) {
   const keys = [...new Set(['APP_ENV','RENDER_SERVICE_ID','RENDER_EXTERNAL_URL','SUPABASE_URL','FRONTEND_URL',
-    'DEV_PRICING_SANDBOX_ENABLED','DEV_STRIPE_ACCOUNT_ID','DEV_PRICING_EMAIL_RECIPIENTS','DEV_USAGE_BILLING_CLIENT_ID','SENDGRID_FROM',...OFF_FLAGS,...FORBIDDEN_CREDENTIALS,
+    'DEV_PRICING_SANDBOX_ENABLED','DEV_STRIPE_ACCOUNT_ID','DEV_PRICING_EMAIL_RECIPIENTS','DEV_USAGE_BILLING_CLIENT_ID','SENDGRID_FROM',
+    'PUBLIC_LEAD_NOTIFICATIONS_ENABLED','PUBLIC_LEAD_NOTIFICATIONS_ACTIVATED_AT',...OFF_FLAGS,...FORBIDDEN_CREDENTIALS,
     ...Object.keys(env).filter(k=>k.startsWith('STRIPE_'))])].sort();
   return require('node:crypto').createHash('sha256').update(JSON.stringify(keys.map(k=>[k,env[k]??null]))).digest('hex');
 }
@@ -176,8 +177,9 @@ function guardedPricingDevFence(req, res, next) {
     ['/api/alphascreen/purchase-intents','/admin/billing/agreements/send','/sales/deals'].includes(pathname)
     ||new RegExp('^/api/alphascreen/purchase-intents/'+id+'/(agreement|email-verification/send|email-verification/verify)$').test(pathname)
     ||new RegExp('^/sales/deals/'+id+'/(resend-agreement|send-payment-reminder|cancel)$').test(pathname));
+  const leadCaptureMutation=isDevBillingSandbox()&&method==='POST'&&pathname==='/api/public-leads/draft';
   if (!override && (['GET', 'HEAD', 'OPTIONS'].includes(method)
-    ||sandboxMutation||sandboxCron||mailMutation|| (method === 'POST' && (PREVIEW_POSTS.has(pathname) || pathname === '/webhook/stripe')))) return next();
+    ||sandboxMutation||sandboxCron||mailMutation||leadCaptureMutation|| (method === 'POST' && (PREVIEW_POSTS.has(pathname) || pathname === '/webhook/stripe')))) return next();
   res.setHeader('Cache-Control', 'no-store');
   if (req.headers?.origin === DEV_FRONTEND_URL) {
     res.setHeader('Access-Control-Allow-Origin', DEV_FRONTEND_URL);

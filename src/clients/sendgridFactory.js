@@ -3,7 +3,10 @@ const guard = require('../config/guardedPricingDev');
 
 function guardCall(target, key) {
   return (...args) => {
-    if(guard.isGuardedPricingDev()&&['send','sendMultiple'].includes(key)&&guard.isDevPricingTestMail()){
+    if(guard.isGuardedPricingDev()&&key==='send'&&guard.isDevBillingSandbox()
+      &&require('../services/publicLeadNotifications').devMessageAllowed(args[0])){
+      // A single internal form alert, never a wider pricing-mail exemption.
+    }else if(guard.isGuardedPricingDev()&&['send','sendMultiple'].includes(key)&&guard.isDevPricingTestMail()){
       const {ownerMailRecipients,assertOwnerOnlyMail}=require('../config/devPricingTestMail');
       assertOwnerOnlyMail(args[0],ownerMailRecipients(process.env.DEV_PRICING_EMAIL_RECIPIENTS));
       if(!guard.isDevPricingTestMail())throw guard.hold();

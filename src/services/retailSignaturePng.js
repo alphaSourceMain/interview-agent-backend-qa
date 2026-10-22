@@ -26,11 +26,14 @@ function parseRetailSignature(raw){try{
     }else if(type==='IDAT'){check(header && length>0);compressed.push(data);}
     else if(type==='IEND'){check(header && compressed.length>0 && length===0 && end===bytes.length);ended=true;offset=end;break;}
     else {
-      check(header && compressed.length===0 && !seen.has(type) && ['sRGB','gAMA','cHRM','pHYs','sBIT','bKGD'].includes(type));seen.add(type);
+      check(header && compressed.length===0 && !seen.has(type) && ['sRGB','gAMA','cHRM','pHYs','sBIT','bKGD','eXIf'].includes(type));seen.add(type);
+      // Safari canvas adds EXIF. Ignore bounded opaque bytes (never interpret
+      // TIFF pointers); canonical output below strips all ancillary metadata.
       check((type==='sRGB' && length===1 && data[0]<=3) || (type==='gAMA' && length===4 && data.readUInt32BE(0)>0)
         || (type==='cHRM' && length===32) || (type==='pHYs' && length===9 && data[8]<=1)
         || (type==='sBIT' && length===4 && [...data].every(v=>v>=1 && v<=8))
-        || (type==='bKGD' && length===6 && [0,2,4].every(i=>data.readUInt16BE(i)<=255)));
+        || (type==='bKGD' && length===6 && [0,2,4].every(i=>data.readUInt16BE(i)<=255))
+        || (type==='eXIf' && length>=1 && length<=65536));
     }
     offset=end;
   }

@@ -47,6 +47,18 @@ test('signed historical source cannot upload, insert or send again',async()=>{
  await assert.rejects(()=>f.service.sign({...f.input,agreement:f.getSource()}),e=>e.code==='enterprise_execution_source_changed');
  assert.deepEqual(f.calls.slice(before),['source_read']);
 });
+test('Safari canvas fixture completes the same immutable Enterprise execution with metadata stripped',async()=>{
+ const f=fixture(),input=require('./fixtures/safari-canvas-signature.json').dataUrl;
+ const parsed=require('../src/services/retailSignaturePng').parseRetailSignature(input);
+ const result=await f.service.sign({...f.input,signatureDataUrl:input}),e=f.getSeal().execution;
+ assert.equal(result.agreement.status,'signed');assert.equal(e.width,600);assert.equal(e.height,220);
+ assert.equal(e.signature_sha256,parsed.sha256);assert.equal(e.pixels_sha256,parsed.pixels_sha256);
+ assert.deepEqual(f.files.get(e.signature_image_path),parsed.bytes);
+ assert.equal(f.calls.filter(v=>v==='insert').length,1);assert.equal(f.calls.filter(v=>v==='upload').length,2);
+ const before=f.calls.length;
+ await assert.rejects(()=>f.service.sign({...f.input,agreement:f.getSource(),signatureDataUrl:input}),e=>e.code==='enterprise_execution_source_changed');
+ assert.deepEqual(f.calls.slice(before),['source_read']);
+});
 for(const change of [{consent:'true'},{consent:false},{typedName:'<script>'},{typedName:'x\u202ey'},
  {typedName:'x'.repeat(161)},{signatureDataUrl:'data:image/png;base64,bad='},{ip:12}]){
  test(`invalid signature/consent ${JSON.stringify(change)} has zero effects`,async()=>{

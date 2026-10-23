@@ -48,7 +48,7 @@ test('default deny precedes every router/body parser; safe reads/previews only; 
     '/admin/clients/a/cancel-contract', '/admin/contracts/process-renewals', '/internal/billing/usage-invoices',
     '/admin/billing/invoices/send', '/membership-agreements/checkout-session', '/api/support/voice/session',
     '/api/support/phone-handoff', '/api/sales/voice-handoff', '/webhooks/ghl/sales-ready', '/webhook/tavus',
-    '/admin/billing/new-unlisted-mutator', '/sales/deals', '/api/alphascreen/purchase-intents'];
+    '/admin/billing/new-unlisted-mutator', '/sales/deals', '/api/alphascreen/purchase-intents', '/api/alphascreen/checkout-status'];
   for (const method of ['post','patch','put','delete']) for (const uri of paths) {
     const r = await request(app)[method](uri).set('Origin', guard.DEV_FRONTEND_URL).send('invalid JSON does not reach parser');
     assert.equal(r.status,503); assert.equal(r.body.code,code); assert.equal(r.headers['access-control-allow-origin'],guard.DEV_FRONTEND_URL);

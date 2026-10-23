@@ -28,6 +28,27 @@ const {
 } = require('../../../services/alphaScreen/index');
 
 const router = express.Router();
+const { resolveCheckoutPasswordSetup } = require('../../../services/publicPurchaseActivation');
+
+router.post('/checkout-status', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  const sessionId = cleanLookupId(req.body?.session_id);
+  const signerToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  if (!sessionId || signerToken.length < 32 || signerToken.length > 512) {
+    return res.status(400).json({ code: 'password_setup_unavailable' });
+  }
+  const allowed = await enforceRetailRateLimit(req, res, {
+    routeName: 'retail_checkout_password_setup', subjectParts: ['checkout_password_setup', sessionId], maxCount: 3
+  });
+  if (!allowed) return;
+  try {
+    return res.json(await resolveCheckoutPasswordSetup({ sessionId, signerToken }));
+  } catch (_) {
+    // Neither the request proof nor the generated recovery capability may be logged.
+    return res.status(409).json({ code: 'password_setup_unavailable' });
+  }
+});
 
 router.get('/packages', (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
@@ -39,6 +60,7 @@ router.get('/packages', (req, res) => {
 })
 
 router.get('/checkout-status', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   const request_id = req.request_id || null
   const sessionId = cleanLookupId(req.query?.session_id)
   const agreementId = cleanLookupId(req.query?.agreement_id)

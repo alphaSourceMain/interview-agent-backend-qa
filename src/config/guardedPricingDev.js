@@ -161,6 +161,7 @@ function guardedPricingDevFence(req, res, next) {
   const method = String(req.method || '').toUpperCase();
   const override = req.headers?.['x-http-method-override'] != null || req.headers?.['x-method-override'] != null || url.searchParams.has('_method');
   const sandboxPost = new Set(['/membership-agreements/session','/membership-agreements/sign','/membership-agreements/checkout-session',
+    '/api/alphascreen/checkout-status',
     '/clients/billing/portal-session','/clients/billing/additional-interviews/checkout-session','/clients/roles/checkout-session',
     '/admin/billing/customers','/admin/billing/invoices/sync','/sales/promotion-codes/validate',
     '/admin/sales-payroll/renewal-commissions']);

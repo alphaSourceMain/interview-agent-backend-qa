@@ -203,6 +203,7 @@
   "POST /admin/synthetic-interviews/runs/:id/cancel",
   "POST /api/accommodations/:id/send-text-link",
   "POST /api/accommodations/request",
+  "POST /api/alphascreen/checkout-status",
   "POST /api/alphascreen/purchase-intents",
   "POST /api/alphascreen/purchase-intents/:id/agreement",
   "POST /api/alphascreen/purchase-intents/:id/email-verification/send",

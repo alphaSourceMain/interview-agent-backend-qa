@@ -510,7 +510,7 @@ test('native direct-setup marker is atomic, service-only and preserves original 
   values(${lit(r.c.id)},${lit(userId)},${lit(email)},'SYNTHETIC ONLY','manager');`);
  const before=sql(`select md5((to_jsonb(t)-'password_setup_claimed_at')::text) from public_purchase_intents t where id=${lit(r.i.id)};`);
  const user={id:userId,email,created_at:new Date().toISOString()};let mints=0;
- const authAdmin={getUserById:async()=>({data:{user},error:null}),generateLink:async()=>{mints++;return{data:{user,properties:{hashed_token:'a'.repeat(64)}},error:null};}};
+ const authAdmin={getUserById:async()=>({data:{user},error:null}),generateLink:async()=>{mints++;return{data:{user,properties:{hashed_token:'a'.repeat(56)}},error:null};}};
  const modulePath=require.resolve('../src/clients/supabase'),saved=require.cache[modulePath];
  if(!saved)require.cache[modulePath]={id:modulePath,filename:modulePath,loaded:true,exports:{supabaseAdmin:{}}};
  let result;

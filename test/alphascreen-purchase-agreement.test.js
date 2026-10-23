@@ -513,7 +513,7 @@ test('checkout-status POST requires secret in body, returns only one-time capabi
       signer_token_expires_at: new Date(Date.now() + 600000).toISOString() }],
     clients: [{ id: clientId, billing_status: 'active', subscription_status: 'active' }],
     clientMembers: [{ client_id: clientId, email: user.email, user_id: user.id, role: 'manager' }], authUsers: [user],
-    setupResponse: { data: { user, properties: { hashed_token: 'a'.repeat(64), action_link: 'https://unused.invalid', email_otp: 'not-returned' } }, error: null }
+    setupResponse: { data: { user, properties: { hashed_token: 'a'.repeat(56), action_link: 'https://unused.invalid', email_otp: 'not-returned' } }, error: null }
   })
   const app = buildApp(db), request = require('supertest')
   for (const body of [{ session_id: 'cs_test_public' }, { token }, { agreement_id: AGREEMENT_ID, token }]) {
@@ -522,7 +522,7 @@ test('checkout-status POST requires secret in body, returns only one-time capabi
   }
   const result = await request(app).post('/api/alphascreen/checkout-status').send({ session_id: 'cs_test_public', token })
   assert.equal(result.status, 200);assert.equal(result.headers['cache-control'], 'no-store')
-  assert.deepEqual(result.body, { status: 'password_required', password_setup_token_hash: 'a'.repeat(64) })
+  assert.deepEqual(result.body, { status: 'password_required', password_setup_token_hash: 'a'.repeat(56) })
   assert.equal(db.setupMints, 1)
   const repeat = await request(app).post('/api/alphascreen/checkout-status').send({ session_id: 'cs_test_public', token })
   assert.equal(repeat.status, 409);assert.equal(db.setupMints, 1)

@@ -51,6 +51,11 @@ class FakeQuery {
     return this
   }
 
+  is(column, value) {
+    this.filters.push({ column, value })
+    return this
+  }
+
   in() {
     return this
   }
@@ -88,6 +93,10 @@ class FakeQuery {
   async maybeSingle() {
     if (this.db.lookupError) return { data: null, error: this.db.lookupError }
     const row = this.tableRows().find((item) => matchesFilters(item, this.filters)) || null
+    if (row && this.updatePayload) {
+      Object.assign(row, this.updatePayload)
+      this.db.updates.push({ table: this.table, row, payload: this.updatePayload })
+    }
     return { data: row, error: null }
   }
 
@@ -139,7 +148,9 @@ function makeDb(options = {}) {
           return { data: { user }, error: null }
         },
         async generateLink() {
+          db.setupMints++
           if (options.generateLinkError) throw options.generateLinkError
+          if (options.setupResponse) return options.setupResponse
           return {
             data: {
               action_link: options.setupActionLink || 'https://qa.alphasourceai.com/pwreset?token_hash=direct-setup-token&type=recovery'
@@ -150,6 +161,7 @@ function makeDb(options = {}) {
       }
     },
     inserts: [],
+    setupMints: 0,
     updates: [],
     touchedTables: [],
     uploads: [],
@@ -486,6 +498,37 @@ test('checkout status endpoint returns completed webhook setup state without raw
   assert.equal(response.body.set_password_url, undefined)
   assert.doesNotMatch(JSON.stringify(response.body), /direct-setup-token|token_hash|\/pwreset/)
   assert.doesNotMatch(JSON.stringify(response.body), /buyer_email|company_legal_name|raw_payload|stripe_checkout_session_id|signer_token|sk_test|sk_live/i)
+  assert.equal(db.setupMints, 0)
+})
+
+test('checkout-status POST requires secret in body, returns only one-time capability and never emits it on GET', async () => {
+  const clientId = '44444444-4444-4444-8444-444444444444', token = 'SYNTHETIC_SIGNER_01234567890123456789012345'
+  const user = { id: 'new-buyer', email: 'alex@acmedental.example', created_at: new Date(Date.now() - 30000).toISOString() }
+  const db = makeDb({
+    purchaseIntents: [intent({ status: 'completed', agreement_id: AGREEMENT_ID, stripe_checkout_session_id: 'cs_test_public', client_id: clientId })],
+    membershipAgreements: [{ id: AGREEMENT_ID, client_id: clientId, status: 'signed', is_current: true, checkout_status: 'paid',
+      checkout_session_id: 'cs_test_public', checkout_created_at: new Date(Date.now() - 120000).toISOString(),
+      checkout_paid_at: new Date(Date.now() - 60000).toISOString(), admin_email: user.email,
+      signer_token_hash: require('node:crypto').createHash('sha256').update(token).digest('hex'),
+      signer_token_expires_at: new Date(Date.now() + 600000).toISOString() }],
+    clients: [{ id: clientId, billing_status: 'active', subscription_status: 'active' }],
+    clientMembers: [{ client_id: clientId, email: user.email, user_id: user.id, role: 'manager' }], authUsers: [user],
+    setupResponse: { data: { user, properties: { hashed_token: 'a'.repeat(64), action_link: 'https://unused.invalid', email_otp: 'not-returned' } }, error: null }
+  })
+  const app = buildApp(db), request = require('supertest')
+  for (const body of [{ session_id: 'cs_test_public' }, { token }, { agreement_id: AGREEMENT_ID, token }]) {
+    const denied = await request(app).post('/api/alphascreen/checkout-status').send(body)
+    assert.equal(denied.status, 400);assert.equal(db.setupMints, 0)
+  }
+  const result = await request(app).post('/api/alphascreen/checkout-status').send({ session_id: 'cs_test_public', token })
+  assert.equal(result.status, 200);assert.equal(result.headers['cache-control'], 'no-store')
+  assert.deepEqual(result.body, { status: 'password_required', password_setup_token_hash: 'a'.repeat(64) })
+  assert.equal(db.setupMints, 1)
+  const repeat = await request(app).post('/api/alphascreen/checkout-status').send({ session_id: 'cs_test_public', token })
+  assert.equal(repeat.status, 409);assert.equal(db.setupMints, 1)
+  const publicRead = await getCheckoutStatus(app, { session_id: 'cs_test_public', token })
+  assert.equal(publicRead.status, 200);assert.equal(publicRead.body.password_setup_token_hash, undefined)
+  assert.equal(db.setupMints, 1)
 })
 
 test('purchase intent agreement endpoint is idempotent for an existing sent agreement', async () => {

@@ -63,6 +63,7 @@ test('same exact HTTP paths lift after verification; sends, overrides, scheduler
   const app=express();app.use(guard.guardedPricingDevFence);app.use((_q,r)=>r.status(209).json({downstream:true}));
   const id='11111111-1111-4111-8111-111111111111';
   for(const path of ['/membership-agreements/session','/membership-agreements/sign','/membership-agreements/checkout-session',
+   '/api/alphascreen/checkout-status',
    '/clients/billing/portal-session','/clients/billing/additional-interviews/checkout-session','/clients/roles/checkout-session',
    '/admin/billing/customers','/admin/billing/invoices/sync',`/admin/billing/agreements/${id}/void`,
    ...['billing/checkout-session','subscription-checkout','subscription-invoice','usage-invoice','cancel-contract'].map(x=>`/admin/clients/${id}/${x}`)])
@@ -75,6 +76,8 @@ test('same exact HTTP paths lift after verification; sends, overrides, scheduler
    '/membership-agreements/%73ign','/membership-agreements/sign?_method=DELETE'])
    assert.equal((await request(app).post(path)).status,503,path);
   assert.equal((await request(app).post('/membership-agreements/sign').set('X-HTTP-Method-Override','GET')).status,503);
+  assert.equal((await request(app).post('/api/alphascreen/checkout-status').set('X-HTTP-Method-Override','GET')).status,503);
+  assert.equal((await request(app).get('/api/alphascreen/checkout-status')).status,209);
   assert.throws(()=>require('../src/clients/sendgridFactory')().send({to:'synthetic@example.invalid'}),{code:guard.CODE});
  }finally{reset();}
 });

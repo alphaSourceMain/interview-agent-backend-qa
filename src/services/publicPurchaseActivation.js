@@ -1598,10 +1598,81 @@ async function resolvePublicCheckoutReturnState(options = {}) {
   return { status: 'ready', client_id: clientId };
 }
 
+// A checkout reference is not identity proof. Direct first-password setup also
+// requires the buyer's existing secret signing link, retained in this tab only.
+// Never call this from the public GET status endpoint or for an existing account.
+async function resolveCheckoutPasswordSetup(options = {}) {
+  const db = options.db || supabaseAdmin;
+  const authAdmin = options.authAdmin || supabaseAdmin.auth?.admin;
+  const sessionId = cleanText(options.sessionId);
+  const token = cleanText(options.signerToken);
+  const unavailable = () => {
+    const error = new Error('Password setup is unavailable. Use your secure setup email.');
+    error.code = 'password_setup_unavailable';
+    return error;
+  };
+  if (!sessionId || token.length < 32 || token.length > 512) throw unavailable();
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const { data: agreement, error: agreementError } = await db.from('membership_agreements')
+    .select('id,client_id,status,is_current,checkout_status,checkout_session_id,checkout_created_at,checkout_paid_at,admin_email,signer_token_hash,signer_token_expires_at')
+    .eq('checkout_session_id', sessionId).eq('signer_token_hash', tokenHash).maybeSingle();
+  const now = Date.now();
+  const paidAt = Date.parse(agreement?.checkout_paid_at);
+  const checkoutAt = Date.parse(agreement?.checkout_created_at);
+  const expiresAt = Date.parse(agreement?.signer_token_expires_at);
+  if (agreementError || !agreement?.id || agreement.status !== 'signed' || agreement.is_current !== true
+    || agreement.checkout_status !== 'paid' || !agreement.client_id || !lowerEmail(agreement.admin_email)
+    || agreement.checkout_session_id !== sessionId || agreement.signer_token_hash !== tokenHash
+    || !Number.isFinite(expiresAt) || expiresAt <= now
+    || !Number.isFinite(paidAt) || paidAt > now || now - paidAt > 60 * 60 * 1000
+    || !Number.isFinite(checkoutAt) || checkoutAt > paidAt) throw unavailable();
+
+  const parent = await requireParentClient(db, agreement.client_id, { route: 'checkout_password_setup' });
+  if (!parent.ok) throw unavailable();
+  const state = await resolvePublicCheckoutReturnState({ db, authAdmin, sessionId, logger: { error() {}, warn() {} } });
+  if (state.status !== 'password_required' || state.client_id !== agreement.client_id) throw unavailable();
+  const { data: intent, error: intentError } = await db.from('public_purchase_intents')
+    .select('id,status,buyer_email,agreement_id,stripe_checkout_session_id,client_id,password_setup_claimed_at')
+    .eq('agreement_id', agreement.id).maybeSingle();
+  if (intentError || !intent?.id || intent.password_setup_claimed_at != null || intent.status !== 'completed' || intent.client_id !== agreement.client_id
+    || intent.agreement_id !== agreement.id || intent.stripe_checkout_session_id !== sessionId
+    || lowerEmail(intent.buyer_email) !== lowerEmail(agreement.admin_email)) throw unavailable();
+
+  const { data: members, error: memberError } = await db.from('client_members')
+    .select('client_id,user_id,email,role').eq('client_id', agreement.client_id).eq('email', lowerEmail(agreement.admin_email));
+  if (memberError || !Array.isArray(members) || members.length !== 1) throw unavailable();
+  const member = members[0];
+  if (!member.user_id || !PRIVILEGED_MEMBER_ROLES.has(cleanText(member.role).toLowerCase())) throw unavailable();
+  const { data: userData, error: userError } = await authAdmin.getUserById(member.user_id);
+  const user = userData?.user;
+  const createdAt = Date.parse(user?.created_at);
+  // A never-used but pre-existing account is still not a new purchase account.
+  if (userError || user?.id !== member.user_id || lowerEmail(user.email) !== lowerEmail(agreement.admin_email)
+    || cleanText(user.last_sign_in_at) || !Number.isFinite(createdAt) || createdAt < checkoutAt || createdAt > now) throw unavailable();
+  // The only new write: a conditional winner reserves issuance BEFORE Auth.
+  // Unknown DB/Auth outcomes stay consumed. Never clear this marker or retry.
+  const { data: claim, error: claimError } = await db.from('public_purchase_intents')
+    .update({ password_setup_claimed_at: new Date().toISOString() }).eq('id', intent.id)
+    .eq('status', 'completed').eq('agreement_id', agreement.id).eq('client_id', agreement.client_id)
+    .eq('stripe_checkout_session_id', sessionId).eq('buyer_email', intent.buyer_email)
+    .is('password_setup_claimed_at', null).select('id').maybeSingle();
+  if (claimError || claim?.id !== intent.id) throw unavailable();
+  const { data: freshData, error: freshError } = await authAdmin.getUserById(user.id);
+  const freshUser = freshData?.user;
+  if (freshError || freshUser?.id !== user.id || lowerEmail(freshUser.email) !== lowerEmail(user.email)
+    || cleanText(freshUser.last_sign_in_at) || freshUser.created_at !== user.created_at) throw unavailable();
+  const { data, error } = await authAdmin.generateLink({ type: 'recovery', email: lowerEmail(user.email),
+    options: { redirectTo: buildClientPwResetUrl({ origin: 'client' }) } });
+  if (error || data?.user?.id !== user.id || lowerEmail(data?.user?.email) !== lowerEmail(user.email)
+    || !/^[a-f0-9]{64}$/i.test(data?.properties?.hashed_token || '')) throw unavailable();
+  return { status: 'password_required', password_setup_token_hash: data.properties.hashed_token };
+}
+
 module.exports = {
   activatePublicPurchaseAgreementCheckout,
   finishExistingEnterpriseAccountSetup,
   resolvePublicCheckoutReturnState,
+  resolveCheckoutPasswordSetup,
   buildClientActivationPayload,
   findAuthUserByEmail,
   findAuthUserById,

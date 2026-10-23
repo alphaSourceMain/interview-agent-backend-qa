@@ -24,6 +24,7 @@ require.cache[supabaseClientPath] = {
 const {
   activatePublicPurchaseAgreementCheckout,
   resolvePublicCheckoutReturnState,
+  resolveCheckoutPasswordSetup,
   buildClientActivationPayload
 } = require('../src/services/publicPurchaseActivation')
 const { buildAlphaScreenPackageSnapshot } = require('../src/services/alphaScreenPackages')
@@ -361,6 +362,91 @@ function makeAuthAdmin(users = [], options = {}) {
     }
   }
 }
+
+function setupCase() {
+  const now = Date.now(), token = 'synthetic-secret-signing-token-only-0123456789';
+  const db = makeDb();
+  Object.assign(db.membershipAgreements[0], { status: 'signed', is_current: true, checkout_status: 'paid',
+    checkout_session_id: 'cs_test_public', checkout_created_at: new Date(now - 120000).toISOString(),
+    checkout_paid_at: new Date(now - 60000).toISOString(),
+    signer_token_hash: require('node:crypto').createHash('sha256').update(token).digest('hex'),
+    signer_token_expires_at: new Date(now + 600000).toISOString() });
+  Object.assign(db.purchaseIntents[0], { status: 'completed', client_id: CLIENT_ID,
+    agreement_id: AGREEMENT_ID, stripe_checkout_session_id: 'cs_test_public' });
+  Object.assign(db.clients[0], { billing_status: 'active', subscription_status: 'active' });
+  db.clientMembers = [{ client_id: CLIENT_ID, user_id: 'new-user', email: BUYER_EMAIL, role: 'manager' }];
+  const user = { id: 'new-user', email: BUYER_EMAIL, created_at: new Date(now - 90000).toISOString() };
+  let generated = 0;
+  const authAdmin = { getUserById: async () => ({ data: { user }, error: null }),
+    generateLink: async () => { generated++; return { data: { user, properties: { hashed_token: 'a'.repeat(64) } }, error: null }; } };
+  return { db, user, authAdmin, token, generated: () => generated };
+}
+
+test('direct setup reuses existing recovery only for a secret-bound paid new buyer and public GET stays capability-free', async () => {
+  const c = setupCase();
+  const status = await resolvePublicCheckoutReturnState({ db: c.db, authAdmin: c.authAdmin, sessionId: 'cs_test_public' });
+  assert.equal(status.status, 'password_required');assert.equal(status.password_setup_token_hash, undefined);
+  assert.equal(c.generated(), 0);
+  const result = await resolveCheckoutPasswordSetup({ db: c.db, authAdmin: c.authAdmin, sessionId: 'cs_test_public', signerToken: c.token });
+  assert.deepEqual(result, { status: 'password_required', password_setup_token_hash: 'a'.repeat(64) });
+  assert.equal(c.generated(), 1);
+  assert.equal(c.db.updates.length, 1);
+  assert.deepEqual(Object.keys(c.db.updates[0].payload), ['password_setup_claimed_at']);
+  assert.equal(c.db.inserts.length, 0);
+  await assert.rejects(resolveCheckoutPasswordSetup({ db: c.db, authAdmin: c.authAdmin, sessionId: 'cs_test_public', signerToken: c.token }), { code: 'password_setup_unavailable' });
+  assert.equal(c.generated(), 1);
+  c.user.last_sign_in_at = new Date().toISOString();
+  await assert.rejects(resolveCheckoutPasswordSetup({ db: c.db, authAdmin: c.authAdmin, sessionId: 'cs_test_public', signerToken: c.token }), { code: 'password_setup_unavailable' });
+  assert.equal(c.generated(), 1);
+});
+
+test('direct setup rejects wrong/stale proof, unpaid or drifted sources, existing accounts and non-buyer members before mint', async () => {
+  const edits = [
+    c => c.token = '', c => c.token += 'wrong', c => c.db.membershipAgreements[0].checkout_session_id = 'other',
+    c => c.db.membershipAgreements[0].status = 'sent', c => c.db.membershipAgreements[0].is_current = false,
+    c => c.db.membershipAgreements[0].signer_token_expires_at = new Date(Date.now() - 1000).toISOString(),
+    c => c.db.membershipAgreements[0].checkout_paid_at = new Date(Date.now() - 3600001).toISOString(),
+    c => c.db.membershipAgreements[0].checkout_paid_at = new Date(Date.now() + 10000).toISOString(),
+    c => c.db.membershipAgreements[0].checkout_created_at = null,
+    c => c.db.membershipAgreements[0].checkout_status = 'pending_payment',
+    c => c.db.purchaseIntents[0].status = 'pending', c => c.db.purchaseIntents[0].client_id = 'other',
+    c => c.db.purchaseIntents = [], c => c.db.purchaseIntents[0].password_setup_claimed_at = new Date().toISOString(),
+    c => c.db.purchaseIntents[0].buyer_email = 'other@example.invalid',
+    c => c.db.purchaseIntents[0].stripe_checkout_session_id = 'other',
+    c => c.db.clients[0].billing_status = 'inactive', c => c.db.clients[0].parent_client_id = 'other',
+    c => c.db.clientMembers[0].role = 'member', c => c.db.clientMembers.push({ ...c.db.clientMembers[0] }),
+    c => c.db.clientMembers[0].user_id = '', c => c.user.id = 'other',
+    c => c.user.email = 'other@example.invalid', c => c.user.created_at = new Date(Date.now() - 86400000).toISOString(),
+    c => c.user.created_at = null, c => c.user.last_sign_in_at = new Date().toISOString(),
+  ];
+  for (const edit of edits) {
+    const c = setupCase();edit(c);
+    await assert.rejects(resolveCheckoutPasswordSetup({ db: c.db, authAdmin: c.authAdmin, sessionId: 'cs_test_public', signerToken: c.token }), { code: 'password_setup_unavailable' });
+    assert.equal(c.generated(), 0, edit.toString());
+  }
+});
+
+test('direct setup refuses unknown/failed provider results without retry or exposing links', async () => {
+  for (const response of [{ error: { message: 'provider failure' } },
+    { data: { user: { id: 'other', email: BUYER_EMAIL }, properties: { hashed_token: 'a'.repeat(64) } } },
+    { data: { user: { id: 'new-user', email: BUYER_EMAIL }, properties: { hashed_token: 'malformed' } } }]) {
+    const c = setupCase();let calls = 0;
+    c.authAdmin.generateLink = async () => { calls++;return response; };
+    await assert.rejects(resolveCheckoutPasswordSetup({ db: c.db, authAdmin: c.authAdmin, sessionId: 'cs_test_public', signerToken: c.token }), { code: 'password_setup_unavailable' });
+    assert.equal(calls, 1);
+    await assert.rejects(resolveCheckoutPasswordSetup({ db: c.db, authAdmin: c.authAdmin, sessionId: 'cs_test_public', signerToken: c.token }), { code: 'password_setup_unavailable' });
+    assert.equal(calls, 1);
+  }
+});
+
+test('concurrent direct-setup requests have one conditional winner and one provider mint', async () => {
+  const c = setupCase();
+  const results = await Promise.allSettled(Array.from({ length: 5 }, () => resolveCheckoutPasswordSetup({
+    db: c.db, authAdmin: c.authAdmin, sessionId: 'cs_test_public', signerToken: c.token
+  })));
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.equal(c.generated(), 1);assert.equal(c.db.updates.length, 1);
+});
 
 function makeSubscription(cadence) {
   return {

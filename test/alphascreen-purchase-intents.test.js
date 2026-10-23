@@ -317,6 +317,22 @@ test('valid Essential monthly intent creates pending intent with central package
   assertNoStaleAnnualPricingPayload(row.package_snapshot)
 })
 
+test('intake needs no checkbox acknowledgements and does not fabricate or persist consent', async () => {
+  for (const value of [undefined, false, true]) {
+    const db = makeDb()
+    const response = await request(buildApp(db), validBody({ agreement_acknowledged: value, contact_acknowledged: value }))
+    assert.equal(response.status, 201)
+    assert.equal(response.body.status, 'pending')
+    assert.equal(response.body.selected_package.first_role_prepay.selected, false)
+    for (const field of ['agreement_acknowledged', 'contact_acknowledged', 'marketing_consent', 'signer_accepted']) {
+      assert.equal(Object.hasOwn(db.inserts[0].row, field), false)
+    }
+    assert.equal(db.inserts[0].row.agreement_id, null)
+    assert.equal(db.inserts[0].row.client_id, null)
+    assert.equal(db.inserts[0].row.stripe_checkout_session_id, null)
+  }
+})
+
 test('valid Pro annual intent creates pending intent when annual cadence is supported', async () => {
   const db = makeDb({ nextId: 'intent-pro' })
   const response = await request(buildApp(db), validBody({

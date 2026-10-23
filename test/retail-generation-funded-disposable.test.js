@@ -37,12 +37,16 @@ function nativeDb(){const rpcErrors=[];return{rpcErrors,
   if(out.status){rpcErrors.push({name,error:out.stderr.split('\n')[0]});return{data:null,error:{message:out.stderr}};}
   return{data:JSON.parse(out.stdout),error:null};},
  from(table){assert.ok(['membership_agreements','public_purchase_intents','clients','billing_customers','client_members'].includes(table));
-  const filters=[];let counted=false;
+  const filters=[];let counted=false,updatePayload=null;
   const query={select(_columns,options={}){counted=options.count==='exact';return query;},
    eq(key,value){assert.match(key,/^[a-z_]+$/);filters.push(key+'='+lit(value));return query;},
+   is(key,value){assert.equal(key,'password_setup_claimed_at');assert.equal(value,null);filters.push(key+' is null');return query;},
+   update(payload){assert.equal(table,'public_purchase_intents');assert.deepEqual(Object.keys(payload),['password_setup_claimed_at']);updatePayload=payload;return query;},
    async maybeSingle(){const r=await execute();assert.ok(r.data.length<=1);return{data:r.data[0]||null,error:null};},
    then(resolve,reject){return execute().then(resolve,reject);}};
-  async function execute(){const rows=json(`set role service_role;select coalesce(jsonb_agg(to_jsonb(t)),'[]') from ${table} t${filters.length?' where '+filters.join(' and '):''};`);
+  async function execute(){const where=filters.length?' where '+filters.join(' and '):'';
+   const rows=json(updatePayload?`set role service_role;with changed as(update ${table} set password_setup_claimed_at=${lit(updatePayload.password_setup_claimed_at)}${where} returning *) select coalesce(jsonb_agg(to_jsonb(t)),'[]') from changed t;`
+    :`set role service_role;select coalesce(jsonb_agg(to_jsonb(t)),'[]') from ${table} t${where};`);
    return{data:rows,error:null,...(counted?{count:rows.length}:{})};}
   return query;
  }
@@ -56,7 +60,7 @@ function authoredSdk(r){const list=data=>({object:'list',has_more:false,data:str
   paymentIntents:{retrieve:async()=>structuredClone(r.pi)},charges:{retrieve:async()=>structuredClone(r.ch)}};
 }
 
-function setup({plan='basic',months=3,payment='prepaid',role=false,admin=false,generation=true,legacyVersion,sales=false,replacement=false,largeContract=false,publicPurchase=false}={}){
+function setup({plan='basic',months=3,payment='prepaid',role=false,admin=false,generation=true,legacyVersion,sales=false,replacement=false,largeContract=false,publicPurchase=false,directSetup=false}={}){
  const now=Date.now(),generatedAt=new Date(now-3*3600000).toISOString(),paidAt=new Date(Math.floor(now/1000)*1000).toISOString();
  const f=generation?generationFixture(plan,months,payment,role,{admin,generatedAt,paidAt}):legacyFixture(plan,months,payment,role,{admin});
  if(publicPurchase){assert.equal(admin,false);assert.equal(sales,false);f.g.template_snapshot.source='public_purchase_intent';}
@@ -117,6 +121,9 @@ function setup({plan='basic',months=3,payment='prepaid',role=false,admin=false,g
  call('pin_retail_existing_checkout_session',{p_agreement:G,p_client:C,p_attempt:{...attempt,...(generation?{prices}:{})},p_session:f.cs.id});
  const claimKey='SYNTHETIC_CLAIM_'+key;
  if(!admin)assert.equal(call('claim_public_purchase_activation',{p_agreement_id:G,p_claim_key:claimKey}).status,'claimed');
+ // A real Checkout payment occurs after its request. The extra setup case
+ // crosses the next provider second rather than authoring a paid time before B.
+ if(directSetup)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1100);
  const A=Math.floor(Date.now()/1000),created=Math.floor(Date.parse(attempt.created_at)/1000);
  f.cs.created=created;Object.assign(f.inv,{created:A,status_transitions:{paid_at:A}});
  const span=f.pkg.membership_terms.stripe_recurrence.interval_count;
@@ -190,6 +197,8 @@ before(()=>{
   const before=metadata(),monthly=fs.readFileSync(path.join(root,'20261023151437_retail_public_monthly_purchases.sql'),'utf8');
   sql(monthly);assert.equal(metadata(),before);denied(monthly,/retail_public_monthly_prerequisite_drift/);assert.equal(metadata(),before);
  }
+ if(process.env.RETAIL_CHECKOUT_SETUP_DISPOSABLE==='true')
+  sql(fs.readFileSync(path.join(root,'20261023220058_retail_checkout_password_setup_claim.sql'),'utf8'));
 });
 for(const plan of ['basic','pro'])for(const months of [3,6,12])for(const payment of ['prepaid','monthly_installments'])for(const role of [false,true])
 test(`native PUBLIC purchase claim/pin/funding/member/replay ${plan}/${months}/${payment}/role=${role}`,
@@ -489,4 +498,31 @@ test(`replacement application/native compatibility ${cohort}/${payment}`,replace
  assert.equal(client(r).stripe_subscription_id,r.s.id);
  assert.equal(new Date(client(r).contract_start_at).toISOString(),r.generation?r.g.initial_term_start+'T00:00:00.000Z':r.paidAt);
  assert.equal(sql(`select count(*) from client_role_credits where source_membership_agreement_id=${lit(r.g.id)};`),'1');
+});
+
+test('native direct-setup marker is atomic, service-only and preserves original funded billing replay',
+ {skip:!enabled||process.env.RETAIL_CHECKOUT_SETUP_DISPOSABLE!=='true'},async()=>{
+ const r=setup({publicPurchase:true,payment:'monthly_installments',role:true,directSetup:true});record(r);complete(r);bill(r);
+ assert.ok(Date.parse(agreement(r).checkout_created_at)<=Date.parse(agreement(r).checkout_paid_at));
+ const token=r.key,userId=crypto.randomUUID(),email=r.key+'@example.invalid';
+ sql(`insert into auth.users(id,email) values(${lit(userId)},${lit(email)});
+  set role service_role;insert into client_members(client_id,user_id,email,name,role)
+  values(${lit(r.c.id)},${lit(userId)},${lit(email)},'SYNTHETIC ONLY','manager');`);
+ const before=sql(`select md5((to_jsonb(t)-'password_setup_claimed_at')::text) from public_purchase_intents t where id=${lit(r.i.id)};`);
+ const user={id:userId,email,created_at:new Date().toISOString()};let mints=0;
+ const authAdmin={getUserById:async()=>({data:{user},error:null}),generateLink:async()=>{mints++;return{data:{user,properties:{hashed_token:'a'.repeat(64)}},error:null};}};
+ const modulePath=require.resolve('../src/clients/supabase'),saved=require.cache[modulePath];
+ if(!saved)require.cache[modulePath]={id:modulePath,filename:modulePath,loaded:true,exports:{supabaseAdmin:{}}};
+ let result;
+ try{result=await Promise.allSettled(Array.from({length:4},()=>require('../src/services/publicPurchaseActivation').resolveCheckoutPasswordSetup({
+  db:nativeDb(),authAdmin,sessionId:r.cs.id,signerToken:token})));}finally{if(!saved)delete require.cache[modulePath];}
+ assert.equal(result.filter(x=>x.status==='fulfilled').length,1,JSON.stringify(result));assert.equal(mints,1);
+ assert.equal(sql(`select md5((to_jsonb(t)-'password_setup_claimed_at')::text) from public_purchase_intents t where id=${lit(r.i.id)};`),before);
+ assert.equal(bill(r).status,'already_applied');
+ for(const role of ['anon','authenticated']){
+  denied(`set role ${role};select password_setup_claimed_at from public_purchase_intents;`,/permission denied/);
+  denied(`set role ${role};update public_purchase_intents set password_setup_claimed_at=null;`,/permission denied/);
+ }
+ for(const guard of ['retail_existing_funding_schema_guard','retail_admin_existing_billing_schema_guard',
+  'retail_admin_existing_member_schema_guard','retail_linked_existing_member_schema_guard'])sql(`set role service_role;select ${guard}();`);
 });

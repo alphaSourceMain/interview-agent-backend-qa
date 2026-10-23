@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  OFFER_VERSION, RETAIL_PRICES_CENTS, buildRetailOffer, listRetailOffers,
+  OFFER_VERSION, STRIPE_RECURRING_OFFER_VERSION, GENERATION_DATE_OFFER_VERSION, RETAIL_PRICES_CENTS, buildRetailOffer, listRetailOffers,
   anchoredMonthInstant, retailTermWindow, assertRenewalPreferenceChange
 } = require('../src/services/membershipOffers');
 
@@ -45,6 +45,19 @@ test('public has exactly six prepaid offers; sales/admin have all twelve', () =>
   assert.equal(offers.length, 6);
   assert.ok(offers.every(offer => offer.payment_option === 'prepaid'));
   assert.throws(() => buildRetailOffer({ ...base, paymentOption: 'monthly_installments' }), { code: 'public_installments_not_available' });
+});
+
+test('current generation-date public monthly offers retain full commitment and existing native recurrence', () => {
+  const offers=listRetailOffers({channel:'public',offerVersion:GENERATION_DATE_OFFER_VERSION});
+  assert.equal(offers.length,12);
+  for(const [plan,terms] of Object.entries(accepted))for(const [months,,monthly] of terms){
+    const offer=offers.find(o=>o.plan_key===plan&&o.commitment_months===months&&o.payment_option==='monthly_installments');
+    assert.equal(offer.platform_payment_cents,monthly);assert.equal(offer.platform_commitment_total_cents,monthly*months);
+    assert.equal(offer.installment_count,months);assert.deepEqual(offer.stripe_recurrence,{interval:'month',interval_count:1});
+    assert.equal(offer.term_start_basis,'generation_date');assert.equal(offer.renewal.ends_installments_early,false);
+  }
+  for(const offerVersion of [OFFER_VERSION,STRIPE_RECURRING_OFFER_VERSION])
+    assert.throws(()=>buildRetailOffer({...base,offerVersion,paymentOption:'monthly_installments'}),{code:'public_installments_not_available'});
 });
 
 test('first-role prepay is a separate, one-time credit; never increases platform commitment or renewal price', () => {

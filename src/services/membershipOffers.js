@@ -74,7 +74,9 @@ function normalizeSelection({ planKey, commitmentMonths, paymentOption, channel,
   const months = whole(commitmentMonths, 'invalid_commitment_months');
   if (!COMMITMENT_MONTHS.includes(months)) fail('invalid_commitment_months');
   if (!PAYMENT_OPTIONS.includes(paymentOption)) fail('invalid_payment_option');
-  if (channel === 'public' && paymentOption !== 'prepaid') fail('public_installments_not_available');
+  if (channel === 'public' && paymentOption !== 'prepaid' && offerVersion !== GENERATION_DATE_OFFER_VERSION) {
+    fail('public_installments_not_available');
+  }
   return { plan, months, paymentOption };
 }
 
@@ -131,7 +133,7 @@ function buildRetailOffer(input = {}) {
 
 function listRetailOffers({ channel, offerVersion=OFFER_VERSION } = {}) {
   if (!CHANNELS.includes(channel)) fail('invalid_offer_channel');
-  const options = channel === 'public' ? ['prepaid'] : PAYMENT_OPTIONS;
+  const options = channel === 'public' && offerVersion !== GENERATION_DATE_OFFER_VERSION ? ['prepaid'] : PAYMENT_OPTIONS;
   return Object.keys(RETAIL_PRICES_CENTS).flatMap(planKey => COMMITMENT_MONTHS.flatMap(commitmentMonths =>
     options.map(paymentOption => buildRetailOffer({ planKey, commitmentMonths, paymentOption, channel, offerVersion }))
   ));

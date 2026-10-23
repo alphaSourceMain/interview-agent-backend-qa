@@ -56,9 +56,10 @@ function authoredSdk(r){const list=data=>({object:'list',has_more:false,data:str
   paymentIntents:{retrieve:async()=>structuredClone(r.pi)},charges:{retrieve:async()=>structuredClone(r.ch)}};
 }
 
-function setup({plan='basic',months=3,payment='prepaid',role=false,admin=false,generation=true,legacyVersion,sales=false,replacement=false,largeContract=false}={}){
+function setup({plan='basic',months=3,payment='prepaid',role=false,admin=false,generation=true,legacyVersion,sales=false,replacement=false,largeContract=false,publicPurchase=false}={}){
  const now=Date.now(),generatedAt=new Date(now-3*3600000).toISOString(),paidAt=new Date(Math.floor(now/1000)*1000).toISOString();
  const f=generation?generationFixture(plan,months,payment,role,{admin,generatedAt,paidAt}):legacyFixture(plan,months,payment,role,{admin});
+ if(publicPurchase){assert.equal(admin,false);assert.equal(sales,false);f.g.template_snapshot.source='public_purchase_intent';}
  if(!generation){
   if(legacyVersion){f.pkg=buildRetailPackageSnapshot({planKey:plan,commitmentMonths:months,paymentOption:payment,
    firstRolePrepaySelected:role,channel:'sales',offerVersion:legacyVersion});
@@ -182,13 +183,60 @@ before(()=>{
  sql(fs.readFileSync(path.join(root,'20261015165725_retail_generation_checkout_compat.sql'),'utf8'));sql(migration);
  if(process.env.RETAIL_GENERATION_REPLACEMENT_COMPAT==='true')
   sql(fs.readFileSync(path.join(root,'20261015180910_retail_generation_replacement_compat.sql'),'utf8'));
+ if(process.env.RETAIL_PUBLIC_MONTHLY_DISPOSABLE==='true'){
+  const metadata=()=>sql(`select jsonb_agg(jsonb_build_array(oid::regprocedure::text,proacl::text,prosecdef,provolatile,proisstrict,proconfig)
+   order by oid::regprocedure::text) from pg_proc where oid in('public.retail_existing_terms_months(jsonb,jsonb)'::regprocedure,
+   'public.read_retail_existing_recurring_source(uuid,uuid)'::regprocedure,'public.retail_linked_existing_member_schema_guard()'::regprocedure);`);
+  const before=metadata(),monthly=fs.readFileSync(path.join(root,'20261023151437_retail_public_monthly_purchases.sql'),'utf8');
+  sql(monthly);assert.equal(metadata(),before);denied(monthly,/retail_public_monthly_prerequisite_drift/);assert.equal(metadata(),before);
+ }
+});
+for(const plan of ['basic','pro'])for(const months of [3,6,12])for(const payment of ['prepaid','monthly_installments'])for(const role of [false,true])
+test(`native PUBLIC purchase claim/pin/funding/member/replay ${plan}/${months}/${payment}/role=${role}`,
+ {skip:!enabled||process.env.RETAIL_PUBLIC_MONTHLY_DISPOSABLE!=='true'},()=>{
+ const r=setup({plan,months,payment,role,publicPurchase:true});
+ assert.equal(r.attempt.source.template_snapshot.source,'public_purchase_intent');
+ const receipt=record(r);assert.deepEqual(record(r),receipt);complete(r);
+ assert.equal(bill(r).status,'applied');assert.equal(bill(r).status,'already_applied');
+ const c=client(r),a=agreement(r);assert.equal(c.billing_interval,payment==='prepaid'?'prepaid':'monthly');
+ assert.equal(c.billing_status,'active');assert.equal(new Date(c.contract_start_at).toISOString().slice(0,10),r.g.initial_term_start);
+ assert.equal(new Date(c.contract_end_at).toISOString().slice(0,10),r.g.initial_renewal_date);
+ const i=json(`select to_jsonb(t) from public_purchase_intents t where id=${lit(r.i.id)};`);
+ sql('set role service_role;'+rpc('retail_linked_existing_member_context',{p_intent:r.i.id,p_claim:r.claimKey,
+  p_digest:i.billing_apply_digest,p_current:{id:r.s.id,customer:r.c.stripe_customer_id,status:r.s.status,
+   current_period_end:r.s.current_period_end,cancel_at_period_end:false,cancel_at:null,pause_collection:null}}));
+ const source=call('read_retail_existing_recurring_source',{p_agreement:r.g.id,p_client:r.c.id});
+ assert.equal(source.source_intent_id,r.i.id);assert.deepEqual(source.package_snapshot,r.pkg);
+ const paid=verifyExistingRetailRecurringFunding(generationCycle(r,source,1,{paidAt:r.paidAt}));
+ const args={p_agreement:r.g.id,p_client:r.c.id,p_source:source,p_proof:paid};
+ const first=call('record_retail_existing_paid_period',args),retry=call('record_retail_existing_paid_period',args);
+ assert.equal(first.status,'recorded');assert.equal(retry.status,'already_recorded');
+ assert.deepEqual(retry.receipt,first.receipt);assert.equal(retry.invoice_id,first.invoice_id);
+ assert.equal(json(`select coalesce(jsonb_agg(to_jsonb(t)),'[]') from client_role_credits t where source_membership_agreement_id=${lit(r.g.id)};`).length,role?1:0);
+ for(const mutate of [i=>i.selected_billing_cadence='annual',i=>i.package_snapshot={...i.package_snapshot,pricing_version:'forged'},
+  i=>i.promotion_code_id='promo_FORGED']){
+  const raw=structuredClone(i);mutate(raw);
+  denied(`set role service_role;select retail_existing_terms_months(${lit(a)},${lit(raw)});`,/retail_terms_source_mismatch/);
+ }
+});
+
+test('native public monthly old versions stay denied after additive change',
+ {skip:!enabled||process.env.RETAIL_PUBLIC_MONTHLY_DISPOSABLE!=='true'},()=>{
+ for(const version of [require('../src/services/membershipOffers').OFFER_VERSION,STRIPE_RECURRING_OFFER_VERSION]){
+  const f=legacyFixture('basic',3,'monthly_installments',false);
+  const pkg=buildRetailPackageSnapshot({planKey:'basic',commitmentMonths:3,paymentOption:'monthly_installments',channel:'sales',offerVersion:version});
+  f.g.template_snapshot.source='public_purchase_intent';f.g.template_snapshot.package_snapshot=pkg;
+  f.g.template_snapshot.values.pricing_version=version;f.i.package_snapshot=pkg;
+  denied(`set role service_role;select retail_existing_terms_months(${lit(f.g)},${lit(f.i)});`,/retail_terms_source_mismatch/);
+ }
 });
 after(()=>{if(enabled){const r=cp.spawnSync(bin+'dropdb',['-h',socket,'-p',port,'-U','postgres',database],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);}});
 test('combined native migration composes on the39-migration empty baseline, with all guard chains live',opts,()=>{
  for(const guard of ['retail_existing_funding_schema_guard','retail_admin_existing_billing_schema_guard',
   'retail_admin_existing_member_schema_guard','retail_linked_existing_member_schema_guard'])sql(`set role service_role;select ${guard}();`);
  assert.deepEqual(json('select jsonb_build_object(\'clients\',(select count(*) from clients),\'agreements\',(select count(*) from membership_agreements),\'auth\',(select count(*) from auth.users));'),
-  {clients:0,agreements:0,auth:0});
+  {clients:process.env.RETAIL_PUBLIC_MONTHLY_DISPOSABLE==='true'?24:0,
+   agreements:process.env.RETAIL_PUBLIC_MONTHLY_DISPOSABLE==='true'?24:0,auth:0});
  denied(migration,/prerequisite_drift|schema_drift/);
 });
 for(const cohort of ['v1','v2','v3'])for(const plan of ['basic','pro'])for(const months of [3,6,12])

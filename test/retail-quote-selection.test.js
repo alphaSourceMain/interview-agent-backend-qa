@@ -17,28 +17,32 @@ test('quote gate is exact default-off and legacy selection unchanged',()=>{
   for(const env of [off,{MEMBERSHIP_PRICING_TERMS_ENABLED:'TRUE'}])
     assert.throws(()=>normalizeRetailQuoteSelection(keys(),{channel:'public',env}),{code:'retail_pricing_not_enabled'});
 });
-test('public catalog prepaid only and staff catalog both payment choices from same factory',()=>{
-  assert.equal(retailQuoteCatalog('public',on).offers.length,6);
+test('current public and staff catalogs expose both payment choices from the same factory',()=>{
+  assert.equal(retailQuoteCatalog('public',on).offers.length,12);
   assert.equal(retailQuoteCatalog('sales',on).offers.length,12);
   assert.equal(retailQuoteCatalog('admin',on).pricing_version,GENERATION_DATE_OFFER_VERSION);
   for(const channel of ['public','sales','admin'])assert.ok(retailQuoteCatalog(channel,on).offers
     .every(o=>o.offer_version===GENERATION_DATE_OFFER_VERSION));
   assert.ok(listRetailOffers({channel:'public'}).every(o=>o.offer_version===OFFER_VERSION));
-  assert.ok(retailQuoteCatalog('public',on).offers.every(o=>o.payment_option==='prepaid'));
+  assert.ok(listRetailOffers({channel:'public'}).every(o=>o.payment_option==='prepaid'));
   const publicCatalog=retailQuoteCatalog('public',on);
   const {RETAIL_PRICES_CENTS}=require('../src/services/membershipOffers');
   for(const plan of ['basic','pro'])for(const months of [3,6,12])
     assert.equal(publicCatalog.monthly_payment_references[plan][months],RETAIL_PRICES_CENTS[plan][months].monthly_installments);
-  assert.equal(publicCatalog.offers.some(o=>o.payment_option==='monthly_installments'),false);
+  assert.equal(publicCatalog.offers.filter(o=>o.payment_option==='monthly_installments').length,6);
   assert.equal(Object.hasOwn(retailQuoteCatalog('sales',on),'monthly_payment_references'),false);
 });
 test('enabled selection refuses missing stale forbidden or conflicting keys',()=>{
   const bad=[{},keys(4),{...keys(),offer_version:'old'},{...keys(),offer_version:OFFER_VERSION},
-    {...keys(),offer_version:STRIPE_RECURRING_OFFER_VERSION},keys(3,'monthly_installments'),
+    {...keys(),offer_version:STRIPE_RECURRING_OFFER_VERSION},keys(3,'unknown'),
     {...keys(),billing_cadence:'annual'},{...keys(),commitmentMonths:6},
     {...keys(),paymentOption:'monthly_installments'},{...keys(),pricingVersion:'old'},{...keys(),plan:'pro'}];
   for(const body of bad) assert.throws(()=>normalizeRetailQuoteSelection(body,{channel:'public',env:on}));
   assert.equal(normalizeRetailQuoteSelection({...keys(),commitmentMonths:'3',billing_cadence:'prepaid'},{channel:'public',env:on}).commitment_months,3);
+  for(const plan_key of ['basic','pro'])for(const months of [3,6,12])for(const payment of ['prepaid','monthly_installments']){
+    const result=normalizeRetailQuoteSelection({...keys(months,payment),plan_key},{channel:'public',env:on});
+    assert.equal(result.payment_option,payment);assert.equal(result.billing_cadence,payment==='prepaid'?'prepaid':'monthly');
+  }
 });
 test('staff matrix reuses draft/pricing/render structure and captures fixed dates at generation',()=>{
   let count=0;

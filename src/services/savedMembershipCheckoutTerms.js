@@ -75,7 +75,10 @@ function readSavedRetailCheckoutTerms({ agreement, intent, deadlineMode = 'check
     }
     validDeadline(intent.expires_at, 'purchase_intent_expired', deadlineMode === 'stored');
     if (offer.payment_option === 'prepaid') check(!String(intent.promotion_code_id || '').trim(), 'retail_prepaid_discount_denied');
-    if (saved.source === 'public_purchase_intent') check(offer.payment_option === 'prepaid', 'public_installments_not_available');
+    if (saved.source === 'public_purchase_intent') {
+      check(offer.payment_option === 'prepaid' || generation, 'public_installments_not_available');
+      check(!String(intent.promotion_code_id || '').trim(), 'retail_public_discount_denied');
+    }
   } else check(!intent && !intentOffer);
   return { offer, billingInterval: cadence, packageSnapshot: saved.package_snapshot };
 }

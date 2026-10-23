@@ -77,8 +77,8 @@ function retailQuoteCatalog(channel, env = process.env) {
   if (!enabled(env)) return null;
   return { pricing_version: GENERATION_DATE_OFFER_VERSION,
     offers: listRetailOffers({ channel,offerVersion:GENERATION_DATE_OFFER_VERSION }),
-    // Display-only comparison, not an authorized public installment offer.
-    // Keep checkout authority in the six public PREPAID selection keys.
+    // Card comparisons and checkout offers share the same server-owned prices.
+    // The browser still submits selection keys only, never amounts.
     ...(channel === 'public' ? { monthly_payment_references: Object.fromEntries(
       ['basic','pro'].map(plan => [plan, Object.fromEntries([3,6,12].map(months =>
         [months, RETAIL_PRICES_CENTS[plan][months].monthly_installments]))])) } : {}),

@@ -1664,7 +1664,7 @@ async function resolveCheckoutPasswordSetup(options = {}) {
   const { data, error } = await authAdmin.generateLink({ type: 'recovery', email: lowerEmail(user.email),
     options: { redirectTo: buildClientPwResetUrl({ origin: 'client' }) } });
   if (error || data?.user?.id !== user.id || lowerEmail(data?.user?.email) !== lowerEmail(user.email)
-    || !/^[a-f0-9]{64}$/i.test(data?.properties?.hashed_token || '')) throw unavailable();
+    || !/^[a-f0-9]{56}$/i.test(data?.properties?.hashed_token || '')) throw unavailable();
   return { status: 'password_required', password_setup_token_hash: data.properties.hashed_token };
 }
 

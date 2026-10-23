@@ -378,7 +378,7 @@ function setupCase() {
   const user = { id: 'new-user', email: BUYER_EMAIL, created_at: new Date(now - 90000).toISOString() };
   let generated = 0;
   const authAdmin = { getUserById: async () => ({ data: { user }, error: null }),
-    generateLink: async () => { generated++; return { data: { user, properties: { hashed_token: 'a'.repeat(64) } }, error: null }; } };
+    generateLink: async () => { generated++; return { data: { user, properties: { hashed_token: 'a'.repeat(56) } }, error: null }; } };
   return { db, user, authAdmin, token, generated: () => generated };
 }
 
@@ -388,7 +388,7 @@ test('direct setup reuses existing recovery only for a secret-bound paid new buy
   assert.equal(status.status, 'password_required');assert.equal(status.password_setup_token_hash, undefined);
   assert.equal(c.generated(), 0);
   const result = await resolveCheckoutPasswordSetup({ db: c.db, authAdmin: c.authAdmin, sessionId: 'cs_test_public', signerToken: c.token });
-  assert.deepEqual(result, { status: 'password_required', password_setup_token_hash: 'a'.repeat(64) });
+  assert.deepEqual(result, { status: 'password_required', password_setup_token_hash: 'a'.repeat(56) });
   assert.equal(c.generated(), 1);
   assert.equal(c.db.updates.length, 1);
   assert.deepEqual(Object.keys(c.db.updates[0].payload), ['password_setup_claimed_at']);
@@ -428,7 +428,7 @@ test('direct setup rejects wrong/stale proof, unpaid or drifted sources, existin
 
 test('direct setup refuses unknown/failed provider results without retry or exposing links', async () => {
   for (const response of [{ error: { message: 'provider failure' } },
-    { data: { user: { id: 'other', email: BUYER_EMAIL }, properties: { hashed_token: 'a'.repeat(64) } } },
+    { data: { user: { id: 'other', email: BUYER_EMAIL }, properties: { hashed_token: 'a'.repeat(56) } } },
     { data: { user: { id: 'new-user', email: BUYER_EMAIL }, properties: { hashed_token: 'malformed' } } }]) {
     const c = setupCase();let calls = 0;
     c.authAdmin.generateLink = async () => { calls++;return response; };
@@ -436,6 +436,17 @@ test('direct setup refuses unknown/failed provider results without retry or expo
     assert.equal(calls, 1);
     await assert.rejects(resolveCheckoutPasswordSetup({ db: c.db, authAdmin: c.authAdmin, sessionId: 'cs_test_public', signerToken: c.token }), { code: 'password_setup_unavailable' });
     assert.equal(calls, 1);
+  }
+});
+
+test('direct setup accepts the native SHA-224 format and consumes failures for all other hash lengths', async () => {
+  for(const tokenHash of ['a'.repeat(55),'a'.repeat(57),'a'.repeat(64),'g'.repeat(56)]) {
+    const c=setupCase();let calls=0;
+    c.authAdmin.generateLink=async()=>{calls++;return{data:{user:c.user,properties:{hashed_token:tokenHash}},error:null};};
+    const invoke=()=>resolveCheckoutPasswordSetup({db:c.db,authAdmin:c.authAdmin,sessionId:'cs_test_public',signerToken:c.token});
+    await assert.rejects(invoke(),{code:'password_setup_unavailable'});
+    await assert.rejects(invoke(),{code:'password_setup_unavailable'});
+    assert.equal(calls,1);assert.equal(c.db.updates.length,1);
   }
 });
 

@@ -50,4 +50,6 @@ test('existing public routes are preserved; policy admission precedes all intake
   const admin=fs.readFileSync(path.join(__dirname,'../src/routes/admin/publicPurchases.js'),'utf8');
   assert.match(admin,/router.post\('\/public-purchases\/retail-sales',requireAuth,requireAdmin/);
   assert.match(admin,/setRetailSalesPolicy\(supabaseAdmin,req.body,req.user\?\.id\)/);
+  const fence=fs.readFileSync(path.join(__dirname,'../src/config/guardedPricingDev.js'),'utf8');
+  assert.match(fence,/'\/admin\/public-purchases\/retail-sales'/);
 });

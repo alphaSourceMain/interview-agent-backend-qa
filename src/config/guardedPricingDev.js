@@ -164,7 +164,7 @@ function guardedPricingDevFence(req, res, next) {
     '/api/alphascreen/checkout-status',
     '/clients/billing/portal-session','/clients/billing/additional-interviews/checkout-session','/clients/roles/checkout-session',
     '/admin/billing/customers','/admin/billing/invoices/sync','/sales/promotion-codes/validate',
-    '/admin/sales-payroll/renewal-commissions']);
+    '/admin/sales-payroll/renewal-commissions','/admin/public-purchases/retail-sales']);
   const id='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
   const clientPost=new RegExp('^/admin/clients/'+id+'/(billing/checkout-session|subscription-checkout|subscription-invoice|usage-invoice|cancel-contract)$');
   const usageInvoiceOwner = pathname.match(new RegExp('^/admin/clients/('+id+')/usage-invoice$'))?.[1];

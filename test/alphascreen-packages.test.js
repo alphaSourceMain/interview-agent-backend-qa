@@ -68,7 +68,7 @@ function buildApp() {
   injectModule(supabaseClientPath, {
     supabaseAdmin: {
       from() {
-        throw new Error('GET /packages should not access Supabase')
+        return {select(){return this},order(){return this},limit(){return this},async maybeSingle(){return {data:{enabled:true,version:1},error:null}}}
       }
     }
   })

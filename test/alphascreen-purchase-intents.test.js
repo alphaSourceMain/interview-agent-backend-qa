@@ -91,6 +91,7 @@ class FakeQuery {
   }
 
   rowsForTable() {
+    if (this.table === 'retail_sales_policy_events') return [{enabled:true,version:1}]
     if (this.table === 'public_purchase_intents') {
       if (Array.isArray(this.db.purchaseIntents)) return this.db.purchaseIntents
       return this.db.existingIntent ? [this.db.existingIntent] : []
@@ -703,7 +704,7 @@ test('new quote gate refuses legacy price bypass and missing stale conflicting s
     for(const input of [validBody(),validBody({...keys,offer_version:'old'}),validBody({...keys,payment_option:'monthly_installments'}),
       validBody({...keys,commitmentMonths:6}),validBody({...keys,billing_cadence:'annual'})]){
       const db=makeDb(),r=await request(buildApp(db),input);assert.ok([400,409].includes(r.status));
-      assert.equal(db.inserts.length,0);assert.equal(db.touchedTables.length,0);
+      assert.equal(db.inserts.length,0);assert.deepEqual(db.touchedTables,['retail_sales_policy_events']);
     }
   }finally{if(prior===undefined)delete process.env.MEMBERSHIP_PRICING_TERMS_ENABLED;else process.env.MEMBERSHIP_PRICING_TERMS_ENABLED=prior}
 });

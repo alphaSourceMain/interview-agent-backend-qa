@@ -1,0 +1,27 @@
+{
+  "answers": {
+    "Is monthly billing a month-to-month membership?": "No. New Essential and Pro memberships have a 12-month commitment, paid in 12 monthly installments or prepaid annually. Monthly payment is not cancel-anytime billing: current-term installments remain owed. Request a demo or contact sales to get started; new online retail signup is currently unavailable. Enterprise terms are customized. Existing and custom accounts keep their accepted agreement terms.",
+    "How does pricing work?": "New Essential platform membership is $349 monthly for 12 months ($4,188 platform commitment), or $3,300 prepaid annually. Pro is $649 monthly for 12 months ($7,788 platform commitment), or $6,500 prepaid annually. Prices are USD before applicable tax; role and additional-interview fees are separate. Request a demo or contact sales to get started; new online retail signup is currently unavailable. Existing and custom accounts keep their accepted agreement terms.",
+    "When does my membership term start?": "New Essential and Pro agreements show actual start and end dates before signing. The agreement-generation date fixes the 12-month term's start and the end is 12 months later. Payment must succeed for the agreement to take effect and access to activate; it does not move the agreed dates. Enterprise uses its agreed service dates. Check Billing for Stripe's actual payment and renewal schedule. Existing accepted agreements, including earlier 3- and 6-month terms, retain their own dates and obligations.",
+    "What is first-role prepay?": "First-role prepay is an optional one-time payment when offered in your accepted signup or sales agreement: $359 for Essential or $629 for Pro (USD). This non-refundable credit has no expiration, applies to the first paid role under the same billing account, and does not renew. Request a demo or contact sales for a new membership; existing credits and accepted agreements stay unchanged.",
+    "How does first-role prepay work?": "First-role prepay is an optional one-time payment when offered in your accepted signup or sales agreement: $359 for Essential or $629 for Pro (USD). This non-refundable credit has no expiration, applies to the first paid role under the same billing account, and does not renew. Request a demo or contact sales for a new membership; existing credits and accepted agreements stay unchanged."
+  },
+  "replacements": [
+    [
+      "Essential and Pro offer 3-, 6-, and 12-month terms online, paid upfront or in monthly installments",
+      "New Essential and Pro memberships have a 12-month commitment, paid monthly or annually; request a demo or contact sales"
+    ],
+    [
+      "Choose a 3-, 6-, or 12-month Essential or Pro term online, paid upfront or in monthly installments over that term.",
+      "New Essential and Pro memberships have a 12-month commitment, paid monthly or annually. Request a demo or contact sales; new online retail signup is currently unavailable."
+    ],
+    [
+      "Hiring teams choose a membership, complete agreement and checkout steps, set up dashboard access, create roles, invite candidates, and review structured reports after candidates complete screening interviews.",
+      "Hiring teams request a demo or contact sales, choose a membership, complete agreement and payment steps, set up dashboard access, create roles, invite candidates, and review structured reports after candidates complete screening interviews."
+    ],
+    [
+      "Pricing / Get Started",
+      "Pricing / Request a demo"
+    ]
+  ]
+}

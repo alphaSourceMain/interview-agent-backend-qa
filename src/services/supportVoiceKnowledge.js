@@ -40,7 +40,7 @@ function readKnowledgeFiles() {
   return { bytes, snapshot, version, hash: actualHash };
 }
 
-function buildSupportVoicePrompt({ handoff = handoffEnabled() } = {}) {
+function buildSupportVoicePrompt({ handoff = handoffEnabled(), retailSalesEnabled = true } = {}) {
   const knowledge = readKnowledgeFiles();
   const policy = handoff ? SUPPORT_POLICY
     .replace('You are informational only.', 'You provide informational guidance plus one narrowly scoped, caller-approved support email action.')
@@ -51,7 +51,9 @@ function buildSupportVoicePrompt({ handoff = handoffEnabled() } = {}) {
 For a message, collect the caller's name, reply email and brief issue summary. Ask one question at a time. If any name or email spelling is unclear, ask them to spell it, including the email domain; never guess. Read back the name, email and concise message and obtain explicit approval to send all three to support@alphasourceai.com. Incorporate corrections and reconfirm before sending. If they decline to provide or confirm details, do not send; offer direct support email or phone contact. The message goes to the team; their email is where the team can reply.
 Only after an explicit yes call send_support_message with confirmed=true. Never call it for ordinary completed conversations, silence, ambiguous consent or declined escalation. Exclude candidate identities, records, scores, transcripts, credentials, codes, private links and payment details. Send at most once per session. Only status accepted permits confirming submission, not guaranteed delivery, a ticket, callback or response time. For all other results, explain that sending could not be confirmed, do not retry, and give support@alphasourceai.com. This policy overrides older FAQ capability statements.
 SPEAKING: Never say tool or function names, API, endpoint, parameter names, status codes or sending mechanics aloud. After approval say "I’ll send a message to the support team." Invoke the function silently. After accepted say "Your message has been submitted to the support team." Explain failures plainly. Draft natural sentences and standard written email addresses, not spoken "at" or "dot". Send the final approved wording without changing facts.` : SUPPORT_POLICY;
-  const prompt = `${policy}\n\nSTATIC ALPHASCREEN SUPPORT KNOWLEDGE (${knowledge.version}):\n${knowledge.bytes.toString('utf8')}`;
+  const activeKnowledge = retailSalesEnabled ? knowledge.bytes.toString('utf8')
+    : JSON.stringify(require('./retailSalesContent').retailContentForMode(knowledge.snapshot, false));
+  const prompt = `${policy}\n\nSTATIC ALPHASCREEN SUPPORT KNOWLEDGE (${knowledge.version}):\n${activeKnowledge}`;
   const promptBytes = Buffer.byteLength(prompt, 'utf8');
   if (promptBytes <= 0 || promptBytes > MAX_PROMPT_BYTES) {
     throw new Error('SUPPORT_VOICE_PROMPT_SIZE_INVALID');

@@ -28,6 +28,7 @@ const {
 } = require('../../../services/alphaScreen/index');
 
 const router = express.Router();
+const {readRetailSalesPolicy,assertRetailSalesEnabled}=require('../../../services/retailSalesPolicy');
 const { resolveCheckoutPasswordSetup } = require('../../../services/publicPurchaseActivation');
 
 router.post('/checkout-status', async (req, res) => {
@@ -50,9 +51,13 @@ router.post('/checkout-status', async (req, res) => {
   }
 });
 
-router.get('/packages', (req, res) => {
+router.get('/packages', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
+  let policy;
+  try { policy=await readRetailSalesPolicy(supabaseAdmin); }
+  catch (_) { return res.status(503).json({code:'retail_sales_policy_unavailable'}); }
   return res.json({
+    retail_sales_policy:policy,
     packages: listPublicAlphaScreenPackages(),
     ...(retailQuoteCatalog('public') || {}),
     request_id: req.request_id || null
@@ -110,6 +115,7 @@ router.get('/checkout-status', async (req, res) => {
 router.post('/purchase-intents', async (req, res) => {
   const request_id = req.request_id || null
   try {
+    await assertRetailSalesEnabled(supabaseAdmin)
     const input = normalizePurchaseIntentInput(req.body || {})
     const validation = validatePurchaseIntentInput(input)
     if (!validation.ok) {

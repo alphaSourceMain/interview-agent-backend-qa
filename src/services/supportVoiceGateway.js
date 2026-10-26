@@ -609,7 +609,7 @@ function createSupportVoiceGateway(options = {}) {
   function connectUpstream(entry) {
     require('../config/guardedPricingDev').assertGuardedDevOutboundAllowed();
     const handoff = supportHandoff.enabled();
-    const built = buildSupportVoicePrompt({ handoff });
+    const built = buildSupportVoicePrompt({ handoff, retailSalesEnabled: entry.retailSalesEnabled === true });
     entry.phase = 'upstream_connecting';
     const upstream = new WebSocketClient(UPSTREAM_URL, {
       headers: { Authorization: `Bearer ${env.XAI_API_KEY}` },
@@ -812,7 +812,12 @@ function createSupportVoiceGateway(options = {}) {
         startHeartbeat(entry);
         if (!await eligible({ userId: entry.userId, clientId: entry.clientId })) return finalize(entry, 'support_voice_unavailable');
         if (entry.phase === 'terminal') return;
-        try { connectUpstream(entry); } catch { finalize(entry, 'support_voice_unavailable'); }
+        try {
+          const policy = await require('./retailSalesPolicy').readRetailSalesPolicy(serviceDb).catch(() => ({enabled:false}));
+          if (entry.phase === 'terminal') return;
+          entry.retailSalesEnabled = policy.enabled === true;
+          connectUpstream(entry);
+        } catch { finalize(entry, 'support_voice_unavailable'); }
         return;
       }
 

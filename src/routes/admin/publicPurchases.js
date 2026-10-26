@@ -26,6 +26,18 @@ const { requireAdmin } = require('../../middleware/requireAdmin');
 const { sendAdminError } = require('../../services/admin/adminHelpers');
 
 const router = express.Router();
+const {readRetailSalesPolicy,setRetailSalesPolicy}=require('../../services/retailSalesPolicy');
+
+router.get('/public-purchases/retail-sales',requireAuth,requireAdmin,async(_req,res)=>{
+  res.setHeader('Cache-Control','private, no-store');
+  try{return res.json(await readRetailSalesPolicy(supabaseAdmin));}
+  catch(e){return res.status(e.status||503).json({error:e.code||'retail_sales_policy_unavailable'});}
+});
+router.post('/public-purchases/retail-sales',requireAuth,requireAdmin,async(req,res)=>{
+  res.setHeader('Cache-Control','private, no-store');
+  try{return res.json(await setRetailSalesPolicy(supabaseAdmin,req.body,req.user?.id));}
+  catch(e){return res.status(e.status||503).json({error:e.code||'retail_sales_policy_unavailable'});}
+});
 
 const PUBLIC_PURCHASE_PLAYBOOK_PDF_PATH = path.join(__dirname, '..', '..', '..', 'templates', 'pdf', 'alphascreen-public-purchase-support-playbook.pdf')
 

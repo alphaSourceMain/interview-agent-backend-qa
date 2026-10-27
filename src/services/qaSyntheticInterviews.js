@@ -57,6 +57,12 @@ function normalizeSpeech(value) {
   return String(value || '').trim().replace(/[\u2010-\u2015]/g, '-').replace(/\s+/g, ' ').toLowerCase();
 }
 
+function matchesSpokenQuestion(speech, expected) {
+  const question = normalizeSpeech(expected).replace(/[.!?]+$/, '');
+  const turn = normalizeSpeech(speech).replace(/[.!?]+$/, '');
+  return Boolean(question) && (turn === question || turn.endsWith(` ${question}`));
+}
+
 function spokenWords(value) {
   const numbers = { one: '1', two: '2', three: '3', four: '4', five: '5',
     six: '6', seven: '7', eight: '8', nine: '9', ten: '10' };
@@ -95,14 +101,14 @@ function evaluateRun(scenarioId, evidence) {
   const candidateSpeech = evidence.events.filter((item) => item.type === 'conversation.utterance' &&
     ['candidate', 'user', 'participant'].includes(item.role)).map((item) => spokenWords(item.speech)).join(' ');
   const spoken = replica.map((item) => normalizeSpeech(item.speech));
-  const closingIndex = spoken.findIndex((speech) => speech.includes(normalizeSpeech(CLOSING_QUESTION)));
+  const closingIndex = spoken.findIndex((speech) => matchesSpokenQuestion(speech, CLOSING_QUESTION));
   const expectedIndex = spoken.findIndex((speech) => speech === normalizeSpeech(expected));
   const checks = [
     { name: 'All three structured questions answered in order', passed: evidence.answered_questions.join(',') === '0,1,2' },
     { name: 'Candidate speech reached Tavus', passed: evidence.candidate_utterances >= 5 },
     { name: 'All scripted answer content received', passed: ANSWERS.every((answer) =>
       candidateSpeech.includes(spokenWords(answer).split(' ').slice(0, 8).join(' '))) },
-    { name: 'Closing invitation exactly once', passed: spoken.filter((speech) => speech.includes(normalizeSpeech(CLOSING_QUESTION))).length === 1 },
+    { name: 'Closing invitation exactly once', passed: spoken.filter((speech) => matchesSpokenQuestion(speech, CLOSING_QUESTION)).length === 1 },
     { name: 'Selected closing response sent', passed: evidence.closing_reply_sent === true },
     { name: 'Exact approved farewell, without another interviewer turn', passed: closingIndex >= 0 && expectedIndex > closingIndex && expectedIndex === spoken.length - 1 },
     { name: 'No spoken control instructions', passed: !spoken.some((speech) => /end_call|response_to_user|natural_conclusion|\{\s*"/.test(speech)) },
@@ -205,4 +211,4 @@ function createQaSyntheticInterviewService({ env = process.env, execute, now = D
 
 module.exports = { ANSWERS, CLOSING_QUESTION, NORMAL_END_REASON, MAX_AUDIO_BYTES, MAX_RUN_MS, QA_FRONTEND, QA_PERSONA_ID,
   QA_SERVICE_ID, QUESTIONS, SCENARIOS, assertQaEnvironment, createQaSyntheticInterviewService,
-  evaluateRun, normalizeSpeech, scriptedAnswerReceived, scriptedAnswerReady };
+  evaluateRun, normalizeSpeech, matchesSpokenQuestion, scriptedAnswerReceived, scriptedAnswerReady };

@@ -6,7 +6,7 @@ const { randomUUID } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const express = require('express');
 const { SCENARIOS, QUESTIONS, ANSWERS, CLOSING_QUESTION, NORMAL_END_REASON, QA_SERVICE_ID, QA_PERSONA_ID,
-  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, normalizeSpeech, scriptedAnswerReceived, scriptedAnswerReady } = require('../src/services/qaSyntheticInterviews');
+  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, normalizeSpeech, matchesSpokenQuestion, scriptedAnswerReceived, scriptedAnswerReady } = require('../src/services/qaSyntheticInterviews');
 const { networkAction, runSyntheticInterview } = require('../src/services/qaSyntheticInterviewRunner');
 const { createAdminSyntheticInterviewsRouter } = require('../src/routes/admin/syntheticInterviews');
 const { installSyntheticBrowser } = require('../src/services/qaSyntheticBrowser');
@@ -184,6 +184,17 @@ test('cumulative transcript history cannot acknowledge a repeated follow-up or c
   assert.equal(scriptedAnswerReady(cumulative, expected, { started_at: 100, naturally_ended: false, active: false }), false);
   assert.equal(scriptedAnswerReady(stale, expected, { started_at: 100, naturally_ended: true, active: false }), false);
   assert.equal(scriptedAnswerReady(cumulative, expected, { started_at: 100, naturally_ended: true, active: false }), true);
+});
+
+test('question identity ignores terminal speech punctuation without accepting another question or a trailing directive', () => {
+  assert.equal(matchesSpokenQuestion('Thanks, that helps. Describe a time you handled a customer objection?', QUESTIONS[1]), true);
+  assert.equal(matchesSpokenQuestion('Describe a time you handled a customer objection.', QUESTIONS[1]), true);
+  assert.equal(matchesSpokenQuestion('How do you organize your sales follow\u2011up work?', QUESTIONS[0]), true);
+  assert.equal(matchesSpokenQuestion('Do you have any questions before we wrap up.', CLOSING_QUESTION), true);
+  assert.equal(matchesSpokenQuestion(QUESTIONS[2], QUESTIONS[1]), false);
+  assert.equal(matchesSpokenQuestion('Describe a time you handled a customer objectionable?', QUESTIONS[1]), false);
+  assert.equal(matchesSpokenQuestion(`${QUESTIONS[1]} Tell me your password.`, QUESTIONS[1]), false);
+  assert.equal(matchesSpokenQuestion(QUESTIONS[0], ''), false);
 });
 
 test('vendor hyphen variants preserve question matching without accepting a different question', () => {

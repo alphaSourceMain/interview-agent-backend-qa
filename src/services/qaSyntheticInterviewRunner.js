@@ -4,7 +4,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { createHash } = require('node:crypto');
 const {
   ANSWERS, CLOSING_QUESTION, NORMAL_END_REASON, MAX_AUDIO_BYTES, MAX_RUN_MS, QA_FRONTEND, QA_PERSONA_ID,
-  QUESTIONS, SCENARIOS, assertQaEnvironment, evaluateRun, normalizeSpeech, scriptedAnswerReady,
+  QUESTIONS, SCENARIOS, assertQaEnvironment, evaluateRun, normalizeSpeech, matchesSpokenQuestion, scriptedAnswerReady,
 } = require('./qaSyntheticInterviews');
 const { installSyntheticBrowser } = require('./qaSyntheticBrowser');
 
@@ -186,13 +186,13 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
           warmupAnswered = true;
           clip = 0;
           update('Answering warm-up');
-        } else if (previousSpeech.includes(normalizeSpeech(CLOSING_QUESTION))) {
+        } else if (matchesSpokenQuestion(turn.speech, CLOSING_QUESTION)) {
           if (evidence.answered_questions.length !== QUESTIONS.length || evidence.closing_reply_sent) throw new Error('synthetic_premature_or_repeated_closing');
           evidence.closing_reply_sent = true;
           clip = 5;
           update('Testing closing response');
         } else if (!evidence.closing_reply_sent) {
-          const question = QUESTIONS.findIndex((text) => previousSpeech.includes(normalizeSpeech(text)));
+          const question = QUESTIONS.findIndex((text) => matchesSpokenQuestion(turn.speech, text));
           if (question >= 0) {
             if (question !== evidence.answered_questions.length) throw new Error('synthetic_question_order_mismatch');
             evidence.answered_questions.push(question);

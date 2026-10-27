@@ -5,9 +5,9 @@ const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const express = require('express');
-const { SCENARIOS, QUESTIONS, ANSWERS, CLOSING_QUESTION, QA_SERVICE_ID, QA_PERSONA_ID,
+const { SCENARIOS, QUESTIONS, ANSWERS, CLOSING_QUESTION, NORMAL_END_REASON, QA_SERVICE_ID, QA_PERSONA_ID,
   assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, normalizeSpeech, scriptedAnswerReceived } = require('../src/services/qaSyntheticInterviews');
-const { networkAction } = require('../src/services/qaSyntheticInterviewRunner');
+const { networkAction, runSyntheticInterview } = require('../src/services/qaSyntheticInterviewRunner');
 const { createAdminSyntheticInterviewsRouter } = require('../src/routes/admin/syntheticInterviews');
 const { installSyntheticBrowser } = require('../src/services/qaSyntheticBrowser');
 const { runInNewContext } = require('node:vm');
@@ -198,7 +198,7 @@ function goodEvidence(scenario) {
     { type: 'conversation.utterance', role: 'replica', speech: SCENARIOS[scenario].expected },
     ...ANSWERS.map((speech) => ({ type: 'conversation.utterance', role: 'candidate', speech }))],
     answered_questions: [0, 1, 2], candidate_utterances: 5, closing_reply_sent: true,
-    end_requests: 1, end_reason: 'closing_utterance', provider_end_confirmed: true,
+    end_requests: 1, end_reason: NORMAL_END_REASON, provider_end_confirmed: true,
     completion_page: true, browser_errors: 0, audio_bytes: 1000, audio_transcript: SCENARIOS[scenario].expected };
 }
 
@@ -210,6 +210,7 @@ test('each closing scenario demands all structured answers, exact terminal turn,
     assert.equal(evaluateRun(scenario, evidence).status, 'passed');
     for (const delta of [{ answered_questions: [0, 2, 1] }, { candidate_utterances: 0 },
       { closing_reply_sent: false }, { end_requests: 0 }, { end_requests: 2 }, { end_reason: 'manual' },
+      { end_reason: 'closing_utterance' },
       { provider_end_confirmed: false }, { completion_page: false }, { audio_bytes: 0 },
       { audio_transcript: 'Thank you for your time.' }, { browser_errors: 1 }]) {
       assert.equal(evaluateRun(scenario, { ...evidence, ...delta }).status, 'failed');
@@ -220,6 +221,38 @@ test('each closing scenario demands all structured answers, exact terminal turn,
       { type: 'conversation.utterance', role: 'replica', speech: "Let's continue." }] }).status, 'failed');
     assert.equal(evaluateRun(scenario, { ...evidence, events: [...evidence.events,
       { type: 'conversation.utterance', role: 'replica', speech: CLOSING_QUESTION }] }).status, 'failed');
+  }
+});
+
+test('application farewell passes while legacy tool termination cannot certify the normal closing flow', () => {
+  const evidence = goodEvidence('no_questions');
+  assert.equal(NORMAL_END_REASON, 'completed_normally');
+  assert.equal(evaluateRun('no_questions', evidence).status, 'passed');
+  assert.equal(evaluateRun('no_questions', { ...evidence, end_reason: 'closing_utterance' }).status, 'failed');
+});
+
+test('modern PAL identity is checked before opening a browser or generating charged speech', async () => {
+  const oldEnv = Object.fromEntries(Object.keys(ENV).map(key => [key, process.env[key]]));
+  Object.assign(process.env, ENV);
+  let reads = 0, browserStarts = 0, speechCalls = 0, creates = 0;
+  try {
+    const result = await runSyntheticInterview({ id: randomUUID(), scenario: 'no_questions',
+      signal: new AbortController().signal, update() {} }, {
+      client: {
+        getPal: async id => { reads += 1; assert.equal(id, QA_PERSONA_ID); return { pal_id: 'wrong-pal' }; },
+        createConversation: async () => { creates += 1; },
+      },
+      launchBrowser: async () => { browserStarts += 1; },
+      ai: { audio: { speech: { create: async () => { speechCalls += 1; } } } },
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error, 'synthetic_pal_mismatch');
+    assert.equal(result.cleanup_confirmed, true);
+    assert.equal(reads, 1); assert.equal(browserStarts, 0); assert.equal(speechCalls, 0); assert.equal(creates, 0);
+  } finally {
+    for (const [key, value] of Object.entries(oldEnv)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
   }
 });
 

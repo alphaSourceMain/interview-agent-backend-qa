@@ -3,7 +3,7 @@
 const { setTimeout: delay } = require('node:timers/promises');
 const { createHash } = require('node:crypto');
 const {
-  ANSWERS, CLOSING_QUESTION, MAX_AUDIO_BYTES, MAX_RUN_MS, QA_FRONTEND, QA_PERSONA_ID,
+  ANSWERS, CLOSING_QUESTION, NORMAL_END_REASON, MAX_AUDIO_BYTES, MAX_RUN_MS, QA_FRONTEND, QA_PERSONA_ID,
   QUESTIONS, SCENARIOS, assertQaEnvironment, evaluateRun, normalizeSpeech, scriptedAnswerReceived,
 } = require('./qaSyntheticInterviews');
 const { installSyntheticBrowser } = require('./qaSyntheticBrowser');
@@ -11,7 +11,8 @@ const { installSyntheticBrowser } = require('./qaSyntheticBrowser');
 const QA_API_HOSTS = new Set(['ia-backend-qa.onrender.com', 'api-qa.alphasourceai.com']);
 const DAILY_SCRIPT = 'https://unpkg.com/@daily-co/daily-js@0.91.0/dist/daily.js';
 const fingerprint = (persona) => createHash('sha256').update(JSON.stringify({
-  system_prompt: persona.system_prompt, layers: persona.layers, default_replica_id: persona.default_replica_id,
+  pal_id: persona.pal_id, system_prompt: persona.system_prompt, layers: persona.layers,
+  default_face_id: persona.default_face_id,
 })).digest('hex');
 
 function readSyntheticSnapshot() {
@@ -51,7 +52,6 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
   const OpenAI = require('openai');
   const ai = dependencies.ai || new OpenAI({ apiKey: process.env.OPENAI_API_KEY,
     baseURL: 'https://api.openai.com/v1', maxRetries: 0, timeout: 25000 });
-  const { buildConversationalContext, buildCustomGreeting, resolveSilenceEngagementOwner } = require('./tavusInterview');
   let browser, page, conversation, beforePersona;
   let endPromise = null;
   let providerEnded = false;
@@ -89,6 +89,11 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
   signal.addEventListener('abort', onAbort, { once: true });
   try {
     signal.throwIfAborted();
+    const currentPal = await client.getPal(QA_PERSONA_ID);
+    if (currentPal.pal_id !== QA_PERSONA_ID) throw new Error('synthetic_pal_mismatch');
+    beforePersona = currentPal;
+    const { buildConversationalContext, buildCustomGreeting, resolveSilenceEngagementOwner } = require('./tavusInterview');
+    signal.throwIfAborted();
     browser = await (dependencies.launchBrowser || launchBrowser)();
     signal.throwIfAborted();
     page = await browser.newPage();
@@ -114,7 +119,7 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
           evidence.end_requests += 1;
           evidence.end_reason = body.reason;
           if (body.interview_id !== id || body.role_token !== id || body.conversation_id !== conversation?.conversation_id ||
-              body.reason !== 'closing_utterance' || evidence.end_requests !== 1) return reply({ error: 'synthetic_end_binding_mismatch' }, 403);
+              body.reason !== NORMAL_END_REASON || evidence.end_requests !== 1) return reply({ error: 'synthetic_end_binding_mismatch' }, 403);
           const recorded = await page.evaluate(async () => {
             const runtime = window.__qaSynthetic;
             return runtime && { audio: await runtime.finishRecording(), events: runtime.events };
@@ -137,8 +142,6 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
       if (bytes.length > MAX_AUDIO_BYTES) throw new Error('synthetic_audio_limit');
       clips.push(bytes.toString('base64'));
     }
-    beforePersona = await client.getPersona(QA_PERSONA_ID);
-    if (beforePersona.persona_id !== QA_PERSONA_ID) throw new Error('synthetic_persona_mismatch');
     signal.throwIfAborted();
     update('Starting browser interview');
     createAttempted = true;
@@ -276,7 +279,7 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
     try { await endProvider(); } catch { error = 'synthetic_vendor_cleanup_unconfirmed'; }
     try {
       if (beforePersona) {
-        const after = await client.getPersona(QA_PERSONA_ID);
+        const after = await client.getPal(QA_PERSONA_ID);
         if (fingerprint(beforePersona) !== fingerprint(after)) { status = 'failed'; error = 'synthetic_persona_changed'; }
       }
     } catch { status = 'failed'; error = 'synthetic_persona_readback_unavailable'; }

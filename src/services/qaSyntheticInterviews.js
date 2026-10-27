@@ -14,6 +14,7 @@ const QA_PERSONA_ID = 'pa40626945f5';
 const MAX_RUN_MS = 5 * 60 * 1000;
 const MAX_AUDIO_BYTES = 6 * 1024 * 1024;
 const CLOSING_QUESTION = 'Do you have any questions before we wrap up?';
+const NORMAL_END_REASON = 'completed_normally';
 const QUESTIONS = Object.freeze([
   'How do you organize your sales follow-up work?',
   'Describe a time you handled a customer objection.',
@@ -93,7 +94,7 @@ function evaluateRun(scenarioId, evidence) {
     { name: 'Selected closing response sent', passed: evidence.closing_reply_sent === true },
     { name: 'Exact approved farewell, without another interviewer turn', passed: closingIndex >= 0 && expectedIndex > closingIndex && expectedIndex === spoken.length - 1 },
     { name: 'No spoken control instructions', passed: !spoken.some((speech) => /end_call|response_to_user|natural_conclusion|\{\s*"/.test(speech)) },
-    { name: 'One browser-owned normal end request', passed: evidence.end_requests === 1 && evidence.end_reason === 'closing_utterance' },
+    { name: 'One browser-owned normal end request', passed: evidence.end_requests === 1 && evidence.end_reason === NORMAL_END_REASON },
     { name: 'Vendor end confirmed', passed: evidence.provider_end_confirmed === true },
     { name: 'Browser reached completion page', passed: evidence.completion_page === true },
     { name: 'Full farewell captured in received audio', passed: evidence.audio_bytes > 0 && spokenWords(evidence.audio_transcript).includes(spokenWords(expected)) },
@@ -190,6 +191,6 @@ function createQaSyntheticInterviewService({ env = process.env, execute, now = D
   };
 }
 
-module.exports = { ANSWERS, CLOSING_QUESTION, MAX_AUDIO_BYTES, MAX_RUN_MS, QA_FRONTEND, QA_PERSONA_ID,
+module.exports = { ANSWERS, CLOSING_QUESTION, NORMAL_END_REASON, MAX_AUDIO_BYTES, MAX_RUN_MS, QA_FRONTEND, QA_PERSONA_ID,
   QA_SERVICE_ID, QUESTIONS, SCENARIOS, assertQaEnvironment, createQaSyntheticInterviewService,
   evaluateRun, normalizeSpeech, scriptedAnswerReceived };

@@ -63,7 +63,7 @@ function installSyntheticBrowser(session) {
     playback = { started_at: startedAt, duration_seconds: buffer.duration,
       context_started_seconds: context.currentTime, naturally_ended: false };
     source.start();
-    // The driver waits for received speech; a missing onended callback is not a verdict.
+    // The driver requires natural playback completion and fresh received speech.
     return { started_at: startedAt, duration_seconds: buffer.duration };
   };
   runtime.finishRecording = async () => {

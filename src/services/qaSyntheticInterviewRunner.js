@@ -4,7 +4,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { createHash } = require('node:crypto');
 const {
   ANSWERS, CLOSING_QUESTION, NORMAL_END_REASON, MAX_AUDIO_BYTES, MAX_RUN_MS, QA_FRONTEND, QA_PERSONA_ID,
-  QUESTIONS, SCENARIOS, assertQaEnvironment, evaluateRun, normalizeSpeech, scriptedAnswerReceived,
+  QUESTIONS, SCENARIOS, assertQaEnvironment, evaluateRun, normalizeSpeech, scriptedAnswerReady,
 } = require('./qaSyntheticInterviews');
 const { installSyntheticBrowser } = require('./qaSyntheticBrowser');
 
@@ -225,9 +225,8 @@ async function runSyntheticInterview({ id, scenario, signal, update }, dependenc
             signal.throwIfAborted();
             received = await page.evaluate(readSyntheticSnapshot);
             captureEvents(received?.events);
-            if (scriptedAnswerReceived(evidence.events, scripts[clip], playback.started_at)) {
+            if (scriptedAnswerReady(evidence.events, scripts[clip], received?.playback)) {
               acknowledged = true;
-              if (received) await page.evaluate(() => window.__qaSynthetic.stopPlayback());
               break;
             }
             if (!received || frontendEndSucceeded) break;

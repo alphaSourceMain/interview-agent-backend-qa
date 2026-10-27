@@ -70,10 +70,22 @@ function scriptedAnswerReceived(events, expected, startedAt) {
   const words = spokenWords(expected).split(' ');
   const prefix = words.slice(0, 8).join(' ');
   const suffix = words.slice(-4).join(' ');
-  const received = events.filter((item) => item.at >= startedAt && item.type === 'conversation.utterance' &&
-    ['candidate', 'user', 'participant'].includes(item.role)).map((item) => spokenWords(item.speech)).join(' ');
+  const candidate = events.filter((item) => item.type === 'conversation.utterance' &&
+    ['candidate', 'user', 'participant'].includes(item.role));
+  const prior = spokenWords(candidate.filter((item) => item.at < startedAt).at(-1)?.speech);
+  // Some provider updates repeat the previous answer as a cumulative prefix.
+  // Old words must not acknowledge another playback of the same follow-up.
+  const received = candidate.filter((item) => item.at >= startedAt).map((item) => {
+    const speech = spokenWords(item.speech);
+    return prior && (speech === prior || speech.startsWith(`${prior} `)) ? speech.slice(prior.length).trim() : speech;
+  }).join(' ');
   return received.includes(prefix) && received.includes(suffix) &&
     received.split(' ').length >= Math.ceil(words.length * 0.8);
+}
+
+function scriptedAnswerReady(events, expected, playback) {
+  return playback?.naturally_ended === true && playback.active === false &&
+    scriptedAnswerReceived(events, expected, playback.started_at);
 }
 
 function evaluateRun(scenarioId, evidence) {
@@ -193,4 +205,4 @@ function createQaSyntheticInterviewService({ env = process.env, execute, now = D
 
 module.exports = { ANSWERS, CLOSING_QUESTION, NORMAL_END_REASON, MAX_AUDIO_BYTES, MAX_RUN_MS, QA_FRONTEND, QA_PERSONA_ID,
   QA_SERVICE_ID, QUESTIONS, SCENARIOS, assertQaEnvironment, createQaSyntheticInterviewService,
-  evaluateRun, normalizeSpeech, scriptedAnswerReceived };
+  evaluateRun, normalizeSpeech, scriptedAnswerReceived, scriptedAnswerReady };

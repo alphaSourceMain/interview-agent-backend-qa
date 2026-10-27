@@ -6,7 +6,7 @@ const { randomUUID } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const express = require('express');
 const { SCENARIOS, QUESTIONS, ANSWERS, CLOSING_QUESTION, NORMAL_END_REASON, QA_SERVICE_ID, QA_PERSONA_ID,
-  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, normalizeSpeech, scriptedAnswerReceived } = require('../src/services/qaSyntheticInterviews');
+  assertQaEnvironment, createQaSyntheticInterviewService, evaluateRun, normalizeSpeech, scriptedAnswerReceived, scriptedAnswerReady } = require('../src/services/qaSyntheticInterviews');
 const { networkAction, runSyntheticInterview } = require('../src/services/qaSyntheticInterviewRunner');
 const { createAdminSyntheticInterviewsRouter } = require('../src/routes/admin/syntheticInterviews');
 const { installSyntheticBrowser } = require('../src/services/qaSyntheticBrowser');
@@ -167,6 +167,23 @@ test('answer acknowledgement requires fresh received candidate content, not play
   for (const { reply } of Object.values(SCENARIOS)) {
     assert.equal(scriptedAnswerReceived([{ ...event, speech: reply }], reply, 99), true);
   }
+});
+
+test('cumulative transcript history cannot acknowledge a repeated follow-up or cut active playback short', () => {
+  const expected = 'I documented the customer need, confirmed the next step, and reviewed the results with my manager. Our follow-up time improved from three days to one day.';
+  const previous = `A customer was concerned about price. ${expected}`;
+  const item = { type: 'conversation.utterance', role: 'user' };
+  const history = [{ ...item, speech: previous, at: 50 }];
+  const stale = [...history, { ...item, speech: `${previous} I documented`, at: 110 }];
+  assert.equal(scriptedAnswerReceived(stale, expected, 100), false);
+  const cumulative = [...stale, { ...item, speech: `${previous} ${expected}`, at: 120 }];
+  assert.equal(scriptedAnswerReceived(cumulative, expected, 100), true);
+  const separate = [...history, { ...item, speech: expected, at: 120 }];
+  assert.equal(scriptedAnswerReceived(separate, expected, 100), true);
+  assert.equal(scriptedAnswerReady(cumulative, expected, { started_at: 100, naturally_ended: false, active: true }), false);
+  assert.equal(scriptedAnswerReady(cumulative, expected, { started_at: 100, naturally_ended: false, active: false }), false);
+  assert.equal(scriptedAnswerReady(stale, expected, { started_at: 100, naturally_ended: true, active: false }), false);
+  assert.equal(scriptedAnswerReady(cumulative, expected, { started_at: 100, naturally_ended: true, active: false }), true);
 });
 
 test('vendor hyphen variants preserve question matching without accepting a different question', () => {

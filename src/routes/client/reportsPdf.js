@@ -6,7 +6,7 @@ const { DEMO_CLIENT_ID, isQa } = require('../../services/salesDemo');
 const { getCandidateReportPdfOptions } = require('../../render/candidateReport');
 
 function interviewSelect() {
-  const base = 'id, created_at, candidate_id, client_id, role_id, attempt_number, attempt_mode, previous_attempt_id, replacement_authorization_id, status, video_url, transcript_url, transcript, analysis_url, analysis, transcript_scores, perception_scores, interview_summary, unanswered_candidate_questions, failure_code, failure_stage, conversation_progress_state, client_end_reason, has_substantive_response';
+  const base = 'id, created_at, candidate_id, client_id, role_id, attempt_number, attempt_mode, previous_attempt_id, replacement_authorization_id, status, video_url, transcript_url, transcript, analysis_url, analysis, transcript_scores, scoring_summary, perception_scores, interview_summary, unanswered_candidate_questions, failure_code, failure_stage, conversation_progress_state, client_end_reason, has_substantive_response';
   return process.env.EXPOSE_INTERVIEW_ANALYSIS_V2 === 'true' || isQa() ? base + ', interview_analysis_v2' : base;
 }
 const Sentry = require('@sentry/node');

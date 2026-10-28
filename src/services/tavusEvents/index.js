@@ -13,6 +13,7 @@ const { analyzeInterviewTranscriptById } = require('../../../scripts/backfillInt
 const { generateInterviewAnalysisV2 } = require('../interviewAnalysisV2');
 const { INSUFFICIENT_SUMMARY, isSubstantiveTranscript, scoreInterview } = require('../interviewScoring');
 const { markInterviewCompleted } = require('../interviewCompletion');
+const { VERSION: QUALITY_VERSION, isQualityInterview } = require('../interviewQualityScoring');
 const { transcriptCompletionTransition } = require('../interviewLifecycle');
 const { classifyCandidateUtterance } = require('../interviewUtteranceClassifier');
 const { excludeWarmupFromTranscript, excludeWarmupFromTranscriptItems } = require('../warmupExclusion');
@@ -22,7 +23,7 @@ const {
   validateTranscriptScores,
 } = require('../finalTranscriptReconciliation');
 const {
-  extractCandidateQuestions,
+  extractCandidateQuestionsForInterview,
 } = require('../unansweredCandidateQuestions');
 const { isTerminalInterviewToolName } = require('../tavusTerminalTool');
 const { authenticateTavusWebhookRequest } = require('../tavusWebhookAuth');
@@ -905,7 +906,7 @@ function isValidInterviewAnalysisV2Payload(analysis) {
     'evidence',
     'limitations',
   ])) return false;
-  if (analysis.version !== 'path_a_v1' ||
+  if (!['path_a_v1', 'path_a_v1_role_quality_v3'].includes(analysis.version) ||
       Buffer.byteLength(JSON.stringify(analysis), 'utf8') > 32_768) return false;
 
   if (!hasExactObjectKeys(analysis.scores, [
@@ -1078,7 +1079,7 @@ async function maybeGenerateInterviewAnalysisV2({
   try {
     const { data: row, error } = await supabaseAdmin
       .from('interviews')
-      .select('id,candidate_id,role_id,status,failure_code,conversation_progress_state,has_substantive_response,substantive_response_count,candidate_utterance_count,transcript,transcript_scores,perception_scores,perception_analysis_text,unanswered_candidate_questions,interview_summary,interview_analysis_v2')
+      .select('id,candidate_id,role_id,status,failure_code,conversation_progress_state,has_substantive_response,substantive_response_count,candidate_utterance_count,transcript,transcript_scores,perception_scores,perception_analysis_text,unanswered_candidate_questions,interview_summary,interview_analysis_v2,scoring_summary')
       .eq('id', interview.id)
       .maybeSingle();
     if (error || !row) {
@@ -1116,7 +1117,7 @@ async function maybeGenerateInterviewAnalysisV2({
         });
         return;
       }
-    } else if (row.interview_analysis_v2 && typeof row.interview_analysis_v2 === 'object') {
+    } else if (row.interview_analysis_v2 && typeof row.interview_analysis_v2 === 'object' && (!row.scoring_summary || row.interview_analysis_v2.version === 'path_a_v1_role_quality_v3')) {
       if (refreshOnMissingPerception) {
         if (!hasInterviewAnalysisV2PerceptionInput(row)) {
           logInterviewAnalysisV2('info', 'skip', { ...logBase, reason: 'missing_perception_context' });
@@ -1185,6 +1186,7 @@ async function maybeGenerateInterviewAnalysisV2({
       unanswered_candidate_questions: row.unanswered_candidate_questions,
       interview_summary: row.interview_summary,
       role_context: roleContext,
+      scoring_summary: row.scoring_summary,
       request_id: requestId || null,
       conversation_id: conversationId || null
     });
@@ -1440,6 +1442,8 @@ async function recordInterviewCompletion({ interview, fresh, requestId, conversa
 }
 
 async function applyTranscriptScoringForInterview({ interview, fresh, transcriptText, requestId, conversationId }) {
+  // New attempts can publish scores only through the authoritative finalizer.
+  if (isQualityInterview({ ...interview, ...fresh })) return { updated: false, substantive: false, reason: 'awaiting_authoritative_finalizer' };
   const transcript = excludeWarmupFromTranscript(transcriptText);
   const substantiveCheck = isSubstantiveTranscript(transcript);
   const transcriptWordCount = transcript ? transcript.split(/\s+/).filter(Boolean).length : 0;
@@ -1522,6 +1526,7 @@ async function applyTranscriptScoringForInterview({ interview, fresh, transcript
       jdText,
       roleContext,
       perceptionScores,
+      scoringVersion: isQualityInterview({ ...interview, ...fresh }) ? QUALITY_VERSION : undefined,
       mode: 'webhook',
       request_id: requestId || null
     });
@@ -2033,9 +2038,12 @@ function queueFinalTranscriptPostProcessing({
     });
   }
 
+  // New attempts capture questions atomically with their authoritative score.
+  if (isQualityInterview(interview)) return;
+
   let questions;
   try {
-    questions = extractCandidateQuestions(excludeWarmupFromTranscriptItems(transcriptItems));
+    questions = extractCandidateQuestionsForInterview(interview, excludeWarmupFromTranscriptItems(transcriptItems));
   } catch {
     console.error('[webhook] final_transcript_post_processing', {
       outcome: 'failed',
@@ -2228,6 +2236,8 @@ async function reconcileFinalTranscript({ body, interview, requestId, conversati
   let transcriptScores = null;
   let interviewSummary = null;
   let scoringPerformed = false;
+  let scoringSummary = null;
+  let scoringDetails = null;
   try {
     scoringPerformed = true;
     if (evidence.ok) {
@@ -2236,13 +2246,16 @@ async function reconcileFinalTranscript({ body, interview, requestId, conversati
       const scored = await scoreInterview({
         transcriptText,
         jdText,
-        roleContext,
+        roleContext: isQualityInterview(interview) ? { ...roleContext, rubric: interview.rubric || roleContext?.rubric } : roleContext,
         perceptionScores: interview.perception_scores || {},
+        scoringVersion: isQualityInterview(interview) ? QUALITY_VERSION : undefined,
         mode: 'webhook',
         request_id: null,
       });
       transcriptScores = scored?.transcript_scores || null;
       interviewSummary = scored?.summary || null;
+      scoringSummary = scored?.scoring_summary || null;
+      scoringDetails = scored?.scoring_details || null;
     } else {
       transcriptScores = {
         overall: null,
@@ -2328,7 +2341,7 @@ async function reconcileFinalTranscript({ body, interview, requestId, conversati
   let finalized;
   try {
     const { data, error } = await supabaseAdmin.rpc(
-      'finalize_interview_final_transcript_reconciliation',
+      isQualityInterview(interview) ? 'finalize_interview_quality_transcript' : 'finalize_interview_final_transcript_reconciliation',
       {
         p_interview_id: interview.id,
         p_provider_conversation_id: String(conversationId),
@@ -2341,6 +2354,10 @@ async function reconcileFinalTranscript({ body, interview, requestId, conversati
         p_evidence_snapshot: evidenceSnapshot,
         p_transcript_scores: transcriptScores,
         p_interview_summary: interviewSummary,
+        ...(isQualityInterview(interview) ? {
+          p_scoring_summary: scoringSummary, p_details: scoringDetails,
+          p_questions: evidence.ok ? extractCandidateQuestionsForInterview(interview, excludeWarmupFromTranscriptItems(transcriptItems)) : [],
+        } : {}),
       },
     );
     if (error) throw error;
@@ -3175,7 +3192,7 @@ async function handleTavusWebhookEvent(req, res) {
     if (isTranscriptionReady) {
       const { data: fresh, error: freshErr } = await supabaseAdmin
         .from('interviews')
-        .select('id, role_id, status, analysis, transcript_scores, transcript, interview_summary, perception_scores, unanswered_candidate_questions')
+        .select('id, role_id, status, analysis, transcript_scores, transcript, interview_summary, perception_scores, unanswered_candidate_questions,interview_quality_version,scoring_summary,updated_at')
         .eq('id', interview.id)
         .maybeSingle();
       if (freshErr) {
@@ -3277,12 +3294,13 @@ async function handleTavusWebhookEvent(req, res) {
       ? freshAfterTranscript.unanswered_candidate_questions
       : interview.unanswered_candidate_questions;
     const needsQuestionCapture =
+      !isQualityInterview({ ...interview, ...freshAfterTranscript }) &&
       transcriptNonEmpty &&
       transcriptForQuestions &&
       isEmptyQuestionList(currentQuestions);
 
     if (needsQuestionCapture) {
-      const questions = extractCandidateQuestions(transcriptForQuestions);
+      const questions = extractCandidateQuestionsForInterview({ ...interview, ...freshAfterTranscript }, transcriptForQuestions);
       unansweredQuestionsCount = questions.length;
       if (questions.length) {
         setImmediate(async () => {
@@ -3323,6 +3341,7 @@ async function handleTavusWebhookEvent(req, res) {
 
     if (
       shouldTriggerAnalysisRun &&
+      !isQualityInterview(interview) &&
       transcriptNonEmpty &&
       shouldTriggerAnalysis(interview.id, requestId)
     ) {
@@ -3346,7 +3365,7 @@ async function handleTavusWebhookEvent(req, res) {
           if (result?.ok) {
             const { data: fresh, error: freshErr } = await supabaseAdmin
               .from('interviews')
-              .select('id, role_id, status, analysis, transcript_scores, transcript, interview_summary, perception_scores')
+              .select('id, role_id, status, analysis, transcript_scores, transcript, interview_summary, perception_scores,interview_quality_version,scoring_summary,updated_at')
               .eq('id', interview.id)
               .maybeSingle();
             if (!freshErr && fresh) {

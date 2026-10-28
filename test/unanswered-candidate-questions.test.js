@@ -13,11 +13,11 @@ const closing = {
 };
 const questionOne = {
   role: 'user',
-  content: 'Could you share a synthetic detail about the role?',
+  content: 'What is the synthetic onboarding sequence for the role?',
 };
 const questionTwo = {
   role: 'user',
-  content: 'What is the synthetic onboarding sequence?',
+  content: 'What is the synthetic training schedule?',
 };
 const answer = {
   role: 'assistant',
@@ -68,7 +68,7 @@ test('multiple candidate questions with responses are independently answered in 
     questionOne,
     answer,
     questionTwo,
-    { role: 'assistant', content: 'The second synthetic response is documented.' },
+    { role: 'assistant', content: 'The synthetic training schedule is documented in the welcome pack.' },
   ]), []);
 });
 
@@ -97,7 +97,7 @@ test('duplicate processing is deterministic and idempotent', () => {
   assert.deepEqual(second, first);
 });
 
-test('a nonempty replica response answers a marker without judging adequacy', () => {
+test('a deferral does not answer a candidate question marker', () => {
   assert.deepEqual(extractCandidateQuestions([
     closing,
     {
@@ -108,7 +108,7 @@ test('a nonempty replica response answers a marker without judging adequacy', ()
       role: 'assistant',
       content: 'I cannot confirm that policy, but I will note it for the hiring manager.',
     },
-  ]), []);
+  ]), ['Could you confirm the synthetic policy?']);
 });
 
 test('a marker without a later replica response remains unanswered', () => {

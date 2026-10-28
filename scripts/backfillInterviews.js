@@ -286,12 +286,14 @@ async function analyzeInterviewTranscriptById(interviewId, opts = {}) {
 
     const { data: row, error } = await supabase
       .from('interviews')
-      .select('id, role_id, transcript, transcript_url, analysis, transcript_scores, interview_summary, perception_scores, status')
+      .select('id, role_id, transcript, transcript_url, analysis, transcript_scores, interview_summary, perception_scores, status, interview_quality_version')
       .eq('id', interviewId)
       .maybeSingle();
     if (error || !row) {
       return { ok: false, error: error?.message || 'interview_not_found', request_id: requestId || null };
     }
+
+    if (row.interview_quality_version === 'role_quality_v3') return { ok: true, skipped: true, reason: 'requires_quality_finalizer', request_id: requestId || null };
 
     const existingTopScores = row.transcript_scores && typeof row.transcript_scores === 'object'
       ? row.transcript_scores
@@ -388,7 +390,7 @@ async function main() {
 
   let query = supabase
     .from('interviews')
-    .select('id, role_id, created_at, transcript, transcript_url, analysis, transcript_scores, interview_summary, perception_scores')
+    .select('id, role_id, created_at, transcript, transcript_url, analysis, transcript_scores, interview_summary, perception_scores, interview_quality_version')
     .neq('client_id', require('../src/services/salesDemo').DEMO_CLIENT_ID)
     .order('created_at', { ascending: true })
     .order('id', { ascending: true })
@@ -411,6 +413,7 @@ async function main() {
   const cursorTime = BACKFILL_CURSOR_CREATED_AT ? Date.parse(BACKFILL_CURSOR_CREATED_AT) : null;
 
   for (const row of rows) {
+    if (row.interview_quality_version === 'role_quality_v3') { skipped += 1; continue; }
     scanned += 1;
 
     if (BACKFILL_CURSOR_CREATED_AT) {

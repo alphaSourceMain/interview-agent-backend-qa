@@ -6,6 +6,8 @@ const { TIMEOUT_PROFILES } = require('../clients/http');
 const OPENAI_REQUEST_TIMEOUT_MS = TIMEOUT_PROFILES.model_completion.requestMs;
 const { excludeWarmupFromTranscript } = require('./warmupExclusion');
 
+const { publicScoringSummary } = require('./interviewQualityScoring');
+
 const SCORE_KEYS = [
   'response_specificity',
   'answer_directness',
@@ -52,7 +54,7 @@ function toPlainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
-function normalizeResult(parsed) {
+function normalizeResult(parsed, scoringSummary) {
   const obj = toPlainObject(parsed);
   const rawScores = toPlainObject(obj.scores);
   const scores = {};
@@ -99,6 +101,12 @@ function normalizeResult(parsed) {
       'Model did not provide evidence for scored analysis.'
     ].slice(0, 8);
   }
+  const quality = publicScoringSummary(scoringSummary);
+  if (quality) {
+    if (!out.evidence_summary || !out.evidence.length) throw new Error('missing_quality_analysis_evidence');
+    out.version = 'path_a_v1_role_quality_v3';
+    out.scores = { ...quality.answer_quality_scores };
+  }
   return out;
 }
 
@@ -131,7 +139,14 @@ function buildPrompt(input) {
     }
   };
 
-  return `You are generating a backend-only v2 interview analysis from reliable end-of-call data.
+  const quality = publicScoringSummary(input.scoring_summary);
+  if (quality) {
+    delete payload.perception_scores;
+    delete payload.perception_analysis_text;
+    payload.authoritative_scoring_summary = quality;
+  }
+
+  let prompt = `You are generating a backend-only v2 interview analysis from reliable end-of-call data.
 Return strict JSON only. Do not include markdown, prose, comments, or extra keys.
 
 Use exactly this JSON shape:
@@ -179,6 +194,10 @@ ${safeJson(payload, {})}
 
 Transcript:
 """${truncate(excludeWarmupFromTranscript(input.transcript), 16000)}"""`;
+  if (quality) prompt = prompt
+    .replace('- Use final Tavus perception only as supporting context.', '- Only transcript content may support this analysis. Perception, emotion and delivery are not inputs. The four numeric scores are authoritative_scoring_summary.answer_quality_scores: reproduce them exactly; explain their evidence, never independently rescore them.')
+    .replace('or signs of scripted/read-aloud delivery already grounded in transcript evidence', 'or explicit content/process evidence of assistance');
+  return prompt;
 }
 
 async function generateInterviewAnalysisV2(input = {}) {
@@ -223,7 +242,7 @@ async function generateInterviewAnalysisV2(input = {}) {
   } catch {
     parsed = {};
   }
-  return normalizeResult(parsed);
+  return normalizeResult(parsed, input.scoring_summary);
 }
 
 module.exports = {

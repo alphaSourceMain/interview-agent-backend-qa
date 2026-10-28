@@ -348,9 +348,7 @@ function buildConversationalContext(
     '- Examples that are NOT live questions include: "I had to ask the manager about the salary for this position.", "I asked my manager if the salary was right.", "I asked the manager if they knew the salary for this position first.", "A customer asked me what the policy was.", "I wondered whether the system would scale.", "Someone asked me what the deadline was.", "I checked whether the spreadsheet was accurate.", "I don\'t know.", and "Design some things in JSON."',
     '- If it is unclear whether the candidate is answering or asking you a question, treat it as an answer and continue the structured interview flow.',
     '- While a structured question is unfinished, if the candidate answer is off-topic but framed as answer content, redirect to the active question rather than treating it as a candidate question. For example, say: "Please focus on the interview question. Can you describe your own experience with that?"',
-    '- After a candidate answers, briefly acknowledge in one short phrase, then ask the next question naturally.',
-    '- Do not score, evaluate, praise excessively, or summarize the answer at length during transitions.',
-    '- Keep transitions varied and brief, such as "Thanks, that helps.", "Got it.", or "That makes sense."',
+    ...require('./interviewDeliveryStyle').INTERVIEW_DELIVERY_STYLE_LINES,
     '- Expand common business/job-title abbreviations when speaking naturally.',
     '- Use these spoken expansions: Sr/SR = Senior, Jr/JR = Junior, VP = Vice President, SVP = Senior Vice President, EVP = Executive Vice President, Dir = Director, Mgr = Manager, Ops = Operations, HR = Human Resources, IT = Information Technology.',
     ...(silenceEngagementOwner === SILENCE_ENGAGEMENT_OWNER_PROMPT ? SILENCE_ENGAGEMENT_PROMPT_LINES : []),
@@ -382,7 +380,7 @@ function buildConversationalContext(
     `- While a structured question is unfinished, if asked about documents, sources, methodology, or scoring, respond with the internal-evaluation refusal sentence above and continue the structured interview.`,
     ...INTERVIEW_CLOSING_PROMPT_LINES,
     '- Never say or imply "we\'ll be in touch", "we will be in touch", a hiring outcome, next-step timing, or future employer contact.',
-    '- Keep a warm, professional tone and keep the interview on track.'
+    '- Keep an attentive, calm, personable and professional tone for every candidate, with brief neutral variety; keep the saved interview on track.'
   );
   if (typeof roleSpecificPrompt === 'string' && roleSpecificPrompt.trim()) {
     lines.push(

@@ -6,6 +6,8 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { OpenAI } = require('openai');
 const analyzeResume = require('../../services/analyzeResume');
+const { scoreInterview } = require('../../services/interviewScoring');
+const { VERSION: QUALITY_VERSION } = require('../../services/interviewQualityScoring');
 const { supabaseAdmin } = require('../../clients/supabase');
 const { checkDuplicateCandidate } = require('../../services/duplicateCandidate');
 const { getRoleInterviewAvailability, syncRoleInterviewLimitNotification } = require('../../services/roleInterviewAvailability');
@@ -895,7 +897,10 @@ router.post('/answers', async (req, res) => {
         });
       }
 
-      const scoring = await scoreTextInterview({ role, answers });
+      const transcript = buildTextInterviewTranscript(answers, rubricQuestions);
+      const scored = await scoreInterview({ transcriptText: transcript, jdText: role.job_description_text || role.description || '',
+        roleContext: { ...role, rubric_questions: rubricQuestions }, scoringVersion: QUALITY_VERSION });
+      const scoring = { interview_score: scored.transcript_scores.overall, summary: scored.summary };
       const summaryNote = scoring.summary
         ? `${TEXT_COMPLETION_NOTE} ${scoring.summary}`.trim()
         : TEXT_COMPLETION_NOTE;
@@ -923,21 +928,15 @@ router.post('/answers', async (req, res) => {
         if (!resumeBreakdown && candResume) resumeBreakdown = candResume;
       }
 
-      const interviewScore = Number.isFinite(Number(scoring.interview_score))
+      const interviewScore = scoring.interview_score != null && Number.isFinite(Number(scoring.interview_score))
         ? clampScore(scoring.interview_score)
         : null;
       const overallScore = (resumeScore != null && interviewScore != null)
         ? clampScore((resumeScore + interviewScore) / 2)
         : null;
       const aiRisk = assessAiAidedRiskFromAnswers(answers);
-      const transcript = buildTextInterviewTranscript(answers, rubricQuestions);
       const unansweredCandidateQuestions = getUnansweredCandidateQuestions({ rubricQuestions, answers });
-      const transcriptScores = {
-        overall: interviewScore,
-        confidence: null,
-        ai_aided_risk: aiRisk.ai_aided_risk,
-        ai_aided_risk_reason: aiRisk.ai_aided_risk_reason,
-      };
+      const transcriptScores = { ...scored.transcript_scores };
       const perceptionScores = {
         mode: 'text',
         unavailable: true,
@@ -973,19 +972,16 @@ router.post('/answers', async (req, res) => {
 
       // The id is read back so the interview can be charged to a credit at most
       // once, however many times this path is retried.
-      const { data: insertedInterview } = await supabaseAdmin.from('interviews').insert({
-        candidate_id: reqRow.candidate_id,
-        role_id: role.id,
-        client_id: role.client_id || null,
-        rubric: role.rubric || null,
-        transcript,
-        transcript_scores: transcriptScores,
-        interview_summary: summaryNote,
-        perception_scores: perceptionScores,
-        unanswered_candidate_questions: unansweredCandidateQuestions,
-        analysis: interviewAnalysis,
-        status: 'completed',
-      }).select('id').maybeSingle();
+      const { data: insertedRows, error: insertError } = await supabaseAdmin.rpc('insert_interview_quality_text', {
+        p_candidate_id: reqRow.candidate_id, p_role_id: role.id, p_client_id: role.client_id || null,
+        p_rubric: role.rubric || null, p_transcript: transcript, p_scores: transcriptScores,
+        p_summary: summaryNote, p_scoring_summary: scored.scoring_summary || null,
+        p_details: scored.scoring_details || null, p_questions: unansweredCandidateQuestions,
+        p_perception: perceptionScores, p_analysis: interviewAnalysis,
+      });
+      if (insertError) throw new Error('text_interview_quality_persistence_failed');
+      const insertedInterview = Array.isArray(insertedRows) ? insertedRows[0] : insertedRows;
+      if (!insertedInterview?.id) throw new Error('text_interview_quality_persistence_missing');
 
       // The one fact billing needs. A text interview is complete the moment it
       // is inserted, so it is stamped here.

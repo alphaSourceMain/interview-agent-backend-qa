@@ -1,3 +1,4 @@
+const { publicScoringSummary } = require('../services/interviewQualityScoring');
 const fs = require('fs');
 const path = require('path');
 const Handlebars = require('handlebars');
@@ -176,6 +177,7 @@ function buildCandidateReportHtml(payload) {
   const renderData = {
     font_css: fontCss,
     advanced: advanced(p.interview_analysis_v2),
+    scoring_summary: publicScoringSummary(p.scoring_summary),
     synthetic_demo: p.synthetic_demo === true,
     reliability_note: nonEmptyString(p.reliability_note),
     date_label: p.created_at && Number.isFinite(Date.parse(p.created_at)) ? new Date(p.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' }) : 'Date unavailable',

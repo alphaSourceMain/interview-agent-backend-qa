@@ -117,7 +117,7 @@ function isQualifyingReplicaResponse(turn, visibleText) {
     !hasExplicitNonFinalState(turn.source);
 }
 
-function extractCandidateQuestions(input) {
+function extractCandidateQuestionsLegacy(input) {
   if (typeof input !== 'string' && !Array.isArray(input)) return [];
 
   const turns = Array.isArray(input)
@@ -165,6 +165,79 @@ function extractCandidateQuestions(input) {
     .slice(0, MAX_UNANSWERED_QUESTIONS);
 }
 
+// Keep old attempts on their original policy. New attempts retain a deferred
+// employer question: a refusal or farewell is not an answer to that question.
+const NON_ANSWER_RE = /\b(?:i (?:do not|don't|cannot|can't|am unable to) (?:have|know|answer|confirm|provide|share)|hiring team can answer|outside the interview|hiring manager can answer|(?:pass|refer|forward|note|record).{0,45}(?:hiring|manager|team)|thank you for your time|ending the session|let['’]s (?:continue|move on))\b/i;
+const INTERNAL_QUESTION_RE = /\b(?:rubric|scoring (?:criteria|weights|rules)|evaluation (?:criteria|dimensions)|internal (?:instructions|evaluation)|hidden (?:rules|instructions)|(?:sample|model|ideal|good|strong) answers?|how (?:am i|are you|will i be) (?:scor|evaluat))\b/i;
+const REPEAT_REQUEST_RE = /\b(?:repeat (?:the |that |your )?question|say (?:that|it) again|repeat that|clarify (?:the |your )?question)\b/i;
+const QUESTION_STOP_WORDS = new Set(('a an the this that these those i me my you your we our it is are was were do does did can could would should will may please tell share give explain detail details more about of in on for to and or with synthetic role question questions').split(' '));
+
+function newCandidateQuestionText(text) {
+  let value = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!value || INTERNAL_QUESTION_RE.test(value) || REPEAT_REQUEST_RE.test(value)) return '';
+  let lead = value;
+  for (let n = 0; n < 8; n += 1) {
+    const next = lead.replace(/^(?:um+|uh+|so|and|also|just|yeah|yes|no|ok(?:ay)?|hey|hi)[,.!\s]+/i, '').trim();
+    if (next === lead) break;
+    lead = next;
+  }
+  if (/^(?:i (?:do not|don't|have no)|none(?: at the moment)?|nothing else|no (?:more |other )?questions?|not (?:right )?now)\b/i.test(lead) && !/\?/.test(lead)) return '';
+  if (/\b(?:i asked|a (?:customer|client) asked|my (?:customer|client|manager) asked|i wondered|i had to ask)\b/i.test(lead) && !/\b(?:i(?:'d| would) like to know|i (?:want|wanted) to know)\b/i.test(lead)) return '';
+  if (!INTERROGATIVE_RE.test(lead) && !value.includes('?') && !/\b(?:i(?:'d| would) like (?:to know|to ask)|i (?:kind of )?(?:just )?want(?:ed)? to know|i(?:'m| am) (?:also )?curious (?:about|if|whether))\b/i.test(lead)) return '';
+  // Provider payloads are bounded; retain a visible truncation rather than
+  // silently discarding a valid long employer question.
+  const chars = [...value];
+  if (chars.length > 1000) value = chars.slice(0, 986).join('') + '… [truncated]';
+  return value;
+}
+
+function topicTokens(text) {
+  return new Set((String(text).toLowerCase().match(/[a-z]{3,}/g) || []).filter(word => !QUESTION_STOP_WORDS.has(word)));
+}
+
+function resolvesQuestion(question, response) {
+  if (NON_ANSWER_RE.test(response) || /^(?:thanks?|thank you|got it|understood|okay|all right)[.!\s]*$/i.test(response)) return false;
+  if (/\bwhat are you doing\b/i.test(question) && /\bconducting (?:the |a )?structured interview\b/i.test(response)) return true;
+  const topics = topicTokens(question), reply = topicTokens(response);
+  const shared = [...topics].filter(word => reply.has(word));
+  // Conservatively keep ambiguous questions. A shared generic term is not
+  // enough to infer an answer; explicit yes/no facts can resolve their topic.
+  return shared.length >= 2 || (shared.some(word => ['remote', 'office', 'salary', 'compensation'].includes(word)) && /\b(?:yes|no|is|are|pays?|paid|range|work)\b/i.test(response));
+}
+
+function extractCandidateQuestions(input) {
+  if (typeof input !== 'string' && !Array.isArray(input)) return [];
+  const turns = Array.isArray(input) ? normalizeArrayTurns(input) : normalizeTextTurns(input);
+  const pending = [];
+  let closing = false;
+  const add = value => {
+    const question = newCandidateQuestionText(value);
+    if (question && !pending.some(item => item.text.toLowerCase() === question.toLowerCase())) pending.push({ text: question, answered: false });
+  };
+  for (const turn of turns) {
+    const visible = stripMarkers(turn.text);
+    if (turn.role === 'replica') {
+      if (isQualifyingReplicaResponse(turn, visible)) {
+        const unresolved = pending.filter(item => !item.answered);
+        // Do not let one response clear several unrelated pending questions.
+        const matches = unresolved.filter(item => resolvesQuestion(item.text, visible));
+        if (matches.length === 1) matches[0].answered = true;
+      }
+      if (CLOSING_QUESTION_RE.test(visible)) closing = true;
+      if (!visible) extractMarkers(turn.text).forEach(add);
+    } else if (turn.role === 'candidate') {
+      extractMarkers(turn.text).forEach(add);
+      if (closing) add(visible);
+    } else {
+      extractMarkers(turn.text).forEach(add);
+    }
+  }
+  return pending.filter(item => !item.answered).map(item => item.text).slice(0, MAX_UNANSWERED_QUESTIONS);
+}
+
 module.exports = {
   extractCandidateQuestions,
+  extractCandidateQuestionsLegacy,
+  extractCandidateQuestionsForInterview: (interview, input) => interview?.interview_quality_version === 'role_quality_v3'
+    ? extractCandidateQuestions(input) : extractCandidateQuestionsLegacy(input),
 };

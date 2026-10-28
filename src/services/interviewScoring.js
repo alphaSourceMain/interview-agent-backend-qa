@@ -8,6 +8,7 @@ const ROLE_RUBRIC_SCORING_VERSION = 'role_rubric_v2';
 const INSUFFICIENT_SUMMARY = 'Interview ended before any substantive responses were recorded.\nEvidence strength: 0%\nAI-aided interview risk: Low';
 const { classifyTranscriptCandidateEvidence } = require('./interviewUtteranceClassifier');
 const { excludeWarmupFromTranscript } = require('./warmupExclusion');
+const { VERSION: QUALITY_VERSION, calculateQualityScore, scoreBand } = require('./interviewQualityScoring');
 
 function clampScore(value) {
   const n = Number(value);
@@ -135,7 +136,7 @@ function normalizeRoleScoringContext(input) {
   };
 }
 
-function normalizeQuestionEvaluations(value, roleContext) {
+function normalizeQuestionEvaluations(value, roleContext, scoringVersion) {
   if (!roleContext || !Array.isArray(roleContext.questions) || !Array.isArray(value)) return [];
   const byOrder = new Map();
   for (const raw of value) {
@@ -160,7 +161,9 @@ function normalizeQuestionEvaluations(value, roleContext) {
     if (!scorable && !processReasons.has(missingReason)) continue;
     if (scorable && processReasons.has(missingReason)) continue;
     const anchor = scorable
-      ? (score < 40 ? 'weak' : score < 60 ? 'adequate' : score < 80 ? 'strong' : 'exceptional')
+      ? (scoringVersion === QUALITY_VERSION
+        ? (score < 60 ? 'weak' : score < 75 ? 'adequate' : score < 90 ? 'strong' : 'exceptional')
+        : (score < 40 ? 'weak' : score < 60 ? 'adequate' : score < 80 ? 'strong' : 'exceptional'))
       : 'unscored';
     const rubricQuestion = roleContext.questions[order - 1];
     byOrder.set(order, {
@@ -222,7 +225,8 @@ function buildInsufficientResult() {
   };
 }
 
-async function scoreInterview({ transcriptText, jdText, roleContext, perceptionScores } = {}) {
+async function scoreInterview({ transcriptText, jdText, roleContext, perceptionScores, scoringVersion } = {}) {
+  const qualityPolicy = scoringVersion === QUALITY_VERSION;
   const substantive = isSubstantiveTranscript(transcriptText);
   if (!substantive.ok) {
     return buildInsufficientResult();
@@ -237,14 +241,15 @@ async function scoreInterview({ transcriptText, jdText, roleContext, perceptionS
   const jdGrounding = typeof jdText === 'string' && jdText.trim()
     ? jdText.trim().slice(0, 6000)
     : '[JD unavailable; evaluate using transcript and rubric alignment only.]';
-  const perception = normalizePerceptionScores(perceptionScores);
+  const perception = qualityPolicy ? {} : normalizePerceptionScores(perceptionScores);
   const normalizedRoleContext = normalizeRoleScoringContext(roleContext);
   const roleRubricBlock = normalizedRoleContext
     ? `Role-specific scoring rubric (authoritative):\n${JSON.stringify(normalizedRoleContext, null, 2)}`
     : 'Role-specific scoring rubric: unavailable. Use the anchored global scale and job description only.';
   const expectedQuestionEvaluationCount = normalizedRoleContext?.questions?.length || 0;
+  if (qualityPolicy && !expectedQuestionEvaluationCount) throw new Error('quality_scoring_role_rubric_required');
 
-  const prompt = `You are evaluating a candidate interview for hiring relevance.
+  let prompt = `You are evaluating a candidate interview for hiring relevance.
 Return ONLY valid JSON with exactly these keys:
 {
   "summary": "3-6 sentences, no bullets",
@@ -326,6 +331,18 @@ BEGIN UNTRUSTED TRANSCRIPT DATA
 ${JSON.stringify(transcript)}
 END UNTRUSTED TRANSCRIPT DATA`;
 
+  if (qualityPolicy) {
+    prompt = prompt
+      .replace(/BEGIN UNTRUSTED PERCEPTION DATA[\s\S]*?END UNTRUSTED PERCEPTION DATA\n\n/, '')
+      .replace('"question_evaluations": [', '"answer_quality_scores": {"response_specificity": 0-100, "answer_directness": 0-100, "answer_consistency": 0-100, "communication_structure": 0-100},\n  "question_evaluations": [')
+      .replace('- Use the full 0-100 scale consistently: weak 0-39, adequate 40-59, strong 60-79, exceptional 80-100.', '- Use realistic job-level anchors: weak/below-baseline 0-59, adequate 60-74, strong 75-89, exceptional 90-100. Adequate means usable baseline evidence for this job; strong means a capable, job-qualified candidate, not perfection.')
+      .replace('- Within each band, use 0/20/35 for absent-to-limited evidence, 45/50/55 for adequate evidence, 65/70/75 for strong evidence, and 85/90/95 for exceptional evidence. Do not cluster scores near 50 merely to be conservative.', '- Use 0 for an explicitly unanswered/refused scored question, 20/40/55 for limited or partial evidence, 62/68/73 for adequate, 78/84/88 for strong, and 92/96/100 for exceptional evidence. One concise, credible, role-relevant example can be strong; do not require repeated wins, unusually large metrics, or a perfect STAR script. A plausible concrete result is sufficient; do not invent one.')
+      .replace('- overall is the rounded arithmetic mean of scorable saved-question scores. The application recomputes this value, so do not apply a separate overall penalty for missing interviewer/process items.', '- overall is round(0.80 * mean of scorable role-question scores + 0.20 * mean of the four answer_quality_scores). Compute both means at full precision and round only the final weighted sum. The application recomputes it. Give the four answer-quality scores using fairly elicited transcript answers only: specificity of examples, directness to the actual question, consistency of claims, and understandable organization. Do not use delivery polish, emotion, accent, gaze, nervousness, camera/audio conditions or AI-aided risk as scoring factors. Do not penalize process/technical/not-asked items; do not reward a refusal as answered evidence.')
+      .replace('- Use perception/non-verbal signals only as secondary supporting evidence.', '- Perception and non-verbal signals are not scoring inputs for this policy.')
+      .replace('- Use perception/non-verbal cues only as secondary corroboration when they align with transcript evidence (never as stand-alone proof), such as:\n  - repeated off-screen eye tracking consistent with reading\n  - unusually fixed gaze to a specific region while giving polished answers\n  - visible read-aloud delivery pattern\n  - mismatch between polished delivery and weak specificity', '- Keep AI-aided risk informational and separate from all scores. Do not infer it from gaze, appearance, emotion, accent, nervousness, voice or delivery. Only cite explicit transcript/content/process evidence, never an unverified claim of misconduct.')
+      .replace('- Keep ai_aided_risk_reason neutral and non-accusatory.', '- Keep ai_aided_risk_reason neutral and non-accusatory. Write the summary from the same question evidence, four quality scores and calibrated overall band. State strengths and gaps consistently with those scores; never compare the candidate to an imaginary perfect person.');
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), OPENAI_REQUEST_TIMEOUT_MS);
   let resp;
@@ -367,12 +384,17 @@ END UNTRUSTED TRANSCRIPT DATA`;
     parsed = {};
   }
 
-  const questionEvaluations = normalizeQuestionEvaluations(parsed.question_evaluations, normalizedRoleContext);
+  const questionEvaluations = normalizeQuestionEvaluations(parsed.question_evaluations, normalizedRoleContext, scoringVersion);
   if (normalizedRoleContext && questionEvaluations.length !== normalizedRoleContext.questions.length) {
     throw new Error('invalid_model_output_question_evaluations');
   }
   const anchoredOverall = averageScorableQuestionScores(questionEvaluations);
-  const overall = normalizedRoleContext ? anchoredOverall : clampScore(parsed.overall);
+  const scoringSummary = qualityPolicy ? calculateQualityScore(questionEvaluations, parsed.answer_quality_scores) : null;
+  if (qualityPolicy && !scoringSummary) {
+    return { ...buildInsufficientResult(), summary: 'Interview score unavailable because no role question was fairly elicited.\nEvidence strength: 0%\nAI-aided interview risk: Low',
+      scoring_version: QUALITY_VERSION, question_evaluations: questionEvaluations, scoring_summary: null, scoring_details: null };
+  }
+  const overall = qualityPolicy ? scoringSummary?.overall ?? null : normalizedRoleContext ? anchoredOverall : clampScore(parsed.overall);
   if (overall === null) throw new Error('invalid_model_output_overall');
   const roleFit = clampScore(parsed.role_fit);
   const technicalStrength = clampScore(parsed.technical_strength);
@@ -391,17 +413,25 @@ END UNTRUSTED TRANSCRIPT DATA`;
   if (!rawSummary) {
     throw new Error('invalid_model_output_summary');
   }
-  const summary = ensureSummaryFooter(rawSummary, { evidenceStrength, risk: aiAidedRisk });
+  const summary = ensureSummaryFooter(qualityPolicy
+    ? `Interview evidence: ${scoreBand(overall)} (${overall}/100). Role answers: ${Number(scoringSummary.role_answers.toFixed(2))}/100 (80%); answer quality: ${Number(scoringSummary.answer_quality.toFixed(2))}/100 (20%). ${rawSummary}`
+    : rawSummary, { evidenceStrength, risk: aiAidedRisk });
 
   return {
     summary,
-    scoring_version: normalizedRoleContext ? ROLE_RUBRIC_SCORING_VERSION : 'generic_v1',
+    scoring_version: qualityPolicy ? QUALITY_VERSION : normalizedRoleContext ? ROLE_RUBRIC_SCORING_VERSION : 'generic_v1',
+    ...(qualityPolicy ? {
+      scoring_summary: scoringSummary,
+      scoring_details: { version: QUALITY_VERSION, anchor_version: 'job_realistic_v3', model: OPENAI_MODEL,
+        rubric: normalizedRoleContext, question_evaluations: questionEvaluations, answer_quality_scores: scoringSummary.answer_quality_scores,
+        weights: scoringSummary.weights, formula: '80% role-answer mean + 20% transcript answer-quality mean' },
+    } : {}),
     question_evaluations: questionEvaluations,
     transcript_scores: {
       overall,
-      role_fit: roleFit ?? overall,
-      technical_strength: normalizedRoleContext ? overall : (technicalStrength ?? overall),
-      communication_quality: communicationQuality ?? overall,
+      role_fit: qualityPolicy ? overall : roleFit ?? overall,
+      technical_strength: qualityPolicy ? overall : normalizedRoleContext ? overall : (technicalStrength ?? overall),
+      communication_quality: qualityPolicy ? overall : communicationQuality ?? overall,
       confidence: evidenceStrength !== null ? evidenceStrength : null,
       ai_aided_risk: aiAidedRisk,
       ai_aided_risk_reason: aiAidedRiskReason

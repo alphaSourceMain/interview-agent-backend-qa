@@ -1,3 +1,4 @@
+const { publicScoringSummary, publicQualityAnalysis } = require('../services/interviewQualityScoring');
 'use strict';
 const { classifyInterviewDisplayState } = require('../services/interviewDisplayState');
 
@@ -72,7 +73,8 @@ function buildCandidateReportPayload({ candidate = {}, interview, role = {}, cli
     reliability_note: suppressed ? 'Insufficient usable interview evidence.' : textInterview ? 'Not applicable for text interviews.' : mediaUnavailable ? 'Media-based signals are unavailable.' : '',
     interview_summary: hasInterview ? summary || 'No interview summary available yet.' : 'Interview not yet completed.',
     unanswered_candidate_questions: hasInterview ? list(interview?.unanswered_candidate_questions) : [],
-    interview_analysis_v2: exposeAdvanced && hasInterview && !suppressed ? advanced(interview?.interview_analysis_v2) : advanced(null),
+    scoring_summary: hasInterview && !suppressed ? publicScoringSummary(interview?.scoring_summary) : null,
+    interview_analysis_v2: exposeAdvanced && hasInterview && !suppressed ? advanced(publicQualityAnalysis(interview?.interview_analysis_v2, interview?.scoring_summary)) : advanced(null),
   };
 }
 module.exports = { buildCandidateReportPayload, score, advanced };

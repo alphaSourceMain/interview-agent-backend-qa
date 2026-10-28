@@ -428,3 +428,13 @@ test('bounded warm-up skip does not report a clean skip when claim release fails
   assert.equal(tracker.generatorCalls, 0);
   assert.equal(tracker.finalizeCalls, 0);
 });
+
+test('v3 with no role score skips the generator and releases bounded analysis ownership',async()=>{
+ const row=baseRow({interview_quality_version:'role_quality_v3',scoring_summary:null,perception_scores:{clarity:95}});
+ assert.deepEqual(analysisV2Eligibility(row),{eligible:false,reason:'quality_score_unavailable'});
+ const {tracker}=makeDb(row);
+ const hash=crypto.createHash('sha256').update(row.transcript).digest('hex');
+ const result=await maybeGenerateInterviewAnalysisV2(analysisInput({boundedTelemetry:true,authoritativeTranscriptClaimVersion:1,authoritativeTranscriptHash:hash}));
+ assert.deepEqual(result,{skipped:true,reason:'quality_score_unavailable'});
+ assert.equal(tracker.generatorCalls,0);assert.equal(tracker.releaseCalls,1);assert.equal(tracker.finalizeCalls,0);
+});

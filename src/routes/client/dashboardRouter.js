@@ -405,7 +405,7 @@ router.get('/rows', requireAuth, withClientScope, async (req, res) => {
         'analysis_url',
         'analysis',
         'perception_scores',
-        'transcript_scores', 'scoring_summary',
+        'transcript_scores', 'scoring_summary', 'interview_quality_version',
         'interview_summary',
         'recording_status',
         'recording_ready_at',
@@ -614,7 +614,8 @@ router.get('/rows', requireAuth, withClientScope, async (req, res) => {
         interview_analysis,
         is_sales_demo: isQa() && c.client_id === DEMO_CLIENT_ID && /^d38ade00-2026-4000-8000-/.test(c.id),
         scoring_summary: publicScoringSummary(iv?.scoring_summary),
-        interview_analysis_v2: (EXPOSE_INTERVIEW_ANALYSIS_V2 || (isQa() && c.client_id === DEMO_CLIENT_ID && /^d38ade00-2026-4000-8000-/.test(c.id))) ? publicQualityAnalysis(parseJsonObject(iv?.interview_analysis_v2), iv?.scoring_summary) : undefined,
+        interview_quality_version: iv?.interview_quality_version === 'role_quality_v3' ? 'role_quality_v3' : null,
+        interview_analysis_v2: (EXPOSE_INTERVIEW_ANALYSIS_V2 || (isQa() && c.client_id === DEMO_CLIENT_ID && /^d38ade00-2026-4000-8000-/.test(c.id))) ? publicQualityAnalysis(parseJsonObject(iv?.interview_analysis_v2), iv?.scoring_summary, iv?.interview_quality_version) : undefined,
         latest_report_url,
         report_generated_at: rep?.created_at || null,
       };
@@ -666,7 +667,7 @@ router.get('/interviews', requireAuth, withClientScope, async (req, res) => {
 
     if (!clientId) return res.status(400).json({ error: 'client_id required' });
 
-    const interviewSelect = 'id, created_at, client_id, candidate_id, role_id, video_url, transcript_url, transcript, analysis_url, resume_score, interview_score, overall_score, resume_analysis, interview_analysis, latest_report_url, report_generated_at, perception_scores, transcript_scores, interview_summary, recording_status, recording_ready_at, unanswered_candidate_questions, scoring_summary' +
+    const interviewSelect = 'id, created_at, client_id, candidate_id, role_id, video_url, transcript_url, transcript, analysis_url, resume_score, interview_score, overall_score, resume_analysis, interview_analysis, latest_report_url, report_generated_at, perception_scores, transcript_scores, interview_summary, recording_status, recording_ready_at, unanswered_candidate_questions, scoring_summary, interview_quality_version' +
       (EXPOSE_INTERVIEW_ANALYSIS_V2 ? ', interview_analysis_v2' : '');
 
     const { data: rows, error: iErr } = await supabase
@@ -778,7 +779,8 @@ router.get('/interviews', requireAuth, withClientScope, async (req, res) => {
           summary: interviewSummary
         },
         scoring_summary: publicScoringSummary(r?.scoring_summary),
-        interview_analysis_v2: EXPOSE_INTERVIEW_ANALYSIS_V2 ? publicQualityAnalysis(parseJsonObject(r?.interview_analysis_v2), r?.scoring_summary) : undefined,
+        interview_quality_version: r?.interview_quality_version === 'role_quality_v3' ? 'role_quality_v3' : null,
+        interview_analysis_v2: EXPOSE_INTERVIEW_ANALYSIS_V2 ? publicQualityAnalysis(parseJsonObject(r?.interview_analysis_v2), r?.scoring_summary, r?.interview_quality_version) : undefined,
         latest_report_url: r.latest_report_url || null,
         report_generated_at: r.report_generated_at || null,
       };

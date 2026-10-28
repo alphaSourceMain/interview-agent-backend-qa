@@ -53,9 +53,9 @@ function publicScoringSummary(value) {
     scorable_questions: Number.isInteger(value.scorable_questions) && value.scorable_questions > 0 ? value.scorable_questions : null,
     unscored_questions: Number.isInteger(value.unscored_questions) && value.unscored_questions >= 0 ? value.unscored_questions : null };
 }
-function publicQualityAnalysis(value, summary) {
+function publicQualityAnalysis(value, summary, version) {
   const quality = publicScoringSummary(summary);
-  if (!quality) return value || null;
+  if (!quality) return version === VERSION ? null : value || null;
   const current = value && value.version === 'path_a_v1_role_quality_v3' ? value : {};
   return { ...current, version: 'path_a_v1_role_quality_v3', scores: { ...quality.answer_quality_scores } };
 }

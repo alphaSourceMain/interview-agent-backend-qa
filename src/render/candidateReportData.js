@@ -74,7 +74,7 @@ function buildCandidateReportPayload({ candidate = {}, interview, role = {}, cli
     interview_summary: hasInterview ? summary || 'No interview summary available yet.' : 'Interview not yet completed.',
     unanswered_candidate_questions: hasInterview ? list(interview?.unanswered_candidate_questions) : [],
     scoring_summary: hasInterview && !suppressed ? publicScoringSummary(interview?.scoring_summary) : null,
-    interview_analysis_v2: exposeAdvanced && hasInterview && !suppressed ? advanced(publicQualityAnalysis(interview?.interview_analysis_v2, interview?.scoring_summary)) : advanced(null),
+    interview_analysis_v2: exposeAdvanced && hasInterview && !suppressed ? advanced(publicQualityAnalysis(interview?.interview_analysis_v2, interview?.scoring_summary, interview?.interview_quality_version)) : advanced(null),
   };
 }
 module.exports = { buildCandidateReportPayload, score, advanced };

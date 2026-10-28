@@ -20,7 +20,7 @@ test('new scorer recomputes 80/20, canonical fields agree, perception and risk c
  assert.equal(Object.keys(result.transcript_scores).length,7);
  assert.match(result.summary,/Strong \(81\/100\)/);
  const prompt=request().messages[1].content;
- assert.match(prompt,/realistic job-level anchors/);assert.doesNotMatch(prompt,/private-emotion-marker|"clarity":1|off-screen eye tracking/);
+ assert.match(prompt,/realistic job-level anchors/);assert.doesNotMatch(prompt,/private-emotion-marker|"clarity":1|off-screen eye tracking|not enough by themselves|scripted\/read-aloud|perception data, and|AI-aided delivery patterns/);
  });
 });
 test('missing quality fails closed; an unasked question does not penalize the candidate',async()=>{
@@ -45,4 +45,12 @@ test('new analysis omits perception and preserves the authoritative four values'
 test('fractional means retain precision and round only the final sum',()=>{
  const result=calculateQualityScore([80,81,82].map(score=>({scorable:true,score})),{...quality,response_specificity:81});
  assert.equal(result.answer_quality,79.25);assert.equal(result.overall,81);
+});
+
+test('v3 without an authoritative score strips perception and cannot publish independent quality numbers',()=>{
+ const prompt=buildInterviewAnalysisV2Prompt({transcript,interview_quality_version:VERSION,scoring_summary:null,perception_scores:{clarity:99},perception_analysis_text:'PRIVATE_PERCEPTION'});
+ assert.doesNotMatch(prompt,/PRIVATE_PERCEPTION|"perception_scores"|Use final Tavus perception/);
+ assert.throws(()=>normalizeInterviewAnalysisV2Result({scores:{response_specificity:90},evidence:['example'],evidence_summary:'example'},null,VERSION),/quality_score_unavailable/);
+ const {publicQualityAnalysis}=require('../src/services/interviewQualityScoring');
+ assert.equal(publicQualityAnalysis({scores:{response_specificity:90}},null,VERSION),null);
 });

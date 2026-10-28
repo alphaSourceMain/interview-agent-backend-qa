@@ -6,7 +6,7 @@ const { TIMEOUT_PROFILES } = require('../clients/http');
 const OPENAI_REQUEST_TIMEOUT_MS = TIMEOUT_PROFILES.model_completion.requestMs;
 const { excludeWarmupFromTranscript } = require('./warmupExclusion');
 
-const { publicScoringSummary } = require('./interviewQualityScoring');
+const { VERSION, publicScoringSummary } = require('./interviewQualityScoring');
 
 const SCORE_KEYS = [
   'response_specificity',
@@ -54,7 +54,8 @@ function toPlainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
-function normalizeResult(parsed, scoringSummary) {
+function normalizeResult(parsed, scoringSummary, scoringVersion) {
+  if (scoringVersion === VERSION && !publicScoringSummary(scoringSummary)) throw new Error('quality_score_unavailable');
   const obj = toPlainObject(parsed);
   const rawScores = toPlainObject(obj.scores);
   const scores = {};
@@ -140,7 +141,8 @@ function buildPrompt(input) {
   };
 
   const quality = publicScoringSummary(input.scoring_summary);
-  if (quality) {
+  const qualityPolicy = input.interview_quality_version === VERSION || !!quality;
+  if (qualityPolicy) {
     delete payload.perception_scores;
     delete payload.perception_analysis_text;
     payload.authoritative_scoring_summary = quality;
@@ -194,7 +196,7 @@ ${safeJson(payload, {})}
 
 Transcript:
 """${truncate(excludeWarmupFromTranscript(input.transcript), 16000)}"""`;
-  if (quality) prompt = prompt
+  if (qualityPolicy) prompt = prompt
     .replace('- Use final Tavus perception only as supporting context.', '- Only transcript content may support this analysis. Perception, emotion and delivery are not inputs. The four numeric scores are authoritative_scoring_summary.answer_quality_scores: reproduce them exactly; explain their evidence, never independently rescore them.')
     .replace('or signs of scripted/read-aloud delivery already grounded in transcript evidence', 'or explicit content/process evidence of assistance');
   return prompt;
@@ -203,6 +205,7 @@ Transcript:
 async function generateInterviewAnalysisV2(input = {}) {
   const transcript = excludeWarmupFromTranscript(input.transcript);
   if (!transcript) throw new Error('missing_transcript');
+  if (input.interview_quality_version === VERSION && !publicScoringSummary(input.scoring_summary)) throw new Error('quality_score_unavailable');
   if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY missing');
 
   const controller = new AbortController();
@@ -242,7 +245,7 @@ async function generateInterviewAnalysisV2(input = {}) {
   } catch {
     parsed = {};
   }
-  return normalizeResult(parsed, input.scoring_summary);
+  return normalizeResult(parsed, input.scoring_summary, input.interview_quality_version);
 }
 
 module.exports = {

@@ -109,3 +109,16 @@ test('legacy reports without integrity evidence fail closed as unassessed', asyn
   assert.equal(result.normalizedCandidateSnapshot.resume_integrity.status, 'unassessed');
   assert.ok(result.nonMatchReasons.some((reason) => reason.code === 'resume_integrity_unassessed'));
 });
+
+test('new-policy automation uses the validated canonical interview and recalculates overall despite a stale report', async()=>{
+ const {calculateQualityScore}=require('../src/services/interviewQualityScoring');
+ const scores=Object.fromEntries(['response_specificity','answer_directness','answer_consistency','communication_structure'].map(k=>[k,80]));
+ const db=fakeDb(cleanIntegrity());db.reports[0].interview_score=10;db.reports[0].overall_score=49;
+ const summary=calculateQualityScore([{scorable:true,score:70}],scores);
+ db.interviews=[{id:'interview-1',transcript_scores:{overall:72},interview_summary:'Concrete role example.',scoring_summary:summary,interview_quality_version:'role_quality_v3'}];
+ const r=await evaluateCandidateAutomation({...baseInput,db,criteriaConfig:{min_interview_score:70,min_overall_score:75}});
+ assert.equal(r.normalizedCandidateSnapshot.interview_score,72);assert.equal(r.normalizedCandidateSnapshot.overall_score,80);assert.equal(r.matched,true);
+ db.interviews[0].scoring_summary=null;
+ const missing=await evaluateCandidateAutomation({...baseInput,db,criteriaConfig:{min_interview_score:70}});
+ assert.equal(missing.normalizedCandidateSnapshot.interview_score,null);assert.equal(missing.normalizedCandidateSnapshot.overall_score,null);assert.equal(missing.matched,false);
+});

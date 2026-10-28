@@ -333,6 +333,8 @@ END UNTRUSTED TRANSCRIPT DATA`;
 
   if (qualityPolicy) {
     prompt = prompt
+      .replace('job description, role rubric, perception data, and transcript', 'job description, role rubric, and transcript')
+      .replace(/- ai_aided_risk is a conservative heuristic[\s\S]*?- Do not treat strong articulation alone as evidence of AI aid\./, '- AI-aided risk is informational only. Describe only explicit transcript content or process evidence of assistance; never infer assistance from answer polish, delivery, gaze, nervousness, pauses, accent, voice, emotion, or appearance. Generic or rehearsed wording alone is not proof. Use low when no concrete content/process concern exists; medium for an uncertain concrete concern; high only for clear explicit content/process evidence. This label never changes any score.')
       .replace(/BEGIN UNTRUSTED PERCEPTION DATA[\s\S]*?END UNTRUSTED PERCEPTION DATA\n\n/, '')
       .replace('"question_evaluations": [', '"answer_quality_scores": {"response_specificity": 0-100, "answer_directness": 0-100, "answer_consistency": 0-100, "communication_structure": 0-100},\n  "question_evaluations": [')
       .replace('- Use the full 0-100 scale consistently: weak 0-39, adequate 40-59, strong 60-79, exceptional 80-100.', '- Use realistic job-level anchors: weak/below-baseline 0-59, adequate 60-74, strong 75-89, exceptional 90-100. Adequate means usable baseline evidence for this job; strong means a capable, job-qualified candidate, not perfection.')

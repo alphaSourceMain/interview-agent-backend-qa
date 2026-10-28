@@ -1,3 +1,4 @@
+const { VERSION: QUALITY_VERSION, publicScoringSummary } = require('./interviewQualityScoring');
 'use strict';
 
 const crypto = require('crypto');
@@ -237,7 +238,7 @@ async function loadEvaluationInputs({ db, clientId, roleId, candidateId }) {
 
   const { data: interviews, error: interviewErr } = await db
     .from('interviews')
-    .select('id,created_at,client_id,candidate_id,role_id,transcript_scores,interview_summary')
+    .select('id,created_at,client_id,candidate_id,role_id,transcript_scores,interview_summary,scoring_summary,interview_quality_version')
     .eq('client_id', clientId)
     .eq('candidate_id', candidateId)
     .eq('role_id', roleId)
@@ -332,13 +333,16 @@ async function evaluateCandidateAutomation(input = {}) {
   const rawResumeScore = reportResumeScore !== null ? reportResumeScore : getResumeAnalysisScore(candidate);
   const resumeScore = resumeIntegrity.automation_eligible ? rawResumeScore : null;
   const transcriptOverall = contentSufficiency.insufficient_content ? null : getTranscriptOverall(latestInterview);
-  const interviewScore = reportInterviewScore !== null ? reportInterviewScore : transcriptOverall;
+  const qualityPolicy = latestInterview?.interview_quality_version === QUALITY_VERSION;
+  const quality = publicScoringSummary(latestInterview?.scoring_summary);
+  const interviewScore = qualityPolicy ? (quality && transcriptOverall === quality.overall ? quality.overall : null)
+    : reportInterviewScore !== null ? reportInterviewScore : transcriptOverall;
   const calculatedOverallScore =
     Number.isFinite(resumeScore) && Number.isFinite(interviewScore)
       ? Math.round((clampScore(resumeScore) + clampScore(interviewScore)) / 2)
       : null;
   const overallScore = resumeIntegrity.automation_eligible
-    ? (reportOverallScore !== null ? reportOverallScore : calculatedOverallScore)
+    ? (qualityPolicy ? calculatedOverallScore : reportOverallScore !== null ? reportOverallScore : calculatedOverallScore)
     : null;
 
   const normalizedCandidateSnapshot = {

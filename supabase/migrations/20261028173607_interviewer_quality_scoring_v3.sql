@@ -108,6 +108,12 @@ create or replace function public.apply_interview_quality_score(
 ) returns table(outcome text) language plpgsql security definer set search_path = '' as $$
 declare v_previous public.interviews%rowtype; v_questions text[];
 begin
+ -- Same lock order as authoritative finalization. Never rescore an owned worker.
+ perform 1 from private.interview_final_transcript_reconciliation_claims where interview_id=p_interview_id for update;
+ if exists(select 1 from private.interview_final_transcript_reconciliation_claims where interview_id=p_interview_id
+   and (processing_state='claimed' or analysis_processing_state='claimed')) then
+   return query select 'superseded'::text; return;
+ end if;
  select i.* into v_previous from public.interviews i where i.id=p_interview_id for update;
  if not found then return query select 'not_found'::text; return; end if;
  if p_expected_transcript_hash !~ '^[a-f0-9]{64}$'
@@ -125,7 +131,9 @@ begin
  if p_questions is null or (private.is_valid_interview_unanswered_questions(p_questions) is not true and p_questions is distinct from '[]'::jsonb) then
    raise exception 'invalid_quality_questions';
  end if;
- if p_analysis_v2 is not null and private.is_valid_interview_analysis_v2(p_analysis_v2) is not true then raise exception 'invalid_quality_analysis'; end if;
+ if p_analysis_v2 is not null and (private.is_valid_interview_analysis_v2(p_analysis_v2) is not true
+   or p_analysis_v2->>'version' is distinct from 'path_a_v1_role_quality_v3'
+   or p_analysis_v2->'scores' is distinct from p_scoring_summary->'answer_quality_scores') then raise exception 'invalid_quality_analysis'; end if;
  select coalesce(array_agg(value #>> '{}' order by ordinality),array[]::text[]) into v_questions
  from jsonb_array_elements(p_questions) with ordinality as q(value,ordinality);
  perform private.record_interview_quality_history(v_previous,p_expected_transcript_hash,p_scores,p_summary,p_scoring_summary,p_details);

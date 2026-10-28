@@ -13,7 +13,7 @@ const { analyzeInterviewTranscriptById } = require('../../../scripts/backfillInt
 const { generateInterviewAnalysisV2 } = require('../interviewAnalysisV2');
 const { INSUFFICIENT_SUMMARY, isSubstantiveTranscript, scoreInterview } = require('../interviewScoring');
 const { markInterviewCompleted } = require('../interviewCompletion');
-const { VERSION: QUALITY_VERSION, isQualityInterview } = require('../interviewQualityScoring');
+const { VERSION: QUALITY_VERSION, isQualityInterview, publicScoringSummary } = require('../interviewQualityScoring');
 const { transcriptCompletionTransition } = require('../interviewLifecycle');
 const { classifyCandidateUtterance } = require('../interviewUtteranceClassifier');
 const { excludeWarmupFromTranscript, excludeWarmupFromTranscriptItems } = require('../warmupExclusion');
@@ -671,6 +671,7 @@ function hasNoSubstantiveInterviewSummary(summary) {
 }
 
 function analysisV2Eligibility(row) {
+  if (isQualityInterview(row) && !publicScoringSummary(row.scoring_summary)) return { eligible: false, reason: 'quality_score_unavailable' };
   const evaluativeTranscript = excludeWarmupFromTranscript(row?.transcript);
   if (!evaluativeTranscript) {
     return { eligible: false, reason: 'missing_evaluative_transcript' };
@@ -1079,7 +1080,7 @@ async function maybeGenerateInterviewAnalysisV2({
   try {
     const { data: row, error } = await supabaseAdmin
       .from('interviews')
-      .select('id,candidate_id,role_id,status,failure_code,conversation_progress_state,has_substantive_response,substantive_response_count,candidate_utterance_count,transcript,transcript_scores,perception_scores,perception_analysis_text,unanswered_candidate_questions,interview_summary,interview_analysis_v2,scoring_summary')
+      .select('id,candidate_id,role_id,status,failure_code,conversation_progress_state,has_substantive_response,substantive_response_count,candidate_utterance_count,transcript,transcript_scores,perception_scores,perception_analysis_text,unanswered_candidate_questions,interview_summary,interview_analysis_v2,scoring_summary,interview_quality_version')
       .eq('id', interview.id)
       .maybeSingle();
     if (error || !row) {
@@ -1187,6 +1188,7 @@ async function maybeGenerateInterviewAnalysisV2({
       interview_summary: row.interview_summary,
       role_context: roleContext,
       scoring_summary: row.scoring_summary,
+      interview_quality_version: row.interview_quality_version,
       request_id: requestId || null,
       conversation_id: conversationId || null
     });

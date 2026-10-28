@@ -5,7 +5,7 @@ const { readKnowledgeFiles, buildSupportVoicePrompt, MAX_PROMPT_BYTES } = requir
 
 test('support knowledge includes current membership terms and retains audience-specific answers', () => {
   const { snapshot, version } = readKnowledgeFiles();
-  assert.equal(version, '2026-10-23.1');
+  assert.equal(version, '2026-10-28.1');
   const items = [...snapshot.dashboard.faq_sections.flatMap(s => s.items),
     ...snapshot.public.faq_sections.flatMap(s => s.items), ...snapshot.public.support_questions];
   const pairs = items.map(q => JSON.stringify([q.question, q.answer]));
